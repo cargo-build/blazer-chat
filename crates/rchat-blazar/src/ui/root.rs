@@ -3,8 +3,8 @@
 //! push commands back.
 
 use gpui::{
-    Context, Entity, FocusHandle, Focusable, FontWeight, ListAlignment, ListState, SharedString,
-    Window, div, img, list, prelude::*, px, rgb, uniform_list,
+    Context, Entity, FocusHandle, Focusable, FontWeight, SharedString, Window, div, img,
+    prelude::*, px, rgb, uniform_list,
 };
 use std::sync::{Arc, Mutex};
 
@@ -28,8 +28,6 @@ pub(crate) struct ChatRoot {
     focus: FocusHandle,
     /// Render views of the active room's messages, rebuilt on events.
     views: Vec<MessageView>,
-    /// Virtualized pane state: only visible rows materialize.
-    messages_list: ListState,
     /// Local search box (the pane shows results while a query is set).
     search: Entity<TextInput>,
     /// `(room_id, msg_id)` while the composer edits an existing message.
@@ -82,7 +80,6 @@ impl ChatRoot {
             composer: cx.new(|cx| TextInput::new("Message…", cx)),
             focus: cx.focus_handle(),
             views: Vec::new(),
-            messages_list: ListState::new(0, ListAlignment::Bottom, px(64.)).measure_all(),
             search: cx.new(|cx| TextInput::new("Search…", cx)),
             editing: None,
         }
@@ -126,13 +123,6 @@ impl ChatRoot {
                     .collect(),
             })
             .collect();
-        self.messages_list.reset(self.views.len());
-        // Pin to the newest message; unmeasured heights after a reset
-        // otherwise anchor the Bottom-aligned list at a zero viewport.
-        if !self.views.is_empty() {
-            self.messages_list
-                .scroll_to_reveal_item(self.views.len() - 1);
-        }
     }
 
     /// Mirrors the entity into the control-socket snapshot. The UI thread
@@ -317,70 +307,71 @@ impl gpui::Render for ChatRoot {
         // rows, pins to the newest while the user is at the bottom
         // (ListAlignment::Bottom), and resets when the count changes.
         let this = cx.entity();
-        let state = self.messages_list.clone();
-        let messages = list(state, move |index, _window, cx| {
-            let root = this.read(cx);
-
-            let view = &root.views[index];
-            let room_id = view.room_id.clone();
-            let msg_id = view.id.clone();
-            let edit_text = view.text.clone();
-            let editing_this = matches!(
-                root.editing.as_ref(),
-                Some((room, msg)) if *room == room_id && *msg == msg_id
-            );
-            let badges = div()
-                .flex()
-                .flex_wrap()
-                .gap_1()
-                .children(view.reactions.iter().map(|(name, count)| {
-                    div()
-                        .px_1()
-                        .rounded_xs()
-                        .bg(rgb(PANEL))
-                        .text_xs()
-                        .text_color(rgb(MUTED))
-                        .child(SharedString::from(format!("{name} ×{count}")))
-                }));
-            div()
-                .id(SharedString::from(format!("msg-{msg_id}")))
-                .group("msg")
-                .flex()
-                .gap_2()
-                .items_start()
-                .child(
-                    div()
-                        .flex_none()
-                        .text_sm()
-                        .text_color(rgb(MUTED))
-                        .child(SharedString::from(view.ts.clone())),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_sm()
-                        .text_color(rgb(MUTED))
-                        .child(SharedString::from(view.sender.clone())),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(message_element(view))
-                        .child(badges),
-                )
-                .child(action_strip(ActionContext {
-                    this: this.clone(),
-                    room_id,
-                    msg_id,
-                    edit_text,
-                    editing_this,
-                }))
-                .into_any_element()
-        });
+        let messages = div()
+            .id("messages")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .overflow_y_scroll()
+            .children(self.views.iter().map(|view| {
+                let room_id = view.room_id.clone();
+                let msg_id = view.id.clone();
+                let edit_text = view.text.clone();
+                let editing_this = matches!(
+                    self.editing.as_ref(),
+                    Some((room, msg)) if *room == room_id && *msg == msg_id
+                );
+                let badges = div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .children(view.reactions.iter().map(|(name, count)| {
+                        div()
+                            .px_1()
+                            .rounded_xs()
+                            .bg(rgb(PANEL))
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(SharedString::from(format!("{name} ×{count}")))
+                    }));
+                div()
+                    .id(SharedString::from(format!("msg-{msg_id}")))
+                    .group("msg")
+                    .flex()
+                    .gap_2()
+                    .items_start()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .child(SharedString::from(view.ts.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .child(SharedString::from(view.sender.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(message_element(view))
+                            .child(badges),
+                    )
+                    .child(action_strip(ActionContext {
+                        this: this.clone(),
+                        room_id,
+                        msg_id,
+                        edit_text,
+                        editing_this,
+                    }))
+            }));
 
         // Search strip: a query switches the pane to local results.
         let search_this = cx.entity();
