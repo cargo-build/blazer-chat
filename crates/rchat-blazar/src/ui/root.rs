@@ -4,7 +4,7 @@
 
 use gpui::{
     Context, Entity, FocusHandle, Focusable, FontWeight, SharedString, Window, div, img,
-    prelude::*, px, rgb,
+    prelude::*, px, rgb, uniform_list,
 };
 use std::sync::{Arc, Mutex};
 
@@ -26,6 +26,16 @@ pub(crate) struct ChatRoot {
     snapshot: Arc<Mutex<Option<UiSnapshot>>>,
     pub(crate) composer: Entity<TextInput>,
     focus: FocusHandle,
+    /// Render views of the active room's messages, rebuilt on events.
+    views: Vec<MessageView>,
+}
+
+/// One precomputed message row of the active room: the pane renders
+/// these without re-parsing markdown per frame.
+struct MessageView {
+    ts: String,
+    sender: String,
+    lines: Vec<Vec<Span>>,
 }
 
 impl ChatRoot {
@@ -60,6 +70,7 @@ impl ChatRoot {
             snapshot,
             composer: cx.new(|cx| TextInput::new("Message…", cx)),
             focus: cx.focus_handle(),
+            views: Vec::new(),
         }
     }
 
@@ -68,8 +79,31 @@ impl ChatRoot {
         if let Some(command) = follow_up {
             let _ = self.commands.try_send(command);
         }
+        // Render data derives in the entity, never in render: the pane only
+        // maps the precomputed spans to elements.
+        self.rebuild_views();
         self.mirror();
         cx.notify();
+    }
+
+    /// Re-parses the active room's messages into render views (markdown
+    /// spans with emoji paths resolved).
+    fn rebuild_views(&mut self) {
+        let emoji = &self.state.emoji;
+        self.views = self
+            .state
+            .active_messages()
+            .iter()
+            .map(|message| MessageView {
+                ts: message.ts.split('T').nth(1).unwrap_or_default().to_owned(),
+                sender: message.sender.clone(),
+                lines: message
+                    .text
+                    .lines()
+                    .map(|line| markdown::parse(line, &|name| emoji.get(name).cloned()))
+                    .collect(),
+            })
+            .collect();
     }
 
     /// Mirrors the entity into the control-socket snapshot. The UI thread
@@ -146,31 +180,35 @@ impl gpui::Render for ChatRoot {
             )
         });
 
-        let rooms = div()
-            .id("rooms")
-            .flex()
-            .flex_col()
-            .gap_1()
-            .overflow_y_scroll()
-            .children(self.state.rooms.iter().map(|room| {
-                let room_id = room.id.clone();
-                div()
-                    .id(SharedString::from(room.id.clone()))
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .text_sm()
-                    .cursor_pointer()
-                    .when(
-                        self.state.active_room.as_deref() == Some(room.id.as_str()),
-                        |row| row.bg(rgb(ACCENT)),
-                    )
-                    .hover(|style| style.bg(rgb(BORDER)))
-                    .on_click(
-                        cx.listener(move |chat, _, _, cx| chat.open_room(room_id.clone(), cx)),
-                    )
-                    .child(SharedString::from(room.name.clone()))
-            }));
+        // uniform_list materializes only the visible rows — the room list
+        // runs into the hundreds on real servers.
+        let this = cx.entity();
+        let active = self.state.active_room.clone();
+        let room_count = self.state.rooms.len();
+        let rooms = uniform_list("rooms", room_count, move |range, _window, cx| {
+            let root = this.read(cx);
+            range
+                .map(|index| {
+                    let room = &root.state.rooms[index];
+                    let room_id = room.id.clone();
+                    let selected = active.as_deref() == Some(room.id.as_str());
+                    let this = this.clone();
+                    div()
+                        .id(SharedString::from(room.id.clone()))
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_sm()
+                        .cursor_pointer()
+                        .when(selected, |row| row.bg(rgb(ACCENT)))
+                        .hover(|style| style.bg(rgb(BORDER)))
+                        .on_click(move |_, _, cx| {
+                            this.update(cx, |chat, cx| chat.open_room(room_id.clone(), cx));
+                        })
+                        .child(SharedString::from(room.name.clone()))
+                })
+                .collect::<Vec<_>>()
+        });
 
         let messages = div()
             .id("messages")
@@ -178,23 +216,25 @@ impl gpui::Render for ChatRoot {
             .flex_col()
             .gap_1()
             .overflow_y_scroll()
-            .children(self.state.active_messages().iter().map(|message| {
+            .children(self.views.iter().map(|view| {
                 div()
                     .flex()
                     .gap_2()
-                    .child(div().flex_none().text_sm().text_color(rgb(MUTED)).child(
-                        SharedString::from(
-                            message.ts.split('T').nth(1).unwrap_or_default().to_owned(),
-                        ),
-                    ))
                     .child(
                         div()
                             .flex_none()
                             .text_sm()
                             .text_color(rgb(MUTED))
-                            .child(SharedString::from(message.sender.clone())),
+                            .child(SharedString::from(view.ts.clone())),
                     )
-                    .child(message_body(&message.text, &self.state.emoji))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .child(SharedString::from(view.sender.clone())),
+                    )
+                    .child(message_element(view))
             }));
 
         div()
@@ -260,13 +300,14 @@ impl gpui::Render for ChatRoot {
 /// One message body: the text split into lines (newlines preserved), each
 /// line parsed into markdown spans and laid out as a wrapping row so inline
 /// emoji images flow with the text.
-fn message_body(text: &str, emoji: &std::collections::BTreeMap<String, String>) -> gpui::Div {
-    let lines: Vec<gpui::Div> = text
-        .lines()
-        .map(|line| {
+fn message_element(view: &MessageView) -> gpui::Div {
+    let lines: Vec<gpui::Div> = view
+        .lines
+        .iter()
+        .map(|spans| {
             let mut row = div().flex().flex_wrap().items_center();
-            for span in markdown::parse(line, &|name| emoji.get(name).cloned()) {
-                row = row.child(span_element(span));
+            for span in spans {
+                row = row.child(span_element(span.clone()));
             }
             row
         })

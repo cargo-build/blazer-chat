@@ -9,20 +9,15 @@
 //! (`$XDG_RUNTIME_DIR/rchat-blazar.sock`) so background tooling can drive and
 //! verify the app without the compositor.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver, Sender, unbounded};
-use serde::{Deserialize, Serialize};
-use tako::body::TakoBody;
-use tako::extractors::json::Json as JsonExtractor;
-use tako::responder::Responder;
-use tako::router::Router;
-use tako::types::Response;
-use tako::{CompioServer, StatusCode, header};
+use serde::Serialize;
 
-use crate::rc::{DdpLive, LiveCommand, Msg, RcClient, RcError, RcSettings, Room, websocket_url};
+use crate::control;
+use crate::rc::{LiveCommand, Msg, RcClient, RcError, RcSettings, Room};
 use crate::store::Store;
+use crate::tasks::{spawn_emoji, spawn_live};
 
 /// What the UI (or the control socket) asks the application to do.
 pub enum ChatCommand {
@@ -243,100 +238,8 @@ async fn drive(
         }
     }
 
-    let mut control = Router::new();
-    control.get("/state", {
-        let snapshot = Arc::clone(&snapshot);
-        move || {
-            let snapshot = Arc::clone(&snapshot);
-            async move { JsonBody(state_json(&snapshot)) }
-        }
-    });
-    control.post("/login", {
-        let self_commands = self_commands.clone();
-        move |JsonExtractor(body): JsonExtractor<CredentialsBody>| {
-            let self_commands = self_commands.clone();
-            async move {
-                if enqueue(
-                    &self_commands,
-                    ChatCommand::Login {
-                        user: body.user,
-                        password: body.password,
-                    },
-                ) {
-                    (StatusCode::OK, JsonBody(r#"{"queued":true}"#.to_owned()))
-                } else {
-                    unavailable(r#"{"queued":false}"#)
-                }
-            }
-        }
-    });
-    control.post("/refresh", {
-        let self_commands = self_commands.clone();
-        move || {
-            let self_commands = self_commands.clone();
-            async move {
-                if enqueue(&self_commands, ChatCommand::RefreshRooms) {
-                    (StatusCode::OK, JsonBody(r#"{"queued":true}"#.to_owned()))
-                } else {
-                    unavailable(r#"{"queued":false}"#)
-                }
-            }
-        }
-    });
-    control.post("/open", {
-        let self_commands = self_commands.clone();
-        move |JsonExtractor(body): JsonExtractor<RoomBody>| {
-            let self_commands = self_commands.clone();
-            async move {
-                if enqueue(&self_commands, ChatCommand::OpenRoom { room_id: body.room }) {
-                    (StatusCode::OK, JsonBody(r#"{"queued":true}"#.to_owned()))
-                } else {
-                    unavailable(r#"{"queued":false}"#)
-                }
-            }
-        }
-    });
-    control.post("/send", {
-        let self_commands = self_commands.clone();
-        move |JsonExtractor(body): JsonExtractor<SendBody>| {
-            let self_commands = self_commands.clone();
-            async move {
-                if enqueue(
-                    &self_commands,
-                    ChatCommand::Send {
-                        room_id: body.room,
-                        text: body.text,
-                    },
-                ) {
-                    (StatusCode::OK, JsonBody(r#"{"queued":true}"#.to_owned()))
-                } else {
-                    unavailable(r#"{"queued":false}"#)
-                }
-            }
-        }
-    });
-    control.post("/quit", {
-        let events = events.clone();
-        move || {
-            let events = events.clone();
-            async move {
-                if enqueue(&events, ChatEvent::Quit) {
-                    (StatusCode::OK, JsonBody(r#"{"quitting":true}"#.to_owned()))
-                } else {
-                    unavailable(r#"{"quitting":false}"#)
-                }
-            }
-        }
-    });
-
-    let server = CompioServer::builder().build();
-    if let Err(error) = server
-        .try_spawn_unix_http(control_socket_path(), control)
-        .await
-    {
-        // Background tooling has no handle; the UI loop still works.
-        eprintln!("rchat-blazar: control socket unavailable: {error}");
-    }
+    // The control socket: background tooling drives and verifies the app.
+    control::serve(events.clone(), self_commands.clone(), Arc::clone(&snapshot)).await;
 
     // Convenience: credentials from the environment log in at startup.
     if let (Ok(user), Ok(password)) = (std::env::var("RCHAT_USER"), std::env::var("RCHAT_PASSWORD"))
@@ -375,121 +278,6 @@ async fn drive(
         }
         let _ = events.send(event).await;
     }
-}
-
-/// Refreshes the custom-emoji cache in the background: fetch the
-/// `emoji-custom.list` delta, merge with the store, download images that
-/// have no file yet, then hand the name→path map to the UI. First run
-/// downloads every image (minutes, silently); later runs only new ones.
-fn spawn_emoji(
-    settings: RcSettings,
-    session: crate::rc::Session,
-    store: std::sync::Arc<Store>,
-    events: Sender<ChatEvent>,
-) {
-    compio::runtime::spawn(async move {
-        let transport = crate::http::HttpTransport::new(
-            settings.addr(),
-            settings.host_header(),
-            settings.is_tls(),
-        );
-        let mut client = crate::rc::RcClient::with_transport(settings, transport);
-        client.set_session(session);
-
-        let fresh = match client.emoji_custom_list().await {
-            Ok(fresh) => fresh,
-            Err(error) => {
-                eprintln!("rchat-blazar: emoji list unavailable: {error}");
-                return;
-            }
-        };
-
-        let mut merged = store.load_emoji();
-        for emoji in fresh {
-            match merged
-                .iter()
-                .position(|known: &crate::rc::CustomEmoji| known.id == emoji.id)
-            {
-                Some(index) => merged[index] = emoji,
-                None => merged.push(emoji),
-            }
-        }
-
-        let dir = match Store::emoji_dir() {
-            Ok(dir) => dir,
-            Err(error) => {
-                eprintln!("rchat-blazar: {error}");
-                return;
-            }
-        };
-        for emoji in &merged {
-            let path = dir.join(format!("{}.{}", emoji.name, emoji.extension));
-            if path.exists() {
-                continue;
-            }
-            match client.emoji_image(&emoji.name, &emoji.extension).await {
-                Ok(bytes) => {
-                    if let Err(error) = std::fs::write(&path, bytes) {
-                        eprintln!("rchat-blazar: emoji image {}: {error}", path.display());
-                    }
-                }
-                Err(error) => eprintln!("rchat-blazar: emoji {}: {error}", emoji.name),
-            }
-        }
-        if let Err(error) = store.save_emoji(&merged) {
-            eprintln!("rchat-blazar: emoji cache not stored: {error}");
-        }
-
-        let emojis: Vec<(String, String)> = merged
-            .into_iter()
-            .map(|emoji| {
-                let path = dir.join(format!("{}.{}", emoji.name, emoji.extension));
-                (emoji.name, path.display().to_string())
-            })
-            .collect();
-        let _ = events.send(ChatEvent::Emoji { emojis }).await;
-    })
-    .detach();
-}
-
-/// Starts the live WebSocket connection in its own task on the compio
-/// thread; returns the control channel. Failures degrade to a stderr note —
-/// the REST loop keeps working without the live layer.
-fn spawn_live(
-    settings: RcSettings,
-    session: crate::rc::Session,
-    events: Sender<ChatEvent>,
-) -> Sender<LiveCommand> {
-    let (commands, receiver) = async_channel::unbounded();
-    compio::runtime::spawn(async move {
-        let url = websocket_url(&settings);
-        match DdpLive::connect(&url, &session).await {
-            Ok(live) => {
-                // The protocol layer emits raw messages; the application
-                // boundary wraps them into chat events.
-                let (messages, message_rx) = async_channel::unbounded();
-                let forward = compio::runtime::spawn(async move {
-                    while let Ok(message) = message_rx.recv().await {
-                        if events.send(ChatEvent::LiveMessage(message)).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-                // The messages sender moves into run() and drops when the
-                // connection ends, which unblocks the forward task below.
-                let result = live
-                    .run(messages, receiver, std::time::Duration::from_secs(30))
-                    .await;
-                let _ = forward.await;
-                if let Err(error) = result {
-                    eprintln!("rchat-blazar: live connection ended: {error}");
-                }
-            }
-            Err(error) => eprintln!("rchat-blazar: live layer unavailable: {error}"),
-        }
-    })
-    .detach(); // background task; failures degrade to the stderr notes above
-    commands
 }
 
 /// One command → one event; failures always surface as `Failed`. `store`
@@ -539,67 +327,6 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
     }
 }
 
-/// Queues one item; `false` means the receiving side is gone.
-fn enqueue<T>(queue: &Sender<T>, item: T) -> bool {
-    queue.try_send(item).is_ok()
-}
-
-fn unavailable(body: &str) -> (StatusCode, JsonBody) {
-    (StatusCode::SERVICE_UNAVAILABLE, JsonBody(body.to_owned()))
-}
-
-/// Control socket under the runtime dir; one process owns the fixed name per
-/// user, so a second instance fails to bind instead of shadowing the first.
-fn control_socket_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("rchat-blazar.sock")
-}
-
-/// JSON view of the mirrored UI state; poisoned locks mean a UI-thread panic,
-/// and stale data is still the best available answer.
-fn state_json(snapshot: &Mutex<Option<UiSnapshot>>) -> String {
-    let state = snapshot
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match state.as_ref() {
-        Some(state) => serde_json::to_string(state).unwrap_or_default(),
-        None => r#"{"status":"no window reported yet"}"#.to_owned(),
-    }
-}
-
-#[derive(Deserialize)]
-struct CredentialsBody {
-    user: String,
-    password: String,
-}
-
-#[derive(Deserialize)]
-struct RoomBody {
-    room: String,
-}
-
-#[derive(Deserialize)]
-struct SendBody {
-    room: String,
-    text: String,
-}
-
-/// A JSON responder with the content type set.
-struct JsonBody(String);
-
-impl Responder for JsonBody {
-    fn into_response(self) -> Response {
-        let mut response = Response::new(TakoBody::from(self.0));
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static("application/json"),
-        );
-        response
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // tests assert the expected path
 mod tests {
@@ -634,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn messages_fold_per_room_and_sent_appends() {
+    fn messages_fold_per_room_and_live_messages_dedup() {
         let mut state = ChatState::default();
         state.apply(ChatEvent::Messages {
             room_id: "GENERAL".to_owned(),
@@ -642,13 +369,16 @@ mod tests {
         });
         assert_eq!(state.active_room.as_deref(), Some("GENERAL"));
 
+        // The live stream may redeliver what REST already folded in.
         state.apply(ChatEvent::Sent {
             message: message("m2", "tester", "second"),
         });
+        state.apply(ChatEvent::LiveMessage(message("m2", "tester", "second")));
+        state.apply(ChatEvent::LiveMessage(message("m3", "tester", "third")));
         let messages = state.active_messages();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].text, "first");
+        assert_eq!(messages.len(), 3);
         assert_eq!(messages[1].text, "second");
+        assert_eq!(messages[2].text, "third");
     }
 
     #[test]
@@ -663,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_names_rooms_and_messages() {
+    fn emoji_map_folds_in_and_snapshot_names_rooms_and_messages() {
         let mut state = ChatState::default();
         state.apply(ChatEvent::LoggedIn {
             username: "tester".to_owned(),
@@ -675,6 +405,13 @@ mod tests {
             room_id: "GENERAL".to_owned(),
             messages: vec![message("m1", "tester", "hello")],
         });
+        state.apply(ChatEvent::Emoji {
+            emojis: vec![("heart_21".to_owned(), "/emoji/heart_21.gif".to_owned())],
+        });
+        assert_eq!(
+            state.emoji.get("heart_21").map(String::as_str),
+            Some("/emoji/heart_21.gif")
+        );
 
         let snapshot = UiSnapshot::from_state(&state);
         assert_eq!(snapshot.username.as_deref(), Some("tester"));

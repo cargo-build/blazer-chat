@@ -60,6 +60,15 @@ pub enum LiveCommand {
     Watch(String),
 }
 
+/// The keepalive window during the handshake: inbound pings are answered,
+/// outbound ones start only in [`DdpLive::run`].
+const HANDSHAKE_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The `msg` discriminator of a DDP document.
+fn msg_kind(document: &Value) -> Option<&str> {
+    document.get("msg").and_then(Value::as_str)
+}
+
 impl DdpLive {
     /// Opens the WebSocket, performs the DDP handshake and logs in with the
     /// session's resume token.
@@ -77,66 +86,57 @@ impl DdpLive {
             room_sub: None,
         };
 
+        // DDP handshake: the server either accepts our protocol version or
+        // tells us `failed` and closes.
         live.send_json(ddp_connect()).await?;
-        loop {
-            match live
-                .next_wire_frame(std::time::Duration::from_secs(30))
-                .await?
-            {
-                Frame::Document(document)
-                    if document.get("msg").and_then(Value::as_str) == Some("connected") =>
-                {
-                    break;
-                }
-                Frame::Document(document)
-                    if document.get("msg").and_then(Value::as_str) == Some("failed") =>
-                {
-                    return Err(RcError::Config("server refused our DDP version".to_owned()));
-                }
-                Frame::Ping => live.reply_pong(None).await?,
-                Frame::Closed(reason) => {
-                    return Err(RcError::Io(std::io::Error::other(format!(
-                        "handshake: {reason}"
-                    ))));
-                }
-                _ => {}
-            }
+        let connected = live
+            .wait_document(&|document| {
+                matches!(msg_kind(document), Some("connected") | Some("failed"))
+            })
+            .await?;
+        if msg_kind(&connected) == Some("failed") {
+            return Err(RcError::Config("server refused our DDP version".to_owned()));
         }
 
+        // Resume login: the stored auth token is the DDP credentials.
         let id = live.next_id();
         live.send_json(serde_json::json!({
             "msg": "method", "method": "login", "id": id,
             "params": [{"resume": session.auth_token}],
         }))
         .await?;
+        let result = live
+            .wait_document(&|document| {
+                msg_kind(document) == Some("result")
+                    && document.get("id").and_then(Value::as_str) == Some(id.as_str())
+            })
+            .await?;
+        if result.get("error").is_some() {
+            return Err(RcError::Config(format!(
+                "resume login rejected: {}",
+                result
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            )));
+        }
+        Ok(live)
+    }
+
+    /// Waits for the next DDP document matching `accept`, answering pings
+    /// on the way. A closed transport errors out.
+    async fn wait_document(&mut self, accept: &dyn Fn(&Value) -> bool) -> Result<Value, RcError> {
         loop {
-            match live
-                .next_wire_frame(std::time::Duration::from_secs(30))
-                .await?
-            {
-                Frame::Document(document)
-                    if document.get("msg").and_then(Value::as_str) == Some("result")
-                        && document.get("id").and_then(Value::as_str) == Some(id.as_str()) =>
-                {
-                    if document.get("error").is_some() {
-                        return Err(RcError::Config(format!(
-                            "resume login rejected: {}",
-                            document
-                                .get("error")
-                                .and_then(|error| error.get("message"))
-                                .and_then(Value::as_str)
-                                .unwrap_or("unknown")
-                        )));
-                    }
-                    return Ok(live);
-                }
-                Frame::Ping => live.reply_pong(None).await?,
+            match self.next_wire_frame(HANDSHAKE_IDLE).await? {
+                Frame::Document(document) if accept(&document) => return Ok(document),
+                Frame::Ping => self.reply_pong(None).await?,
                 Frame::Closed(reason) => {
                     return Err(RcError::Io(std::io::Error::other(format!(
-                        "login: {reason}"
+                        "handshake: {reason}"
                     ))));
                 }
-                _ => {}
+                _ => continue,
             }
         }
     }

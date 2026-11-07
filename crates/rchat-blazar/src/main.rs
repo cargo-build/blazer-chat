@@ -6,10 +6,12 @@
 //! events and requests across the boundary — channels, not nested executors.
 
 mod app;
+mod control;
 mod http;
 mod rc;
 mod settings;
 mod store;
+mod tasks;
 mod ui;
 
 fn main() {
