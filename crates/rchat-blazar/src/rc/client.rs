@@ -84,6 +84,16 @@ impl RcClient<HttpTransport> {
         self.transport.get_bytes(&path).await.map_err(RcError::Io)
     }
 
+    /// Downloads a user avatar (authenticated GET; the server may still
+    /// force-gzip, which the transport decodes).
+    pub async fn avatar_bytes(&self, username: &str) -> Result<Vec<u8>, RcError> {
+        let headers = self.auth_headers()?;
+        self.transport
+            .get_bytes_with_headers(&format!("/avatar/{username}"), &headers)
+            .await
+            .map_err(RcError::Io)
+    }
+
     /// Downloads an attachment (authenticated GET) as raw bytes.
     pub async fn file_bytes(&self, path: &str) -> Result<Vec<u8>, RcError> {
         let headers = self.auth_headers()?;

@@ -146,6 +146,34 @@ impl Store {
         Ok(dir)
     }
 
+    /// Cached avatar image for a username, if fetched before. No expiry:
+    /// avatars change rarely; a fresh fetch happens when the file is
+    /// absent.
+    pub fn avatar_path(&self, username: &str) -> Result<Option<PathBuf>, String> {
+        let dir = Self::attachments_dir()?
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default()
+            .join("avatars");
+        let path = dir.join(sanitize(username));
+        Ok(path.is_file().then_some(path))
+    }
+
+    /// Persists an avatar's bytes; returns the path for the UI.
+    pub fn save_avatar(&self, username: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+        let dir = Self::attachments_dir()?
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default()
+            .join("avatars");
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+        let path = dir.join(sanitize(username));
+        std::fs::write(&path, bytes)
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        Ok(path)
+    }
+
     /// Persists an attachment's bytes under the cache; returns the path
     /// for the UI. Sanitized `{file_id}-{name}` keeps rooms separate.
     pub fn save_attachment(

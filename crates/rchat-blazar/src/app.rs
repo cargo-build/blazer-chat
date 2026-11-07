@@ -20,6 +20,7 @@ use crate::store::Store;
 use crate::tasks::{spawn_emoji, spawn_live};
 
 /// What the UI (or the control socket) asks the application to do.
+#[derive(Debug)]
 pub enum ChatCommand {
     Login {
         user: String,
@@ -53,6 +54,11 @@ pub enum ChatCommand {
         room_id: String,
         path: String,
         msg: String,
+    },
+    /// Fetches avatars for the given usernames into the cache (cache
+    /// first; missing ones download).
+    FetchAvatars {
+        usernames: Vec<String>,
     },
     /// Sets or clears the local search query (empty clears). Search runs
     /// over cached messages only — core Rocket.Chat has no server-side
@@ -101,6 +107,10 @@ pub enum ChatEvent {
     },
     /// A popup-grade notification for the user (M4).
     Notification(crate::rc::Notification),
+    /// Cached avatar paths for message senders.
+    Avatars {
+        avatars: Vec<(String, String)>,
+    },
     /// The server accepted the reaction toggle; the fold applies it
     /// locally until the live stream redelivers the message.
     ReactionToggled {
@@ -159,6 +169,8 @@ pub struct ChatState {
     /// Notifications for rooms other than the active one, pending
     /// display (newest last, bounded).
     pub notifications: Vec<crate::rc::Notification>,
+    /// Sender username → cached avatar path.
+    pub avatars: std::collections::HashMap<String, String>,
 }
 
 /// One local-search hit.
@@ -200,8 +212,27 @@ impl ChatState {
                 if let Some(room) = self.rooms.iter_mut().find(|room| room.id == room_id) {
                     room.unread = 0;
                 }
+                // Senders without a cached avatar fetch one now; the
+                // event follows the history into the pane.
+                let missing: Vec<String> = self
+                    .messages
+                    .get(&room_id)
+                    .map(|messages| {
+                        messages
+                            .iter()
+                            .map(|message| message.sender.clone())
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .filter(|sender| !self.avatars.contains_key(sender))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 self.active_room = Some(room_id);
                 self.error = None;
+                (!missing.is_empty()).then_some(ChatCommand::FetchAvatars { usernames: missing })
+            }
+            ChatEvent::Avatars { avatars } => {
+                self.avatars.extend(avatars.iter().cloned());
                 None
             }
             ChatEvent::Sent { message } => {
@@ -740,6 +771,35 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             }
         }
         ChatCommand::CloseThread => ChatEvent::ThreadClosed,
+        ChatCommand::FetchAvatars { usernames } => {
+            // Avatars render from disk; without a store they degrade to
+            // the initial discs.
+            let Some(store) = store else {
+                return ChatEvent::Avatars {
+                    avatars: Vec::new(),
+                };
+            };
+            let mut avatars = Vec::new();
+            for username in usernames {
+                if let Some(path) = store
+                    .avatar_path(&username)
+                    .map_err(|error| {
+                        eprintln!("rchat-blazar: avatar cache: {error}");
+                    })
+                    .ok()
+                    .flatten()
+                {
+                    avatars.push((username.clone(), path.display().to_string()));
+                    continue;
+                }
+                if let Ok(bytes) = client.avatar_bytes(&username).await
+                    && let Ok(path) = store.save_avatar(&username, &bytes)
+                {
+                    avatars.push((username, path.display().to_string()));
+                }
+            }
+            ChatEvent::Avatars { avatars }
+        }
         ChatCommand::SendThread {
             room_id,
             tmid,
@@ -945,6 +1005,37 @@ mod tests {
         assert_eq!(state.notifications[0].room_id, "other");
         let snapshot = UiSnapshot::from_state(&state);
         assert_eq!(snapshot.notifications, vec!["laurent: hello".to_owned()]);
+    }
+
+    #[test]
+    fn messages_request_missing_avatars_and_avatars_fill_the_cache() {
+        let mut state = ChatState::default();
+        let follow_up = state.apply(ChatEvent::Messages {
+            room_id: "dm".to_owned(),
+            messages: vec![message("m1", "alice", "hi")],
+        });
+        match follow_up {
+            Some(ChatCommand::FetchAvatars { usernames }) => {
+                assert_eq!(usernames, vec!["alice".to_owned()]);
+            }
+            other => panic!("expected FetchAvatars, got {other:?}"),
+        }
+        state.apply(ChatEvent::Avatars {
+            avatars: vec![("alice".to_owned(), "/cache/avatars/alice".to_owned())],
+        });
+        assert_eq!(
+            state.avatars.get("alice").map(String::as_str),
+            Some("/cache/avatars/alice")
+        );
+        // A repeat open fetches nothing new: the cache covers alice.
+        assert!(
+            state
+                .apply(ChatEvent::Messages {
+                    room_id: "dm".to_owned(),
+                    messages: vec![message("m2", "alice", "again")],
+                })
+                .is_none()
+        );
     }
 
     #[test]

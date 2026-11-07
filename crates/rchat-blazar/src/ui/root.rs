@@ -55,6 +55,8 @@ struct MessageView {
     file: Option<(String, String, u64)>,
     /// Cached preview path for image attachments.
     image_path: Option<String>,
+    /// Cached avatar path for the sender; initials render as fallback.
+    avatar: Option<String>,
 }
 
 impl ChatRoot {
@@ -115,6 +117,7 @@ impl ChatRoot {
         let switched = self.pinned_room.as_deref() != self.state.active_room.as_deref();
         let at_bottom = self.scroll.offset().y >= -self.scroll.max_offset().height;
         let emoji = &self.state.emoji;
+        let chat_avatars = &self.state.avatars;
         self.views = self
             .state
             .active_messages()
@@ -143,6 +146,7 @@ impl ChatRoot {
                     .file
                     .as_ref()
                     .and_then(|file| file.image_path.clone()),
+                avatar: chat_avatars.get(&message.sender).cloned(),
             })
             .collect();
         if switched || at_bottom {
@@ -372,7 +376,14 @@ impl gpui::Render for ChatRoot {
                     .py_1()
                     .rounded_md()
                     .hover(|style| style.bg(rgb(ROW_HOVER)))
-                    .child(avatar(&view.sender))
+                    .child(match view.avatar.as_deref() {
+                        Some(path) => img(std::path::PathBuf::from(path))
+                            .flex_none()
+                            .size(px(32.0))
+                            .rounded_full()
+                            .into_any_element(),
+                        None => avatar(&view.sender).into_any_element(),
+                    })
                     .child(
                         div()
                             .flex_1()
