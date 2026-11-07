@@ -315,6 +315,7 @@ mod tests {
             tlm: None,
             file: None,
             reactions: Default::default(),
+            starred_by_me: false,
         }];
         store.save_messages("GENERAL", &messages).unwrap();
         assert_eq!(

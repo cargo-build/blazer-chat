@@ -338,6 +338,34 @@ impl<T: Transport> RcClient<T> {
         Ok(())
     }
 
+    /// Sets the account presence (`users.setStatus`).
+    pub async fn set_status(&self, status: &str) -> Result<(), RcError> {
+        let body = serde_json::json!({ "status": status }).to_string();
+        self.call("POST", "/api/v1/users.setStatus", Some(body), true)
+            .await?;
+        Ok(())
+    }
+
+    /// Invalidates the session server-side (`chat.logout`) and forgets
+    /// it in memory.
+    pub async fn logout(&mut self) -> Result<(), RcError> {
+        let result = self.call("POST", "/api/v1/logout", None, true).await;
+        self.session = None;
+        result.map(|_| ())
+    }
+
+    /// Stars a message (`chat.starMessage`); `unstar` reverses it.
+    pub async fn star_message(&self, msg_id: &str, star: bool) -> Result<(), RcError> {
+        let path = if star {
+            "/api/v1/chat.starMessage"
+        } else {
+            "/api/v1/chat.unStarMessage"
+        };
+        let body = serde_json::json!({ "messageId": msg_id }).to_string();
+        self.call("POST", path, Some(body), true).await?;
+        Ok(())
+    }
+
     /// Toggles a reaction (`chat.react`): the emoji name without colons —
     /// a repeat call removes it. Unicode emoji pass through as-is.
     pub async fn react(&self, msg_id: &str, emoji: &str) -> Result<(), RcError> {
@@ -492,6 +520,14 @@ impl<T: Transport> RcClient<T> {
                 image_path: None,
             }
         });
+        let me = self
+            .session
+            .as_ref()
+            .map(|session| session.user_id.as_str());
+        let starred_by_me =
+            message.starred.unwrap_or_default().iter().any(|entry| {
+                entry.as_str() == me || entry.get("_id").and_then(|v| v.as_str()) == me
+            });
         Msg {
             id: message.id,
             room_id: message.rid,
@@ -503,7 +539,13 @@ impl<T: Transport> RcClient<T> {
             tlm: message.tlm,
             file,
             reactions,
+            starred_by_me,
         }
+    }
+
+    /// The server origin (`https://host:port`) — permalinks build on it.
+    pub fn origin(&self) -> &str {
+        &self.origin
     }
 
     /// The server origin for file URLs (`https://host:port`).

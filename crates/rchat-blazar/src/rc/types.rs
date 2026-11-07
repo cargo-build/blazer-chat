@@ -116,6 +116,9 @@ pub struct Msg {
     /// Reaction name (colons stripped) → who reacted; the live stream
     /// is the authority and replaces this map on every redelivery.
     pub reactions: std::collections::BTreeMap<String, Reaction>,
+    /// Whether the logged-in user starred this message (wire `starred`).
+    #[serde(default)]
+    pub starred_by_me: bool,
 }
 
 /// One reaction's participants (wire `usernames`).

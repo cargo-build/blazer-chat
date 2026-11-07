@@ -60,39 +60,57 @@ pub fn spawn_live(
         let _ = events.send(ChatEvent::LiveStatus(false)).await;
         loop {
             let started = std::time::Instant::now();
-            match DdpLive::connect(&url, &session).await {
-                Ok(mut live) => {
-                    if let Some(room) = watched.clone()
-                        && let Err(error) = live.watch(&room).await
-                    {
-                        eprintln!("rchat-blazar: resubscribe failed: {error}");
-                    }
-                    let _ = events.send(ChatEvent::LiveStatus(true)).await;
-                    let result = live
-                        .run(updates.clone(), receiver.clone(), Duration::from_secs(30))
-                        .await;
-                    if let Some(room) = live.watched() {
-                        watched = Some(room.to_owned());
-                    }
-                    if started.elapsed() >= STABLE_CONNECTION {
-                        backoff = Duration::from_secs(1);
-                    }
+            // The DDP handshake has no built-in deadline; without this
+            // wrap a silent server parks the live layer forever (observed
+            // once in the wild) instead of falling through to backoff.
+            let attempt = compio::runtime::time::timeout(
+                Duration::from_secs(15),
+                DdpLive::connect(&url, &session),
+            );
+            match attempt.await {
+                Err(_elapsed) => {
                     eprintln!(
-                        "rchat-blazar: live connection lost ({result:?}), retrying in {}s",
-                        backoff.as_secs()
-                    );
-                    let _ = events.send(ChatEvent::LiveStatus(false)).await;
-                    compio::runtime::time::sleep(backoff).await;
-                    backoff = next_backoff(backoff);
-                }
-                Err(error) => {
-                    eprintln!(
-                        "rchat-blazar: live connect failed ({error}), retrying in {}s",
+                        "rchat-blazar: live connect timed out, retrying in {}s",
                         backoff.as_secs()
                     );
                     compio::runtime::time::sleep(backoff).await;
                     backoff = next_backoff(backoff);
+                    continue;
                 }
+                Ok(result) => match result {
+                    Ok(mut live) => {
+                        if let Some(room) = watched.clone()
+                            && let Err(error) = live.watch(&room).await
+                        {
+                            eprintln!("rchat-blazar: resubscribe failed: {error}");
+                        }
+                        let _ = events.send(ChatEvent::LiveStatus(true)).await;
+                        let result = live
+                            .run(updates.clone(), receiver.clone(), Duration::from_secs(30))
+                            .await;
+                        if let Some(room) = live.watched() {
+                            watched = Some(room.to_owned());
+                        }
+                        if started.elapsed() >= STABLE_CONNECTION {
+                            backoff = Duration::from_secs(1);
+                        }
+                        eprintln!(
+                            "rchat-blazar: live connection lost ({result:?}), retrying in {}s",
+                            backoff.as_secs()
+                        );
+                        let _ = events.send(ChatEvent::LiveStatus(false)).await;
+                        compio::runtime::time::sleep(backoff).await;
+                        backoff = next_backoff(backoff);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "rchat-blazar: live connect failed ({error}), retrying in {}s",
+                            backoff.as_secs()
+                        );
+                        compio::runtime::time::sleep(backoff).await;
+                        backoff = next_backoff(backoff);
+                    }
+                },
             }
         }
     })

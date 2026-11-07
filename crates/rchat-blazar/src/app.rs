@@ -48,6 +48,18 @@ pub enum ChatCommand {
         msg_id: String,
         emoji: String,
     },
+    /// Stars or unstars a message (`chat.starMessage`/`unStarMessage`).
+    StarMessage {
+        msg_id: String,
+        star: bool,
+    },
+    /// Logs out: invalidates the session server-side, drops the stored
+    /// one and resets the UI to the logged-out view.
+    Logout,
+    /// Sets the account presence (`users.setStatus`).
+    SetStatus {
+        status: String,
+    },
     /// Uploads a local file into the room and posts it as a message
     /// (two-phase rooms.media + mediaConfirm).
     UploadFile {
@@ -92,6 +104,7 @@ pub enum ChatEvent {
     Failed(String),
     LoggedIn {
         username: String,
+        origin: String,
     },
     Rooms {
         rooms: Vec<Room>,
@@ -137,6 +150,17 @@ pub enum ChatEvent {
         msg_id: String,
         emoji: String,
     },
+    /// The server accepted the star toggle; the fold applies it locally.
+    Starred {
+        msg_id: String,
+        star: bool,
+    },
+    /// The session ended (logout): the UI returns to the logged-out view.
+    LoggedOut,
+    /// The server accepted the presence change.
+    PresenceSet {
+        status: String,
+    },
     /// The user's `subscriptions-changed` stream reported a room's
     /// unread count (initial burst + every new message).
     UnreadCount {
@@ -171,6 +195,10 @@ pub struct ChatState {
     pub rooms: Vec<Room>,
     pub active_room: Option<String>,
     pub messages: std::collections::HashMap<String, Vec<Msg>>,
+    /// The server origin (`https://host:port`) — permalinks build on it.
+    pub origin: Option<String>,
+    /// The account presence the server accepted (`online`/`away`/`busy`).
+    pub presence: Option<String>,
     pub error: Option<String>,
     /// Custom emoji: name → cached image path.
     pub emoji: std::collections::BTreeMap<String, String>,
@@ -218,10 +246,24 @@ impl ChatState {
                 self.error = Some(message);
                 None
             }
-            ChatEvent::LoggedIn { username } => {
+            ChatEvent::LoggedIn { username, origin } => {
                 self.username = Some(username);
+                self.origin = Some(origin);
                 self.error = None;
                 Some(ChatCommand::RefreshRooms)
+            }
+            ChatEvent::PresenceSet { status } => {
+                self.presence = Some(status);
+                None
+            }
+            ChatEvent::LoggedOut => {
+                self.username = None;
+                self.origin = None;
+                self.rooms.clear();
+                self.messages.clear();
+                self.active_room = None;
+                self.error = None;
+                None
             }
             ChatEvent::Rooms { rooms } => {
                 self.rooms = rooms;
@@ -329,6 +371,17 @@ impl ChatState {
                         message.reactions.remove(&emoji);
                     }
                 }
+                None
+            }
+            ChatEvent::Starred { msg_id, star } => {
+                for room in self.messages.values_mut() {
+                    for message in room.iter_mut() {
+                        if message.id == *msg_id {
+                            message.starred_by_me = star;
+                        }
+                    }
+                }
+                self.messages_version += 1;
                 None
             }
             ChatEvent::UnreadCount { room_id, unread } => {
@@ -656,9 +709,11 @@ async fn drive(
     if let Some(store) = store.as_ref() {
         if let Some(session) = store.load_session() {
             client.set_session(session.clone());
+            let origin = client.origin().to_owned();
             let _ = events
                 .send(ChatEvent::LoggedIn {
                     username: session.username,
+                    origin,
                 })
                 .await;
             let _ = self_commands.try_send(ChatCommand::RefreshRooms);
@@ -680,6 +735,7 @@ async fn drive(
     while let Ok(command) = commands.recv().await {
         let event = execute(&mut client, store.as_deref(), command).await;
         match &event {
+            ChatEvent::LoggedOut => live = None,
             ChatEvent::LoggedIn { .. } if live.is_none() => {
                 if let Some(store) = store.as_ref()
                     && let Some(session) = store.load_session()
@@ -740,6 +796,7 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                 }
                 ChatEvent::LoggedIn {
                     username: session.username,
+                    origin: client.origin().to_owned(),
                 }
             }
             Err(error) => ChatEvent::Failed(error.to_string()),
@@ -854,6 +911,27 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             },
             Err(error) => ChatEvent::Failed(error.to_string()),
         },
+        ChatCommand::StarMessage { msg_id, star } => {
+            match client.star_message(&msg_id, star).await {
+                Ok(()) => ChatEvent::Starred { msg_id, star },
+                Err(error) => ChatEvent::Failed(error.to_string()),
+            }
+        }
+        ChatCommand::SetStatus { status } => match client.set_status(&status).await {
+            Ok(()) => ChatEvent::PresenceSet { status },
+            Err(error) => ChatEvent::Failed(error.to_string()),
+        },
+        ChatCommand::Logout => {
+            // The session is dead either way: local reset never waits
+            // on the server call.
+            let _ = client.logout().await;
+            if let Some(store) = store
+                && let Err(error) = store.clear_session()
+            {
+                eprintln!("rchat-blazar: stored session not cleared: {error}");
+            }
+            ChatEvent::LoggedOut
+        }
         ChatCommand::UploadFile { room_id, path, msg } => {
             match client.upload_file(&room_id, &path, &msg).await {
                 Ok(message) => ChatEvent::Sent { message },
@@ -948,6 +1026,7 @@ mod tests {
             tlm: None,
             file: None,
             reactions: Default::default(),
+            starred_by_me: false,
         }
     }
 
@@ -956,6 +1035,7 @@ mod tests {
         let mut state = ChatState::default();
         let follow_up = state.apply(ChatEvent::LoggedIn {
             username: "tester".to_owned(),
+            origin: "https://chat.example".to_owned(),
         });
         assert_eq!(state.username.as_deref(), Some("tester"));
         assert!(matches!(follow_up, Some(ChatCommand::RefreshRooms)));
@@ -1279,6 +1359,7 @@ mod tests {
         let mut state = ChatState::default();
         state.apply(ChatEvent::LoggedIn {
             username: "tester".to_owned(),
+            origin: "https://chat.example".to_owned(),
         });
         state.apply(ChatEvent::Rooms {
             rooms: vec![room("GENERAL", "general")],

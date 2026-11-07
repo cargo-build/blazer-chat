@@ -3,14 +3,14 @@
 //! push commands back.
 
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, Pixels, ScrollHandle,
-    SharedString, Window, div, hsla, img, prelude::*, px, rgb, uniform_list, white,
+    AnyElement, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, Pixels,
+    ScrollHandle, SharedString, Window, div, hsla, img, prelude::*, px, rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
 use async_channel::Sender;
 
-use super::input::{MUTED, PANEL, TextInput};
+use super::input::{MUTED, PANEL, TextInput, TextInputEvent};
 use super::markdown::{self, Span};
 use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
 
@@ -40,6 +40,10 @@ pub(crate) struct ChatRoot {
     pick_tx: async_channel::Sender<Option<std::path::PathBuf>>,
     /// This entity's own handle for row-closure callbacks.
     handle: Entity<ChatRoot>,
+    /// The row whose labeled action menu is open `(room_id, msg_id)`.
+    open_menu: Option<(String, String)>,
+    /// The top-bar avatar menu is open.
+    user_menu_open: bool,
     /// An older-slice fetch is in flight (one at a time per pane).
     loading_older: bool,
     /// Parsed markdown per (message id, text): rebuilds reuse it instead
@@ -76,6 +80,8 @@ struct MessageView {
     /// `(reply count, formatted last reply)` when this message starts a
     /// thread.
     thread: Option<(u32, String)>,
+    /// Starred by the logged-in user (menu shows "Remove Star").
+    starred: bool,
     /// UTC date (YYYY-MM-DD); the pane inserts day separators between
     /// different dates.
     day: String,
@@ -136,19 +142,31 @@ impl ChatRoot {
         .detach();
 
         let handle = cx.entity();
+        let composer = cx.new(|cx| TextInput::new("Message…", cx));
+        cx.subscribe(&composer, |chat, _, event, cx| match event {
+            TextInputEvent::Submitted => chat.send_message(cx),
+        })
+        .detach();
+        let search = cx.new(|cx| TextInput::new("Search…", cx));
+        cx.subscribe(&search, |chat, _, event, cx| match event {
+            TextInputEvent::Submitted => chat.run_search(cx),
+        })
+        .detach();
         Self {
             handle,
             state: ChatState::default(),
             commands,
             snapshot,
-            composer: cx.new(|cx| TextInput::new("Message…", cx)),
+            composer,
             focus: cx.focus_handle(),
             views: Vec::new(),
-            search: cx.new(|cx| TextInput::new("Search…", cx)),
+            search,
             editing: None,
             scroll: ScrollHandle::new(),
             pinned_room: None,
             pick_tx,
+            open_menu: None,
+            user_menu_open: false,
             loading_older: false,
             parsed: Default::default(),
             views_version: u64::MAX,
@@ -209,6 +227,7 @@ impl ChatRoot {
             .map(|message| MessageView {
                 id: message.id.clone(),
                 room_id: message.room_id.clone(),
+                starred: message.starred_by_me,
                 ts: pretty_time(&message.ts),
                 sender: message.sender.clone(),
                 text: message.text.clone(),
@@ -279,7 +298,7 @@ impl ChatRoot {
         cx.notify();
     }
 
-    fn send_message(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn send_message(&mut self, cx: &mut Context<Self>) {
         let Some(room_id) = self.state.active_room.clone() else {
             self.state.error = Some("open a room first".to_owned());
             cx.notify();
@@ -312,6 +331,47 @@ impl ChatRoot {
     /// repeat).
     /// Rocket.Chat reactions are emoji NAMES on the wire (`+1`, `tada`,
     /// …); the unicode glyph is display-only.
+    /// Opens or closes one row's labeled action menu.
+    fn toggle_menu(&mut self, room_id: String, msg_id: String, cx: &mut Context<Self>) {
+        self.open_menu = match self.open_menu.as_ref() {
+            Some(open) if open.0 == room_id && open.1 == msg_id => None,
+            _ => Some((room_id, msg_id)),
+        };
+        cx.notify();
+    }
+
+    /// Stars or unstars a message through the server; the fold applies
+    /// the flip locally.
+    fn toggle_star(&mut self, msg_id: String, starred: bool, cx: &mut Context<Self>) {
+        let _ = self.commands.try_send(ChatCommand::StarMessage {
+            msg_id,
+            star: !starred,
+        });
+        self.open_menu = None;
+        cx.notify();
+    }
+
+    /// The original client's permalink:
+    /// `{origin}/{channel|group}/{room name}/msg/{id}` — channels and
+    /// groups only (DM links address the peer, which rooms don't carry).
+    fn permalink(&self, room_id: &str, msg_id: &str) -> Option<String> {
+        let origin = self.state.origin.as_deref()?;
+        let room = self.state.rooms.iter().find(|room| room.id == room_id)?;
+        let path = match room.kind {
+            'c' => "channel",
+            'p' => "group",
+            _ => return None,
+        };
+        Some(format!("{origin}/{path}/{}/msg/{msg_id}", room.name))
+    }
+
+    /// Logs out: the server session dies, the UI resets to logged-out.
+    fn logout(&mut self, cx: &mut Context<Self>) {
+        let _ = self.commands.try_send(ChatCommand::Logout);
+        self.user_menu_open = false;
+        cx.notify();
+    }
+
     fn toggle_reaction(
         &mut self,
         room_id: &str,
@@ -545,10 +605,13 @@ impl ChatRoot {
             )
             .child(action_strip(ActionContext {
                 this: self.handle.clone(),
+                link_ready: self.permalink(&room_id, "").is_some(),
+                menu_open: self.open_menu.as_ref() == Some(&(room_id.clone(), msg_id.clone())),
                 room_id,
                 msg_id,
                 edit_text,
                 editing_this,
+                starred: view.starred,
             }))
             .into_any_element()
     }
@@ -964,6 +1027,192 @@ impl gpui::Render for ChatRoot {
             messages.into_any_element()
         };
 
+        // The top bar, the original's shape: brand, centered room
+        // search, account avatar whose click drops the account menu
+        // (presence + logout). gpui 0.2.2 has no anchored popover, so
+        // the menu card flows below the bar, right-aligned.
+        let this_bar = cx.entity();
+        let me = self.state.username.clone().unwrap_or_else(|| who.clone());
+        let me_avatar = match self
+            .state
+            .avatars
+            .get(self.state.username.as_deref().unwrap_or_default())
+        {
+            Some(path) => img(std::path::PathBuf::from(path))
+                .size(px(32.0))
+                .rounded_full()
+                .into_any_element(),
+            None => avatar(&me).into_any_element(),
+        };
+        let status_item =
+            |dot: u32, label: &'static str, key: &'static str, taken: Entity<ChatRoot>| {
+                div()
+                    .id(SharedString::from(format!("status-{key}")))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_xs()
+                    .text_sm()
+                    .text_color(rgb(TEXT))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(ROW_HOVER)))
+                    .child(div().size(px(10.0)).rounded_full().bg(rgb(dot)))
+                    .child(label)
+                    .on_click(move |_, _, cx| {
+                        taken.update(cx, |chat, cx| {
+                            let _ = chat.commands.try_send(ChatCommand::SetStatus {
+                                status: key.to_owned(),
+                            });
+                            cx.notify();
+                        });
+                    })
+            };
+        let presence = self.state.presence.clone();
+        let user_menu = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .min_w(px(220.0))
+            .mt_1()
+            .mr_1()
+            .p_1()
+            .gap_0p5()
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .rounded_md()
+            .shadow_md()
+            .when(self.user_menu_open, |menu| {
+                menu.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .p_2()
+                        .child(match self.state.avatars.get(me.as_str()) {
+                            Some(path) => img(std::path::PathBuf::from(path))
+                                .size(px(40.0))
+                                .rounded_full()
+                                .into_any_element(),
+                            None => div().size(px(40.0)).child(avatar(&me)).into_any_element(),
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(me.clone())),
+                                )
+                                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                    SharedString::from(match presence.as_deref() {
+                                        Some(status) => status.to_owned(),
+                                        None => "online".to_owned(),
+                                    }),
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .px_2()
+                        .pt_1()
+                        .pb_0p5()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(MUTED))
+                        .child("Status"),
+                )
+                .child(status_item(0x2f9e44, "online", "online", this_bar.clone()))
+                .child(status_item(0xe8b30f, "away", "away", this_bar.clone()))
+                .child(status_item(0xe03131, "busy", "busy", this_bar.clone()))
+                .child(
+                    div()
+                        .px_2()
+                        .pt_1()
+                        .pb_0p5()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(MUTED))
+                        .child("Account"),
+                )
+                .child(
+                    div()
+                        .id("menu-logout")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_xs()
+                        .text_sm()
+                        .text_color(rgb(0xe03131))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(ROW_HOVER)))
+                        .child("⎋ Log out")
+                        .on_click({
+                            let this = this_bar.clone();
+                            move |_, _, cx| {
+                                this.update(cx, |chat, cx| chat.logout(cx));
+                            }
+                        }),
+                )
+            });
+        let user_menu = user_menu;
+        let top_bar = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_end()
+            .child(
+                div()
+                    .flex()
+                    .w_full()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .bg(rgb(PANEL))
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .rounded_md()
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(TEXT))
+                            .child("rchat-blazar"),
+                    )
+                    .child(div().flex_1())
+                    .child(div().flex_none().flex().w(px(480.0)).child(search_strip))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .pr_1()
+                            .child(SharedString::from(me.clone())),
+                    )
+                    .child(
+                        div()
+                            .id("user-avatar")
+                            .flex_none()
+                            .cursor_pointer()
+                            .rounded_full()
+                            .hover(|style| style.opacity(0.85))
+                            .on_click(cx.listener(|chat, _, _, cx| {
+                                chat.user_menu_open = !chat.user_menu_open;
+                                cx.notify();
+                            }))
+                            .child(me_avatar),
+                    ),
+            )
+            .child(user_menu);
+
         div()
             .flex()
             .flex_col()
@@ -973,22 +1222,8 @@ impl gpui::Render for ChatRoot {
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
             .track_focus(&self.focus)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().text_xl().child("rchat-blazar"))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .child(SharedString::from(who)),
-                    ),
-            )
+            .child(top_bar)
             .child(error)
-            .child(search_strip)
             .child(
                 div()
                     .flex()
@@ -1051,9 +1286,7 @@ impl gpui::Render for ChatRoot {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(ACCENT)))
                             .active(|style| style.opacity(0.85))
-                            .on_click(
-                                cx.listener(|chat, _, window, cx| chat.send_message(window, cx)),
-                            )
+                            .on_click(cx.listener(|chat, _, _, cx| chat.send_message(cx)))
                             .child(match self.editing.is_some() {
                                 true => "save",
                                 false => "send",
@@ -1305,6 +1538,12 @@ struct ActionContext {
     msg_id: String,
     edit_text: String,
     editing_this: bool,
+    /// This row's labeled menu is open.
+    menu_open: bool,
+    /// Starred by me (menu label flips).
+    starred: bool,
+    /// The room supports permalinks (channels/groups; not DMs).
+    link_ready: bool,
 }
 
 /// The hover-revealed per-message actions: react, edit, delete. The strip
@@ -1317,6 +1556,9 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
         msg_id,
         edit_text,
         editing_this,
+        menu_open,
+        starred,
+        link_ready,
     } = actions;
 
     let button = |label: &'static str, suffix: &'static str| {
@@ -1391,17 +1633,128 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
         }
     });
 
+    // The original's labeled action menu (Start a Discussion / Star /
+    // Copy link / Copy text / Edit): gpui 0.2.2 has no anchored popover,
+    // so the ⋮ toggles an in-flow card in the strip.
+    let kebab = button("⋮", "menu").on_click({
+        let this = this.clone();
+        let room_id = room_id.clone();
+        let msg_id = msg_id.clone();
+        move |_, _, cx| {
+            this.update(cx, |chat, cx| {
+                chat.toggle_menu(room_id.clone(), msg_id.clone(), cx)
+            });
+        }
+    });
+    let menu = div()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .min_w(px(150.0))
+        .p_1()
+        .gap_0p5()
+        .bg(rgb(PANEL))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .rounded_md()
+        .when(menu_open, |menu| {
+            let star_label = if starred {
+                "☆ Remove Star"
+            } else {
+                "⭐ Star Message"
+            };
+            let item = |label: &'static str, suffix: &'static str| {
+                div()
+                    .id(SharedString::from(format!("{suffix}-{msg_id}")))
+                    .px_2()
+                    .py_1()
+                    .rounded_xs()
+                    .text_xs()
+                    .text_color(rgb(TEXT))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(ROW_HOVER)))
+                    .child(label)
+            };
+            menu.child(item("💬 Start a Discussion", "m-thread").on_click({
+                let this = this.clone();
+                let tmid = msg_id.clone();
+                move |_, _, cx| {
+                    this.update(cx, |chat, cx| {
+                        chat.open_menu = None;
+                        let _ = chat
+                            .commands
+                            .try_send(ChatCommand::OpenThread { tmid: tmid.clone() });
+                        cx.notify();
+                    });
+                }
+            }))
+            .child(item(star_label, "m-star").on_click({
+                let this = this.clone();
+                let msg_id = msg_id.clone();
+                move |_, _, cx| {
+                    this.update(cx, |chat, cx| chat.toggle_star(msg_id.clone(), starred, cx));
+                }
+            }))
+            .when(link_ready, |menu| {
+                menu.child(item("🔗 Copy Link", "m-link").on_click({
+                    let this = this.clone();
+                    let room_id = room_id.clone();
+                    let msg_id = msg_id.clone();
+                    move |_, _, cx| {
+                        this.update(cx, |chat, cx| {
+                            chat.open_menu = None;
+                            if let Some(link) = chat.permalink(&room_id, &msg_id) {
+                                cx.write_to_clipboard(ClipboardItem::new_string(link));
+                            }
+                            cx.notify();
+                        });
+                    }
+                }))
+            })
+            .child(item("📋 Copy Text", "m-copy").on_click({
+                let this = this.clone();
+                let text = edit_text.clone();
+                move |_, _, cx| {
+                    this.update(cx, |chat, cx| {
+                        chat.open_menu = None;
+                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                        cx.notify();
+                    });
+                }
+            }))
+            .child(item("✏ Edit", "m-edit").on_click({
+                let this = this.clone();
+                let room_id = room_id.clone();
+                let msg_id = msg_id.clone();
+                let edit_text = edit_text.clone();
+                move |_, window, cx| {
+                    this.update(cx, |chat, cx| {
+                        chat.open_menu = None;
+                        chat.begin_edit(
+                            room_id.clone(),
+                            msg_id.clone(),
+                            edit_text.clone(),
+                            window,
+                            cx,
+                        );
+                    });
+                }
+            }))
+        });
+
     div()
         .flex_none()
         .flex()
         .gap_1()
         .opacity(0.)
         .group_hover("msg", |style| style.opacity(1.))
-        .when(editing_this, |strip| strip.opacity(1.))
+        .when(editing_this || menu_open, |strip| strip.opacity(1.))
         .child(react)
         .child(edit)
         .child(thread)
         .child(delete)
+        .child(kebab)
+        .child(menu)
         .when(editing_this, |strip| {
             strip.child(button("✖", "cancel").on_click({
                 let this = this.clone();

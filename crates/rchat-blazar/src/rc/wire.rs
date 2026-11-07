@@ -119,6 +119,10 @@ pub struct WireMessage {
     /// Reaction name (server sends it colon-wrapped) → participant list.
     #[serde(default)]
     pub reactions: Option<std::collections::BTreeMap<String, WireReaction>>,
+    /// Starred-by list (user ids as values/objects on different server
+    /// versions) — leniently kept as JSON values.
+    #[serde(default)]
+    pub starred: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Deserialize)]

@@ -8,10 +8,10 @@ use std::ops::Range;
 
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla,
-    point, prelude::*, px, relative, rgb, rgba, size,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
+    fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::*;
 
@@ -36,8 +36,14 @@ actions!(
         Paste,
         Cut,
         Copy,
+        Submit,
     ]
 );
+
+/// Emitted when the user presses Enter: the composer submits.
+pub(crate) enum TextInputEvent {
+    Submitted,
+}
 
 pub(crate) struct TextInput {
     focus_handle: FocusHandle,
@@ -53,6 +59,7 @@ pub(crate) struct TextInput {
 
 impl TextInput {
     pub(crate) fn new(placeholder: &str, cx: &mut Context<Self>) -> Self {
+        cx.bind_keys([KeyBinding::new("enter", Submit, Some("TextInput"))]);
         Self {
             focus_handle: cx.focus_handle(),
             content: "".into(),
@@ -280,6 +287,12 @@ impl TextInput {
             .grapheme_indices(true)
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
             .unwrap_or(self.content.len())
+    }
+
+    fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.content.is_empty() {
+            cx.emit(TextInputEvent::Submitted);
+        }
     }
 
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
@@ -621,6 +634,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::submit))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -639,6 +653,8 @@ impl Render for TextInput {
             )
     }
 }
+
+impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {

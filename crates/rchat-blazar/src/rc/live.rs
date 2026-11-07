@@ -502,6 +502,9 @@ fn message_from_event(event: &Value) -> Option<Msg> {
             .map(str::to_owned),
         file: None,
         reactions,
+        // Live updates don't carry the starred set in this build; the
+        // REST refetch restores it.
+        starred_by_me: false,
     })
 }
 
