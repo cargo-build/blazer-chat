@@ -54,6 +54,10 @@ pub enum ChatCommand {
         path: String,
         msg: String,
     },
+    /// Sets or clears the local search query (empty clears). Search runs
+    /// over cached messages only — core Rocket.Chat has no server-side
+    /// message search, and neither does the original client.
+    Search(String),
 }
 
 /// What the application reports back; the UI folds these into [`ChatState`].
@@ -96,6 +100,8 @@ pub enum ChatEvent {
         room_id: String,
         unread: u32,
     },
+    /// Local echo of [`ChatCommand::Search`]; empty clears the results.
+    SearchQuery(String),
     /// The custom-emoji cache: (name, image path) pairs.
     Emoji {
         emojis: Vec<(String, String)>,
@@ -118,6 +124,17 @@ pub struct ChatState {
     /// Unread counts that arrived before the room list (the DDP burst
     /// beats the REST `rooms.get`); applied when rooms fold in.
     pending_unread: std::collections::HashMap<String, u32>,
+    /// Active local search query; `Some` switches the pane to results.
+    pub search_query: Option<String>,
+}
+
+/// One local-search hit.
+#[derive(Clone, Debug)]
+pub struct SearchHit {
+    pub room_id: String,
+    pub room: String,
+    pub sender: String,
+    pub text: String,
 }
 
 impl ChatState {
@@ -218,6 +235,10 @@ impl ChatState {
                 }
                 None
             }
+            ChatEvent::SearchQuery(query) => {
+                self.search_query = (!query.is_empty()).then_some(query);
+                None
+            }
             ChatEvent::Emoji { emojis } => {
                 self.emoji = emojis.iter().cloned().collect();
                 None
@@ -233,6 +254,36 @@ impl ChatState {
             None => &[],
         }
     }
+
+    /// Case-insensitive substring search over the cached messages (the
+    /// original client's local search covers its cache too); results in
+    /// room-list order, capped.
+    pub fn search(&self, query: &str) -> Vec<SearchHit> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut hits = Vec::new();
+        for room in &self.rooms {
+            let Some(messages) = self.messages.get(&room.id) else {
+                continue;
+            };
+            for message in messages {
+                if message.text.to_lowercase().contains(&needle) {
+                    hits.push(SearchHit {
+                        room_id: room.id.clone(),
+                        room: room.name.clone(),
+                        sender: message.sender.clone(),
+                        text: message.text.clone(),
+                    });
+                    if hits.len() >= 50 {
+                        return hits;
+                    }
+                }
+            }
+        }
+        hits
+    }
 }
 
 /// Mirror of the window state, written by the UI entity and served by the
@@ -245,6 +296,8 @@ pub struct UiSnapshot {
     pub rooms: Vec<String>,
     /// Rooms with a nonzero unread count: `"name ×count"`.
     pub badges: Vec<String>,
+    /// Local-search hits while a query is active: `"room — sender: text"`.
+    pub search: Vec<String>,
     pub active_room: Option<String>,
     pub messages: Vec<String>,
     pub error: Option<String>,
@@ -266,6 +319,14 @@ impl UiSnapshot {
                 .filter(|room| room.unread > 0)
                 .map(|room| format!("{} ×{}", room.name, room.unread))
                 .collect(),
+            search: match &state.search_query {
+                Some(query) => state
+                    .search(query)
+                    .iter()
+                    .map(|hit| format!("{} — {}: {}", hit.room, hit.sender, hit.text))
+                    .collect(),
+                None => Vec::new(),
+            },
             active_room: state.active_room.clone(),
             messages: state
                 .active_messages()
@@ -498,6 +559,8 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                 Err(error) => ChatEvent::Failed(error.to_string()),
             }
         }
+        // Local search needs no I/O: the state owns the cache.
+        ChatCommand::Search(query) => ChatEvent::SearchQuery(query),
     }
 }
 
@@ -643,6 +706,39 @@ mod tests {
 
         let snapshot = UiSnapshot::from_state(&state);
         assert!(snapshot.badges.is_empty());
+    }
+
+    #[test]
+    fn search_finds_hits_across_cached_rooms_case_insensitively() {
+        let mut state = ChatState::default();
+        state.apply(ChatEvent::Rooms {
+            rooms: vec![room("GENERAL", "general"), {
+                let mut dm = room("dm1", "alice");
+                dm.kind = 'd';
+                dm
+            }],
+        });
+        state.apply(ChatEvent::Messages {
+            room_id: "GENERAL".to_owned(),
+            messages: vec![message("m1", "tester", "Привет Мир")],
+        });
+        state.apply(ChatEvent::Messages {
+            room_id: "dm1".to_owned(),
+            messages: vec![message("m2", "alice", "hello world")],
+        });
+        state.apply(ChatEvent::SearchQuery("МИР".to_owned()));
+
+        let hits = state.search(state.search_query.as_deref().unwrap());
+        assert_eq!(hits.len(), 1, "case-insensitive across scripts");
+        assert_eq!(hits[0].room, "general");
+        assert_eq!(hits[0].sender, "tester");
+
+        let snapshot = UiSnapshot::from_state(&state);
+        assert_eq!(snapshot.search, vec!["general — tester: Привет Мир"]);
+
+        state.apply(ChatEvent::SearchQuery(String::new()));
+        assert!(state.search_query.is_none());
+        assert!(UiSnapshot::from_state(&state).search.is_empty());
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub(crate) struct ChatRoot {
     views: Vec<MessageView>,
     /// Virtualized pane state: only visible rows materialize.
     messages_list: ListState,
+    /// Local search box (the pane shows results while a query is set).
+    search: Entity<TextInput>,
     /// `(room_id, msg_id)` while the composer edits an existing message.
     editing: Option<(String, String)>,
 }
@@ -81,6 +83,7 @@ impl ChatRoot {
             focus: cx.focus_handle(),
             views: Vec::new(),
             messages_list: ListState::new(0, ListAlignment::Bottom, px(64.)),
+            search: cx.new(|cx| TextInput::new("Search…", cx)),
             editing: None,
         }
     }
@@ -195,6 +198,14 @@ impl ChatRoot {
         self.composer
             .update(cx, |composer, cx| composer.set_content(&text, cx));
         window.focus(&self.composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    /// Sends the current search box content as the active query; empty
+    /// clears the results.
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.search.read(cx).content().trim().to_owned();
+        let _ = self.commands.try_send(ChatCommand::Search(query));
         cx.notify();
     }
 
@@ -361,6 +372,89 @@ impl gpui::Render for ChatRoot {
                 .into_any_element()
         });
 
+        // Search strip: a query switches the pane to local results.
+        let search_this = cx.entity();
+        let search_strip = {
+            let search_this = search_this.clone();
+            div()
+                .flex()
+                .flex_none()
+                .gap_2()
+                .child(div().flex_1().child(self.search.clone()))
+                .child(
+                    div()
+                        .id("search")
+                        .px_3()
+                        .py_1()
+                        .bg(rgb(PANEL))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(ACCENT)))
+                        .child("🔍")
+                        .on_click(move |_, _, cx| {
+                            search_this.update(cx, |chat, cx| chat.run_search(cx));
+                        }),
+                )
+        };
+        let pane = match self.state.search_query.as_deref() {
+            Some(query) if !query.trim().is_empty() => {
+                let hits = self.state.search(query);
+                let results = hits
+                    .iter()
+                    .map(|hit| {
+                        let this = search_this.clone();
+                        let room_id = hit.room_id.clone();
+                        div()
+                            .id(SharedString::from(format!("hit-{}", hit.room_id)))
+                            .flex()
+                            .gap_2()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(BORDER)))
+                            .on_click(move |_, _, cx| {
+                                this.update(cx, |chat, cx| {
+                                    let query = chat.search.read(cx).content().to_owned();
+                                    chat.open_room(room_id.clone(), cx);
+                                    chat.search.update(cx, |box_, cx| {
+                                        box_.set_content("", cx);
+                                    });
+                                    let _ = chat.commands.try_send(ChatCommand::Search(query));
+                                    cx.notify();
+                                });
+                            })
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_sm()
+                                    .text_color(rgb(ACCENT))
+                                    .child(SharedString::from(hit.room.clone())),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_sm()
+                                    .text_color(rgb(MUTED))
+                                    .child(SharedString::from(hit.sender.clone())),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .child(SharedString::from(hit.text.clone())),
+                            )
+                    })
+                    .collect::<Vec<_>>();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .children(results)
+                    .into_any_element()
+            }
+            _ => messages.into_any_element(),
+        };
+
         div()
             .flex()
             .flex_col()
@@ -385,6 +479,7 @@ impl gpui::Render for ChatRoot {
                     ),
             )
             .child(error)
+            .child(search_strip)
             .child(
                 div()
                     .flex()
@@ -392,7 +487,7 @@ impl gpui::Render for ChatRoot {
                     .min_h_0()
                     .gap_3()
                     .child(panel("rooms", rooms))
-                    .child(panel("messages", messages)),
+                    .child(panel("messages", pane)),
             )
             .child(
                 div()

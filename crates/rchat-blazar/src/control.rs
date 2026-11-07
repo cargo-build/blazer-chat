@@ -116,6 +116,19 @@ pub async fn serve(
             }
         }
     });
+    control.post("/search", {
+        let self_commands = self_commands.clone();
+        move |JsonExtractor(body): JsonExtractor<SearchBody>| {
+            let self_commands = self_commands.clone();
+            async move {
+                if enqueue(&self_commands, ChatCommand::Search(body.query)) {
+                    queued()
+                } else {
+                    unavailable(r#"{"queued":false}"#)
+                }
+            }
+        }
+    });
     control.post("/quit", {
         let events = events.clone();
         move || {
@@ -206,6 +219,11 @@ struct FileBody {
     path: String,
     #[serde(default)]
     msg: String,
+}
+
+#[derive(Deserialize)]
+struct SearchBody {
+    query: String,
 }
 
 /// Visible to tests through the app boundary fold: the snapshot is the
