@@ -236,11 +236,19 @@ impl ChatRoot {
 impl ChatRoot {
     /// Toggles a 👍 reaction on one message (chat.react toggles on
     /// repeat).
-    fn toggle_reaction(&mut self, room_id: &str, msg_id: &str, cx: &mut Context<Self>) {
+    /// Rocket.Chat reactions are emoji NAMES on the wire (`+1`, `tada`,
+    /// …); the unicode glyph is display-only.
+    fn toggle_reaction(
+        &mut self,
+        room_id: &str,
+        msg_id: &str,
+        emoji: &str,
+        cx: &mut Context<Self>,
+    ) {
         let _ = self.commands.try_send(ChatCommand::React {
             room_id: room_id.to_owned(),
             msg_id: msg_id.to_owned(),
-            emoji: "👍".to_owned(),
+            emoji: emoji.to_owned(),
         });
         cx.notify();
     }
@@ -1046,14 +1054,29 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
             .child(label)
     };
 
-    let react = button("🎉", "react").on_click({
-        let this = this.clone();
-        let room_id = room_id.clone();
-        let msg_id = msg_id.clone();
-        move |_, _, cx| {
-            this.update(cx, |chat, cx| chat.toggle_reaction(&room_id, &msg_id, cx));
-        }
-    });
+    // The original client's quick-reaction set; wire names, glyphs for
+    // display.
+    let quick = [
+        ("👍", "+1"),
+        ("👎", "-1"),
+        ("😄", "smile"),
+        ("🎉", "tada"),
+        ("👀", "eyes"),
+    ];
+    let react = div()
+        .flex()
+        .gap_1()
+        .children(quick.iter().map(|(glyph, name)| {
+            let this = this.clone();
+            let room_id = room_id.clone();
+            let msg_id = msg_id.clone();
+            let name = *name;
+            button(glyph, "react").on_click(move |_, _, cx| {
+                this.update(cx, |chat, cx| {
+                    chat.toggle_reaction(&room_id, &msg_id, name, cx)
+                });
+            })
+        }));
     let edit = button("✏", "edit").on_click({
         let this = this.clone();
         let room_id = room_id.clone();
