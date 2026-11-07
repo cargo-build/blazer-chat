@@ -420,6 +420,88 @@ impl gpui::Render for ChatRoot {
                     }))
             }));
 
+        // Popup toasts: the pending notification list, docked above the
+        // pane (the original client's bottom-right toasts; in-window so
+        // nothing floats over the operator's desktop). Click opens the
+        // room; ✖ dismisses.
+        let toasts = div().flex().flex_none().flex_col().gap_1().children(
+            self.state
+                .notifications
+                .iter()
+                .enumerate()
+                .map(|(index, note)| {
+                    let this = cx.entity();
+                    let room_id = note.room_id.clone();
+                    let body = note.message.clone().unwrap_or_else(|| note.text.clone());
+                    div()
+                        .id(SharedString::from(format!("toast-{index}")))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1p5()
+                        .rounded_md()
+                        .bg(rgb(PANEL))
+                        .border_1()
+                        .border_color(rgb(ACCENT))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(ROW_HOVER)))
+                        .on_click({
+                            let this = this.clone();
+                            move |_, _, cx| {
+                                this.update(cx, |chat, cx| {
+                                    chat.open_room(room_id.clone(), cx);
+                                    chat.state.notifications.remove(index);
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(note.title.clone())),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .truncate()
+                                        .child(SharedString::from(body)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("toast-close-{index}")))
+                                .flex_none()
+                                .px_1()
+                                .rounded_xs()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(TEXT)))
+                                .child("✖")
+                                .on_click({
+                                    let this = this.clone();
+                                    move |_, _, cx| {
+                                        this.update(cx, |chat, cx| {
+                                            chat.state.notifications.remove(index);
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        )
+                }),
+        );
+
         // Search strip: a query switches the pane to local results.
         let search_this = cx.entity();
         let search_strip = {
@@ -589,7 +671,10 @@ impl gpui::Render for ChatRoot {
                     .min_h_0()
                     .gap_3()
                     .child(panel("rooms", rooms))
-                    .child(panel("messages", pane)),
+                    .child(panel(
+                        "messages",
+                        div().flex().flex_col().min_h_0().child(toasts).child(pane),
+                    )),
             )
             .child(
                 div()
