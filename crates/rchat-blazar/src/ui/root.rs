@@ -38,6 +38,8 @@ pub(crate) struct ChatRoot {
     scroll: ScrollHandle,
     /// Picked file paths from the attach dialog's worker thread.
     pick_tx: async_channel::Sender<Option<std::path::PathBuf>>,
+    /// An older-slice fetch is in flight (one at a time per pane).
+    loading_older: bool,
     /// Room whose messages the scroll handle last re-pinned.
     pinned_room: Option<String>,
 }
@@ -52,7 +54,7 @@ struct MessageView {
     /// Raw text — the edit action puts it back into the composer.
     text: String,
     lines: Vec<Vec<Span>>,
-    reactions: Vec<(String, u32)>,
+    reactions: Vec<(String, crate::rc::Reaction)>,
     /// `(name, url, size)` when the message carries an uploaded file.
     file: Option<(String, String, u64)>,
     /// Cached preview path for image attachments.
@@ -128,10 +130,23 @@ impl ChatRoot {
             scroll: ScrollHandle::new(),
             pinned_room: None,
             pick_tx,
+            loading_older: false,
         }
     }
 
     fn apply_event(&mut self, event: ChatEvent, cx: &mut Context<Self>) {
+        if matches!(event, ChatEvent::OlderMessages { .. }) {
+            self.loading_older = false;
+        }
+        // Prepending shifts rows: pin the previously-top message.
+        let anchor = match &event {
+            ChatEvent::OlderMessages { messages, .. } if !messages.is_empty() => self
+                .state
+                .active_messages()
+                .first()
+                .map(|message| message.id.clone()),
+            _ => None,
+        };
         let follow_up = self.state.apply(event);
         if let Some(command) = follow_up {
             let _ = self.commands.try_send(command);
@@ -139,6 +154,11 @@ impl ChatRoot {
         // Render data derives in the entity, never in render: the pane only
         // maps the precomputed spans to elements.
         self.rebuild_views();
+        if let Some(anchor_id) = anchor
+            && let Some(index) = self.views.iter().position(|view| view.id == anchor_id)
+        {
+            self.scroll.scroll_to_item(index);
+        }
         self.mirror();
         cx.notify();
     }
@@ -168,7 +188,7 @@ impl ChatRoot {
                 reactions: message
                     .reactions
                     .iter()
-                    .map(|(name, count)| (name.clone(), *count))
+                    .map(|(name, reaction)| (name.clone(), reaction.clone()))
                     .collect(),
                 file: message
                     .file
@@ -437,20 +457,43 @@ impl gpui::Render for ChatRoot {
                     Some((room, msg)) if *room == room_id && *msg == msg_id
                 );
                 let emoji = &self.state.emoji;
+                let me = self.state.username.clone();
                 let badges =
                     div()
                         .flex()
                         .flex_wrap()
                         .gap_1()
-                        .children(view.reactions.iter().map(|(name, count)| {
+                        .children(view.reactions.iter().map(|(name, reaction)| {
+                            let mine = me.as_deref().is_some_and(|me| reaction.has(me));
+                            let count = reaction.count();
+                            let names = reaction.usernames.join(", ");
                             let pill = div()
+                                .id(SharedString::from(format!("react-{msg_id}-{name}")))
                                 .px_1p5()
                                 .rounded_full()
                                 .border_1()
-                                .border_color(rgb(BORDER))
-                                .bg(rgb(PANEL))
+                                .border_color(rgb(if mine { ACCENT } else { BORDER }))
+                                .bg(rgb(if mine { ROW_HOVER } else { PANEL }))
                                 .text_xs()
-                                .text_color(rgb(TEXT));
+                                .text_color(rgb(TEXT))
+                                .cursor_pointer()
+                                .tooltip(move |_, app| {
+                                    app.new(|_| ReactionTooltip {
+                                        text: SharedString::from(names.clone()),
+                                    })
+                                    .into()
+                                })
+                                .on_click({
+                                    let this = this.clone();
+                                    let room_id = room_id.clone();
+                                    let msg_id = msg_id.clone();
+                                    let name = name.clone();
+                                    move |_, _, cx| {
+                                        this.update(cx, |chat, cx| {
+                                            chat.toggle_reaction(&room_id, &msg_id, &name, cx)
+                                        });
+                                    }
+                                });
                             match emoji.get(name) {
                                 Some(path) => pill.flex().gap_1().items_center().child(
                                     img(std::path::PathBuf::from(path)).h(px(14.0)).w(px(14.0)),
@@ -664,6 +707,20 @@ impl gpui::Render for ChatRoot {
                         }),
                 )
         };
+        // Scroll-to-top paging: one older slice at a time, until the
+        // room reports no more history.
+        let at_top = self.scroll.offset().y >= px(-1.0);
+        if at_top
+            && !self.loading_older
+            && let Some(room) = self.state.active_room.clone()
+            && !self.state.older_exhausted.contains(&room)
+        {
+            self.loading_older = true;
+            let _ = self
+                .commands
+                .try_send(ChatCommand::FetchOlder { room_id: room });
+        }
+
         let pane_title = self
             .state
             .rooms
@@ -1197,6 +1254,27 @@ fn human_bytes(size: u64) -> String {
         size if size < 1024 => format!("{size} B"),
         size if size < 1024 * 1024 => format!("{:.1} KB", size as f64 / 1024.0),
         size => format!("{:.1} MB", size as f64 / (1024.0 * 1024.0)),
+    }
+}
+
+/// The hover card over a reaction pill: who reacted.
+struct ReactionTooltip {
+    text: SharedString,
+}
+
+impl gpui::Render for ReactionTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .text_xs()
+            .text_color(rgb(TEXT))
+            .max_w(px(280.0))
+            .child(self.text.clone())
     }
 }
 

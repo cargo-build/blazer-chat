@@ -452,11 +452,19 @@ fn message_from_event(event: &Value) -> Option<Msg> {
             reactions
                 .iter()
                 .filter_map(|(name, reaction)| {
-                    let count = reaction
-                        .get("usernames")
-                        .and_then(Value::as_array)
-                        .map_or(0, Vec::len) as u32;
-                    (count > 0).then(|| (name.trim_matches(':').to_owned(), count))
+                    let usernames = reaction
+                        .get("usernames")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>();
+                    (!usernames.is_empty()).then(|| {
+                        (
+                            name.trim_matches(':').to_owned(),
+                            crate::rc::Reaction { usernames },
+                        )
+                    })
                 })
                 .collect()
         })

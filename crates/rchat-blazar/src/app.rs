@@ -60,6 +60,15 @@ pub enum ChatCommand {
     FetchAvatars {
         usernames: Vec<String>,
     },
+    /// Re-fetches the newest history slice for the room (the network
+    /// half of an instant cache-first open).
+    RefreshRoom {
+        room_id: String,
+    },
+    /// Loads the next older slice (triggered at the pane's top edge).
+    FetchOlder {
+        room_id: String,
+    },
     /// Sets or clears the local search query (empty clears). Search runs
     /// over cached messages only — core Rocket.Chat has no server-side
     /// message search, and neither does the original client.
@@ -107,6 +116,16 @@ pub enum ChatEvent {
     },
     /// A popup-grade notification for the user (M4).
     Notification(crate::rc::Notification),
+    /// The cached slice painted instantly; the refresh follows.
+    CachedMessages {
+        room_id: String,
+        messages: Vec<Msg>,
+    },
+    /// An older history slice (scroll-to-top paging): prepend + dedup.
+    OlderMessages {
+        room_id: String,
+        messages: Vec<Msg>,
+    },
     /// Cached avatar paths for message senders.
     Avatars {
         avatars: Vec<(String, String)>,
@@ -171,6 +190,8 @@ pub struct ChatState {
     pub notifications: Vec<crate::rc::Notification>,
     /// Sender username → cached avatar path.
     pub avatars: std::collections::HashMap<String, String>,
+    /// Rooms whose older history ran out (paging stops asking).
+    pub older_exhausted: std::collections::HashSet<String>,
 }
 
 /// One local-search hit.
@@ -283,17 +304,15 @@ impl ChatState {
                 msg_id,
                 emoji,
             } => {
-                // Local toggle until the authoritative live redelivery.
-                if let Some(room) = self.messages.get_mut(&room_id)
+                // Local toggle until the authoritative live redelivery;
+                // exact because the username is known here.
+                if let Some(me) = self.username.clone()
+                    && let Some(room) = self.messages.get_mut(&room_id)
                     && let Some(message) = room.iter_mut().find(|known| known.id == msg_id)
                 {
-                    let count = message.reactions.entry(emoji.clone()).or_default();
-                    match *count {
-                        0 => *count = 1,
-                        1 => {
-                            message.reactions.remove(&emoji);
-                        }
-                        past => *count = past - 1,
+                    let reaction = message.reactions.entry(emoji.clone()).or_default();
+                    if !reaction.toggle(&me) {
+                        message.reactions.remove(&emoji);
                     }
                 }
                 None
@@ -339,6 +358,33 @@ impl ChatState {
             }
             ChatEvent::Emoji { emojis } => {
                 self.emoji = emojis.iter().cloned().collect();
+                None
+            }
+            ChatEvent::CachedMessages { room_id, messages } => {
+                self.messages.insert(room_id.clone(), messages);
+                if let Some(room) = self.rooms.iter_mut().find(|room| room.id == room_id) {
+                    room.unread = 0;
+                }
+                self.active_room = Some(room_id.clone());
+                self.error = None;
+                // The network refresh replaces this slice right away.
+                Some(ChatCommand::RefreshRoom { room_id })
+            }
+            ChatEvent::OlderMessages { room_id, messages } => {
+                if messages.is_empty() {
+                    self.older_exhausted.insert(room_id);
+                } else {
+                    let entry = self.messages.entry(room_id.clone()).or_default();
+                    let known: std::collections::HashSet<String> =
+                        entry.iter().map(|message| message.id.clone()).collect();
+                    let fresh: Vec<Msg> = messages
+                        .into_iter()
+                        .filter(|message| !known.contains(&message.id))
+                        .collect();
+                    entry.splice(0..0, fresh);
+                    let excess = entry.len().saturating_sub(400);
+                    entry.drain(0..excess);
+                }
                 None
             }
             ChatEvent::Notification(note) => {
@@ -497,7 +543,9 @@ impl UiSnapshot {
                             message
                                 .reactions
                                 .iter()
-                                .map(|(name, count)| format!("[{name} ×{count}]"))
+                                .map(|(name, reaction)| {
+                                    format!("[{name} ×{}]", reaction.count())
+                                })
                                 .collect::<String>(),
                         ),
                     };
@@ -698,13 +746,26 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             }
             Err(error) => ChatEvent::Failed(error.to_string()),
         },
-        ChatCommand::OpenRoom { room_id } => match client.history(&room_id).await {
+        ChatCommand::OpenRoom { room_id } => {
+            // Instant open: the cached slice paints now; the network
+            // refresh follows as its own command.
+            let messages = store
+                .and_then(|store| store.load_messages(&room_id))
+                .unwrap_or_default();
+            ChatEvent::CachedMessages { room_id, messages }
+        }
+        ChatCommand::RefreshRoom { room_id } => match client.history(&room_id).await {
             Ok(mut messages) => {
                 // Server-side read receipt: the unread stream stops
                 // counting this room. Cosmetic — a refusal is logged, not
                 // banner-worthy.
                 if let Err(error) = client.mark_read(&room_id).await {
                     eprintln!("rchat-blazar: mark read: {error}");
+                }
+                if let Some(store) = store
+                    && let Err(error) = store.save_messages(&room_id, &messages)
+                {
+                    eprintln!("rchat-blazar: messages not cached: {error}");
                 }
                 // Inline image previews: fetch into the cache; a chip
                 // remains the fallback for anything that fails.
@@ -730,6 +791,22 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             }
             Err(error) => ChatEvent::Failed(error.to_string()),
         },
+        ChatCommand::FetchOlder { room_id } => {
+            let cursor = store
+                .and_then(|store| store.load_messages(&room_id))
+                .and_then(|messages| messages.first().map(|message| message.ts.clone()));
+            match cursor {
+                Some(ts) => match client.history_page(&room_id, Some(&ts)).await {
+                    Ok(messages) => ChatEvent::OlderMessages { room_id, messages },
+                    Err(error) => ChatEvent::Failed(error.to_string()),
+                },
+                // Nothing cached: the refresh already covers the slice.
+                None => ChatEvent::OlderMessages {
+                    room_id,
+                    messages: Vec::new(),
+                },
+            }
+        }
         ChatCommand::Send { room_id, text } => match client.send(&room_id, &text).await {
             Ok(message) => ChatEvent::Sent { message },
             Err(error) => ChatEvent::Failed(error.to_string()),
@@ -899,14 +976,25 @@ mod tests {
         });
 
         let mut edited = message("m2", "tester", "new text");
-        edited.reactions.insert("tada".to_owned(), 2);
+        edited.reactions.insert(
+            "tada".to_owned(),
+            crate::rc::Reaction {
+                usernames: vec!["a".to_owned(), "b".to_owned()],
+            },
+        );
         state.apply(ChatEvent::MessageUpdated {
             message: edited.clone(),
         });
         let messages = state.active_messages();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].text, "new text");
-        assert_eq!(messages[1].reactions.get("tada"), Some(&2));
+        assert_eq!(
+            messages[1]
+                .reactions
+                .get("tada")
+                .map(crate::rc::Reaction::count),
+            Some(2)
+        );
 
         state.apply(ChatEvent::MessageDeleted {
             room_id: "GENERAL".to_owned(),
@@ -1001,6 +1089,53 @@ mod tests {
     }
 
     #[test]
+    fn cached_messages_paint_instantly_and_refresh_follows() {
+        let mut state = ChatState::default();
+        let follow_up = state.apply(ChatEvent::CachedMessages {
+            room_id: "dm".to_owned(),
+            messages: vec![message("m1", "tester", "cached slice")],
+        });
+        assert_eq!(state.active_room.as_deref(), Some("dm"));
+        assert_eq!(state.active_messages().len(), 1);
+        match follow_up {
+            Some(ChatCommand::RefreshRoom { room_id }) => {
+                assert_eq!(room_id, "dm");
+            }
+            other => panic!("expected RefreshRoom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn older_slices_prepend_dedup_and_exhaust() {
+        let mut state = ChatState {
+            active_room: Some("dm".to_owned()),
+            ..ChatState::default()
+        };
+        state.apply(ChatEvent::Messages {
+            room_id: "dm".to_owned(),
+            messages: vec![message("m1", "tester", "newest")],
+        });
+        // A slice with a duplicate and a fresh message: dedup keeps one.
+        let mut duplicate = message("m1", "tester", "newest");
+        duplicate.id = "m1".to_owned();
+        state.apply(ChatEvent::OlderMessages {
+            room_id: "dm".to_owned(),
+            messages: vec![message("m0", "tester", "older"), duplicate],
+        });
+        let messages = state.active_messages();
+        assert_eq!(messages.len(), 2, "prepended, deduplicated");
+        assert_eq!(messages[0].id, "m0");
+        assert_eq!(messages[1].id, "m1");
+
+        // An empty slice means the room ran out of history.
+        state.apply(ChatEvent::OlderMessages {
+            room_id: "dm".to_owned(),
+            messages: Vec::new(),
+        });
+        assert!(state.older_exhausted.contains("dm"));
+    }
+
+    #[test]
     fn notifications_fold_for_other_rooms_and_skip_the_active_one() {
         let mut state = ChatState {
             active_room: Some("dm".to_owned()),
@@ -1090,7 +1225,10 @@ mod tests {
 
     #[test]
     fn snapshot_lines_carry_reaction_badges() {
-        let mut state = ChatState::default();
+        let mut state = ChatState {
+            username: Some("tester".to_owned()),
+            ..ChatState::default()
+        };
         state.apply(ChatEvent::Messages {
             room_id: "GENERAL".to_owned(),
             messages: vec![message("m1", "tester", "hello")],

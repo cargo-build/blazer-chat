@@ -307,6 +307,29 @@ fn attachments_decode_with_the_server_url_and_mime() {
 }
 
 #[test]
+fn history_page_passes_the_paging_cursor() {
+    let routes = vec![
+        ("login", 200, LOGIN_BODY),
+        ("rooms.get", 200, ROOMS_BODY),
+        ("subscriptions.get", 200, SUBSCRIPTIONS_BODY),
+        ("channels.history", 200, FILE_HISTORY_BODY),
+    ];
+    let transport = FakeTransport::answering(&routes);
+    let requests = transport.clone();
+    let mut rc = client(transport);
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    futures_lite::future::block_on(rc.rooms()).unwrap();
+    futures_lite::future::block_on(rc.history_page("GENERAL", Some("2026-01-01T00:00:00Z")))
+        .unwrap();
+    assert!(
+        requests
+            .last_request()
+            .contains("latest=2026-01-01T00:00:00Z"),
+        "the oldest cached timestamp pages the next slice"
+    );
+}
+
+#[test]
 fn thread_metadata_decodes_from_history() {
     let body = r#"{"messages":[{"_id":"root1","rid":"GENERAL","msg":"root",
         "u":{"username":"tester"},"tcount":2,"tlm":"2026-11-07T19:31:08.613Z"}],

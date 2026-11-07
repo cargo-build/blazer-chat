@@ -8,7 +8,9 @@ mod wire;
 
 pub use client::RcClient;
 pub use live::{DdpLive, LiveCommand, LiveEvent, websocket_url};
-pub use types::{AttachedFile, CustomEmoji, Msg, Notification, RcError, RcSettings, Room, Session};
+pub use types::{
+    AttachedFile, CustomEmoji, Msg, Notification, RcError, RcSettings, Reaction, Room, Session,
+};
 
 #[cfg(test)]
 mod client_tests;

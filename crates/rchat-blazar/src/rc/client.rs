@@ -274,12 +274,25 @@ impl<T: Transport> RcClient<T> {
     /// room kind from `rooms.get`: channels, groups, direct messages —
     /// each has its own REST path with the same response shape.
     pub async fn history(&mut self, room_id: &str) -> Result<Vec<Msg>, RcError> {
+        self.history_page(room_id, None).await
+    }
+
+    /// One history slice: up to 50 messages strictly before `cursor`
+    /// (the oldest cached timestamp). `None` fetches the newest slice.
+    pub async fn history_page(
+        &mut self,
+        room_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<Vec<Msg>, RcError> {
         let endpoint = match self.room_kinds.get(room_id).copied().unwrap_or('c') {
             'p' => "groups.history",
             'd' => "im.history",
             _ => "channels.history",
         };
-        let path = format!("/api/v1/{endpoint}?roomId={room_id}&count=50");
+        let mut path = format!("/api/v1/{endpoint}?roomId={room_id}&count=50");
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&latest={cursor}"));
+        }
         let body = self.call("GET", &path, None, true).await?;
         let parsed: HistoryResponse = Self::parse(&body, endpoint)?;
         Ok(parsed
@@ -455,8 +468,13 @@ impl<T: Transport> RcClient<T> {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|(name, reaction)| {
-                let count = reaction.usernames.map_or(0, |users| users.len() as u32);
-                (count > 0).then(|| (name.trim_matches(':').to_owned(), count))
+                let usernames = reaction.usernames?;
+                (!usernames.is_empty()).then(|| {
+                    (
+                        name.trim_matches(':').to_owned(),
+                        crate::rc::Reaction { usernames },
+                    )
+                })
             })
             .collect();
         let file = message.file.map(|file| {

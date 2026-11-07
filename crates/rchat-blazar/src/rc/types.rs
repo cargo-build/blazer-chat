@@ -93,7 +93,7 @@ pub struct Room {
 }
 
 /// One chat message, oldest position last.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Msg {
     /// Message identity on the server; consumed by the live-updates slice
     /// (dedup and edits), not by the M1 REST view.
@@ -111,9 +111,36 @@ pub struct Msg {
     /// An uploaded attachment; the pane renders it as a chip that opens
     /// the file on the server.
     pub file: Option<AttachedFile>,
-    /// Reaction name (colons stripped) → user count; the live stream is
-    /// the authority and replaces this map on every redelivery.
-    pub reactions: std::collections::BTreeMap<String, u32>,
+    /// Reaction name (colons stripped) → who reacted; the live stream
+    /// is the authority and replaces this map on every redelivery.
+    pub reactions: std::collections::BTreeMap<String, Reaction>,
+}
+
+/// One reaction's participants (wire `usernames`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Reaction {
+    pub usernames: Vec<String>,
+}
+
+impl Reaction {
+    pub fn count(&self) -> usize {
+        self.usernames.len()
+    }
+
+    pub fn has(&self, username: &str) -> bool {
+        self.usernames.iter().any(|user| user == username)
+    }
+
+    /// Adds or removes the user; empty after removal.
+    pub fn toggle(&mut self, username: &str) -> bool {
+        let had = self.has(username);
+        if had {
+            self.usernames.retain(|user| user != username);
+        } else {
+            self.usernames.push(username.to_owned());
+        }
+        !had
+    }
 }
 
 /// One `stream-notify-user/{uid}/notification` event: a message for the
@@ -139,7 +166,7 @@ pub struct Notification {
 }
 
 /// One uploaded attachment.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AttachedFile {
     pub name: String,
     pub size: u64,

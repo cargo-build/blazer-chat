@@ -20,6 +20,7 @@ use crate::rc::{Room, Session};
 const TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("kv");
 const SESSION_KEY: &str = "session";
 const ROOMS_KEY: &str = "rooms";
+const MESSAGES_PREFIX: &str = "messages:";
 const EMOJI_KEY: &str = "emoji";
 
 pub struct Store {
@@ -111,6 +112,16 @@ impl Store {
 
     pub fn save_rooms(&self, rooms: &[Room]) -> Result<(), String> {
         self.put_json(ROOMS_KEY, &StoredRoomsRef { rooms })
+    }
+
+    /// The cached newest history slice for a room: instant room opens
+    /// paint this before the network refresh lands.
+    pub fn load_messages(&self, room_id: &str) -> Option<Vec<crate::rc::Msg>> {
+        self.get_json(&format!("{MESSAGES_PREFIX}{room_id}"))
+    }
+
+    pub fn save_messages(&self, room_id: &str, messages: &[crate::rc::Msg]) -> Result<(), String> {
+        self.put_json(&format!("{MESSAGES_PREFIX}{room_id}"), &messages)
     }
 
     /// The cached custom emojis (the merged delta state).
@@ -226,10 +237,11 @@ mod tests {
     use super::*;
 
     fn temp_store() -> Store {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "rchat-blazar-test-{}-{:?}",
+            "rchat-blazar-test-{}-{}",
             std::process::id(),
-            std::time::Instant::now().elapsed().as_nanos()
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let db = redb::Database::create(dir.join("store.redb")).unwrap();
@@ -285,5 +297,28 @@ mod tests {
         }];
         store.save_rooms(&rooms).unwrap();
         assert_eq!(store.load_rooms().unwrap(), rooms);
+    }
+
+    #[test]
+    fn messages_roundtrip_per_room() {
+        let store = temp_store();
+        assert!(store.load_messages("GENERAL").is_none());
+        let messages = vec![crate::rc::Msg {
+            id: "m1".to_owned(),
+            room_id: "GENERAL".to_owned(),
+            sender: "tester".to_owned(),
+            text: "cached".to_owned(),
+            ts: "2026-11-07T20:00:00Z".to_owned(),
+            tmid: None,
+            tcount: None,
+            tlm: None,
+            file: None,
+            reactions: Default::default(),
+        }];
+        store.save_messages("GENERAL", &messages).unwrap();
+        assert_eq!(
+            store.load_messages("GENERAL").as_deref(),
+            Some(&messages[..])
+        );
     }
 }
