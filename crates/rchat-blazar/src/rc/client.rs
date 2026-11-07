@@ -300,6 +300,33 @@ impl<T: Transport> RcClient<T> {
         }
     }
 
+    /// One thread's messages, oldest first (`chat.getThreadMessages`).
+    pub async fn thread_messages(&mut self, tmid: &str) -> Result<Vec<Msg>, RcError> {
+        let path =
+            format!("/api/v1/chat.getThreadMessages?tmid={tmid}&count=50&sort=%7B%22ts%22%3A-1%7D");
+        let body = self.call("GET", &path, None, true).await?;
+        let parsed: HistoryResponse = Self::parse(&body, "chat.getThreadMessages")?;
+        Ok(parsed
+            .messages
+            .into_iter()
+            .map(Self::message_into_msg)
+            .rev()
+            .collect())
+    }
+
+    /// Posts a thread reply (`chat.sendMessage` with `tmid`).
+    pub async fn send_thread(&self, room_id: &str, tmid: &str, text: &str) -> Result<Msg, RcError> {
+        let body = serde_json::json!({
+            "message": { "rid": room_id, "msg": text, "tmid": tmid }
+        })
+        .to_string();
+        let body = self
+            .call("POST", "/api/v1/chat.sendMessage", Some(body), true)
+            .await?;
+        let parsed: SendMessageResponse = Self::parse(&body, "chat.sendMessage")?;
+        Ok(Self::message_into_msg(parsed.message))
+    }
+
     /// Marks the room read server-side (`subscriptions.read`), so the
     /// unread stream stops counting it.
     pub async fn mark_read(&mut self, room_id: &str) -> Result<(), RcError> {
@@ -399,6 +426,7 @@ impl<T: Transport> RcClient<T> {
             sender: message.u.and_then(|user| user.username).unwrap_or_default(),
             text: message.msg.unwrap_or_default(),
             ts: message.ts.unwrap_or_default(),
+            tmid: message.tmid,
             reactions,
         }
     }

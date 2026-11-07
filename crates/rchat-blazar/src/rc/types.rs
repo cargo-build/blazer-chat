@@ -98,6 +98,8 @@ pub struct Msg {
     pub sender: String,
     pub text: String,
     pub ts: String,
+    /// Thread parent id when this is a thread reply.
+    pub tmid: Option<String>,
     /// Reaction name (colons stripped) → user count; the live stream is
     /// the authority and replaces this map on every redelivery.
     pub reactions: std::collections::BTreeMap<String, u32>,

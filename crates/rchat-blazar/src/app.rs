@@ -58,6 +58,18 @@ pub enum ChatCommand {
     /// over cached messages only — core Rocket.Chat has no server-side
     /// message search, and neither does the original client.
     Search(String),
+    /// Opens a thread view: fetches the thread's messages.
+    OpenThread {
+        tmid: String,
+    },
+    /// Closes the thread view.
+    CloseThread,
+    /// Posts a thread reply.
+    SendThread {
+        room_id: String,
+        tmid: String,
+        text: String,
+    },
 }
 
 /// What the application reports back; the UI folds these into [`ChatState`].
@@ -102,6 +114,14 @@ pub enum ChatEvent {
     },
     /// Local echo of [`ChatCommand::Search`]; empty clears the results.
     SearchQuery(String),
+    /// The thread's messages arrived; the pane switches to the thread.
+    ThreadMessages {
+        room_id: String,
+        tmid: String,
+        messages: Vec<Msg>,
+    },
+    /// The thread view closed; the pane returns to the room.
+    ThreadClosed,
     /// The custom-emoji cache: (name, image path) pairs.
     Emoji {
         emojis: Vec<(String, String)>,
@@ -126,6 +146,10 @@ pub struct ChatState {
     pending_unread: std::collections::HashMap<String, u32>,
     /// Active local search query; `Some` switches the pane to results.
     pub search_query: Option<String>,
+    /// Open thread view: `(room_id, tmid)`; the pane shows the thread.
+    pub open_thread: Option<(String, String)>,
+    /// Fetched threads by their root message id, oldest first.
+    threads: std::collections::HashMap<String, Vec<Msg>>,
 }
 
 /// One local-search hit.
@@ -172,8 +196,16 @@ impl ChatState {
                 None
             }
             ChatEvent::Sent { message } => {
-                let room_id = message.room_id.clone();
-                self.messages.entry(room_id).or_default().push(message);
+                match message.tmid.clone() {
+                    // Thread replies surface in their thread view only.
+                    Some(tmid) => {
+                        self.threads.entry(tmid).or_default().push(message);
+                    }
+                    None => {
+                        let room_id = message.room_id.clone();
+                        self.messages.entry(room_id).or_default().push(message);
+                    }
+                }
                 None
             }
             ChatEvent::LiveMessage(message) => {
@@ -239,6 +271,26 @@ impl ChatState {
                 self.search_query = (!query.is_empty()).then_some(query);
                 None
             }
+            ChatEvent::ThreadMessages {
+                room_id,
+                tmid,
+                messages,
+            } => {
+                // Merge the fetch into any optimistic replies already in
+                // the thread; dedup by server id keeps re-fetches stable.
+                let entry = self.threads.entry(tmid.clone()).or_default();
+                for message in messages {
+                    if !entry.iter().any(|known| known.id == message.id) {
+                        entry.push(message);
+                    }
+                }
+                self.open_thread = Some((room_id, tmid));
+                None
+            }
+            ChatEvent::ThreadClosed => {
+                self.open_thread = None;
+                None
+            }
             ChatEvent::Emoji { emojis } => {
                 self.emoji = emojis.iter().cloned().collect();
                 None
@@ -253,6 +305,11 @@ impl ChatState {
             Some(room_id) => self.messages.get(room_id).map(Vec::as_slice).unwrap_or(&[]),
             None => &[],
         }
+    }
+
+    /// The open thread's messages, oldest first.
+    pub fn thread(&self, tmid: &str) -> &[Msg] {
+        self.threads.get(tmid).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Case-insensitive substring search over the cached messages (the
@@ -298,6 +355,8 @@ pub struct UiSnapshot {
     pub badges: Vec<String>,
     /// Local-search hits while a query is active: `"room — sender: text"`.
     pub search: Vec<String>,
+    /// The open thread's messages: `"sender: text"`.
+    pub thread: Vec<String>,
     pub active_room: Option<String>,
     pub messages: Vec<String>,
     pub error: Option<String>,
@@ -325,6 +384,19 @@ impl UiSnapshot {
                     .iter()
                     .map(|hit| format!("{} — {}: {}", hit.room, hit.sender, hit.text))
                     .collect(),
+                None => Vec::new(),
+            },
+            thread: match &state.open_thread {
+                Some((_, tmid)) => state
+                    .threads
+                    .get(tmid)
+                    .map(|messages| {
+                        messages
+                            .iter()
+                            .map(|message| format!("{}: {}", message.sender, message.text))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 None => Vec::new(),
             },
             active_room: state.active_room.clone(),
@@ -561,6 +633,31 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
         }
         // Local search needs no I/O: the state owns the cache.
         ChatCommand::Search(query) => ChatEvent::SearchQuery(query),
+        ChatCommand::OpenThread { tmid } => {
+            let tmid_owned = tmid.clone();
+            match client.thread_messages(&tmid).await {
+                Ok(messages) => match messages.first().map(|message| message.room_id.clone()) {
+                    Some(room_id) => ChatEvent::ThreadMessages {
+                        room_id,
+                        tmid,
+                        messages,
+                    },
+                    None => ChatEvent::Failed(format!(
+                        "thread {tmid_owned}: no messages (root not visible)"
+                    )),
+                },
+                Err(error) => ChatEvent::Failed(error.to_string()),
+            }
+        }
+        ChatCommand::CloseThread => ChatEvent::ThreadClosed,
+        ChatCommand::SendThread {
+            room_id,
+            tmid,
+            text,
+        } => match client.send_thread(&room_id, &tmid, &text).await {
+            Ok(message) => ChatEvent::Sent { message },
+            Err(error) => ChatEvent::Failed(error.to_string()),
+        },
     }
 }
 
@@ -585,6 +682,7 @@ mod tests {
             sender: sender.to_owned(),
             text: text.to_owned(),
             ts: String::new(),
+            tmid: None,
             reactions: Default::default(),
         }
     }
@@ -706,6 +804,31 @@ mod tests {
 
         let snapshot = UiSnapshot::from_state(&state);
         assert!(snapshot.badges.is_empty());
+    }
+
+    #[test]
+    fn thread_replies_stay_in_their_thread_view() {
+        let mut state = ChatState::default();
+
+        // A reply carries tmid: it lands in the thread, not the room pane.
+        let mut reply = message("r1", "tester", "in thread");
+        reply.tmid = Some("root".to_owned());
+        state.apply(ChatEvent::Sent { message: reply });
+        state.apply(ChatEvent::ThreadMessages {
+            room_id: "GENERAL".to_owned(),
+            tmid: "root".to_owned(),
+            messages: vec![message("r0", "tester", "thread root")],
+        });
+        assert_eq!(
+            state.open_thread.as_ref(),
+            Some(&("GENERAL".to_owned(), "root".to_owned()))
+        );
+        assert_eq!(state.thread("root").len(), 2, "root + reply");
+        assert!(state.active_messages().is_empty(), "room pane unaffected");
+
+        state.apply(ChatEvent::ThreadClosed);
+        assert!(state.open_thread.is_none());
+        assert_eq!(state.thread("root").len(), 2, "the thread stays cached");
     }
 
     #[test]

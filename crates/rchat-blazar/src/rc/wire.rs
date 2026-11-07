@@ -82,6 +82,9 @@ pub struct WireMessage {
     pub msg: Option<String>,
     pub ts: Option<String>,
     pub u: Option<WireUser>,
+    /// Thread parent id when the message is a thread reply.
+    #[serde(default)]
+    pub tmid: Option<String>,
     /// Reaction name (server sends it colon-wrapped) → participant list.
     #[serde(default)]
     pub reactions: Option<std::collections::BTreeMap<String, WireReaction>>,

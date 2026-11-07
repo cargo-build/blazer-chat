@@ -82,13 +82,18 @@ pub async fn serve(
         move |JsonExtractor(body): JsonExtractor<SendBody>| {
             let self_commands = self_commands.clone();
             async move {
-                if enqueue(
-                    &self_commands,
-                    ChatCommand::Send {
+                let command = match body.tmid {
+                    Some(tmid) => ChatCommand::SendThread {
+                        room_id: body.room,
+                        tmid,
+                        text: body.text,
+                    },
+                    None => ChatCommand::Send {
                         room_id: body.room,
                         text: body.text,
                     },
-                ) {
+                };
+                if enqueue(&self_commands, command) {
                     queued()
                 } else {
                     unavailable(r#"{"queued":false}"#)
@@ -109,6 +114,32 @@ pub async fn serve(
                         msg: body.msg,
                     },
                 ) {
+                    queued()
+                } else {
+                    unavailable(r#"{"queued":false}"#)
+                }
+            }
+        }
+    });
+    control.post("/thread", {
+        let self_commands = self_commands.clone();
+        move |JsonExtractor(body): JsonExtractor<ThreadBody>| {
+            let self_commands = self_commands.clone();
+            async move {
+                if enqueue(&self_commands, ChatCommand::OpenThread { tmid: body.tmid }) {
+                    queued()
+                } else {
+                    unavailable(r#"{"queued":false}"#)
+                }
+            }
+        }
+    });
+    control.post("/thread-close", {
+        let self_commands = self_commands.clone();
+        move || {
+            let self_commands = self_commands.clone();
+            async move {
+                if enqueue(&self_commands, ChatCommand::CloseThread) {
                     queued()
                 } else {
                     unavailable(r#"{"queued":false}"#)
@@ -211,6 +242,8 @@ struct RoomBody {
 struct SendBody {
     room: String,
     text: String,
+    #[serde(default)]
+    tmid: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -224,6 +257,11 @@ struct FileBody {
 #[derive(Deserialize)]
 struct SearchBody {
     query: String,
+}
+
+#[derive(Deserialize)]
+struct ThreadBody {
+    tmid: String,
 }
 
 /// Visible to tests through the app boundary fold: the snapshot is the

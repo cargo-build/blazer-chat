@@ -398,6 +398,10 @@ fn message_from_event(event: &Value) -> Option<Msg> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
+        tmid: message
+            .get("tmid")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         reactions,
     })
 }

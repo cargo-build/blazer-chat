@@ -97,6 +97,7 @@ const SUBSCRIPTIONS_BODY: &str = r#"{"update":[
 ],"success":true}"#;
 const MEDIA_BODY: &str =
     r#"{"file":{"_id":"f1","url":"/file-upload/f1/probe.txt"},"success":true}"#;
+const THREAD_BODY: &str = r#"{"messages":[{"_id":"r1","rid":"GENERAL","msg":"reply","tmid":"root","u":{"username":"tester"}}],"success":true}"#;
 const NOT_ALLOWED_BODY: &str =
     r#"{"success":false,"error":"Not allowed [error-action-not-allowed]"}"#;
 const UNAUTHORIZED_BODY: &str =
@@ -121,6 +122,7 @@ fn authenticated_routes() -> Vec<(&'static str, u16, &'static str)> {
         ("subscriptions.get", 200, SUBSCRIPTIONS_BODY),
         ("rooms.media/", 200, MEDIA_BODY),
         ("rooms.mediaConfirm/", 200, SEND_BODY),
+        ("chat.getThreadMessages", 200, THREAD_BODY),
     ]
 }
 
@@ -272,6 +274,25 @@ fn mime_type_maps_common_extensions() {
         super::client::mime_type("blob.xyz"),
         "application/octet-stream"
     );
+}
+
+#[test]
+fn threads_fetch_and_reply_with_the_documented_shapes() {
+    let transport = FakeTransport::answering(&authenticated_routes());
+    let mut rc = client(transport.clone());
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+
+    let messages = futures_lite::future::block_on(rc.thread_messages("root")).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].tmid.as_deref(), Some("root"));
+    let request = transport.last_request();
+    assert!(request.contains("GET /api/v1/chat.getThreadMessages?tmid=root"));
+
+    let reply = futures_lite::future::block_on(rc.send_thread("GENERAL", "root", "reply")).unwrap();
+    let request = transport.last_request();
+    assert!(request.contains("POST /api/v1/chat.sendMessage"));
+    assert!(request.contains(r#""tmid":"root""#));
+    assert_eq!(reply.id, "m3", "the canned send answer");
 }
 
 #[test]

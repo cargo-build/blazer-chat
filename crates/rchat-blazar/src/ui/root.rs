@@ -398,61 +398,114 @@ impl gpui::Render for ChatRoot {
                         }),
                 )
         };
-        let pane = match self.state.search_query.as_deref() {
-            Some(query) if !query.trim().is_empty() => {
-                let hits = self.state.search(query);
-                let results = hits
-                    .iter()
-                    .map(|hit| {
-                        let this = search_this.clone();
-                        let room_id = hit.room_id.clone();
-                        div()
-                            .id(SharedString::from(format!("hit-{}", hit.room_id)))
-                            .flex()
-                            .gap_2()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(BORDER)))
-                            .on_click(move |_, _, cx| {
-                                this.update(cx, |chat, cx| {
-                                    let query = chat.search.read(cx).content().to_owned();
-                                    chat.open_room(room_id.clone(), cx);
-                                    chat.search.update(cx, |box_, cx| {
-                                        box_.set_content("", cx);
-                                    });
-                                    let _ = chat.commands.try_send(ChatCommand::Search(query));
-                                    cx.notify();
+        let pane = if let Some((room_id, tmid)) = self.state.open_thread.clone() {
+            // Thread view: back button, then the thread's messages.
+            let this = search_this.clone();
+            let rows = self
+                .state
+                .thread(&tmid)
+                .iter()
+                .map(|message| {
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_sm()
+                                .text_color(rgb(MUTED))
+                                .child(SharedString::from(message.sender.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .child(SharedString::from(message.text.clone())),
+                        )
+                })
+                .collect::<Vec<_>>();
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .id("thread-back")
+                        .flex_none()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_xs()
+                        .bg(rgb(PANEL))
+                        .text_sm()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(ACCENT)))
+                        .child("← thread")
+                        .on_click(move |_, _, cx| {
+                            this.update(cx, |chat, cx| {
+                                let _ = chat.commands.try_send(ChatCommand::CloseThread);
+                                let _room_id = room_id.clone();
+                                cx.notify();
+                            });
+                        }),
+                )
+                .children(rows)
+                .into_any_element()
+        } else if let Some(query) = self.state.search_query.as_deref()
+            && !query.trim().is_empty()
+        {
+            let hits = self.state.search(query);
+            let results = hits
+                .iter()
+                .map(|hit| {
+                    let this = search_this.clone();
+                    let room_id = hit.room_id.clone();
+                    div()
+                        .id(SharedString::from(format!("hit-{}", hit.room_id)))
+                        .flex()
+                        .gap_2()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(BORDER)))
+                        .on_click(move |_, _, cx| {
+                            this.update(cx, |chat, cx| {
+                                let query = chat.search.read(cx).content().to_owned();
+                                chat.open_room(room_id.clone(), cx);
+                                chat.search.update(cx, |box_, cx| {
+                                    box_.set_content("", cx);
                                 });
-                            })
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_sm()
-                                    .text_color(rgb(ACCENT))
-                                    .child(SharedString::from(hit.room.clone())),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_sm()
-                                    .text_color(rgb(MUTED))
-                                    .child(SharedString::from(hit.sender.clone())),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_sm()
-                                    .child(SharedString::from(hit.text.clone())),
-                            )
-                    })
-                    .collect::<Vec<_>>();
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .children(results)
-                    .into_any_element()
-            }
-            _ => messages.into_any_element(),
+                                let _ = chat.commands.try_send(ChatCommand::Search(query));
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_sm()
+                                .text_color(rgb(ACCENT))
+                                .child(SharedString::from(hit.room.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_sm()
+                                .text_color(rgb(MUTED))
+                                .child(SharedString::from(hit.sender.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .child(SharedString::from(hit.text.clone())),
+                        )
+                })
+                .collect::<Vec<_>>();
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(results)
+                .into_any_element()
+        } else {
+            messages.into_any_element()
         };
 
         div()
@@ -639,6 +692,18 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
             });
         }
     });
+    let thread = button("🧵", "thread").on_click({
+        let this = this.clone();
+        let tmid = msg_id.clone();
+        move |_, _, cx| {
+            this.update(cx, |chat, cx| {
+                let _ = chat
+                    .commands
+                    .try_send(ChatCommand::OpenThread { tmid: tmid.clone() });
+                cx.notify();
+            });
+        }
+    });
     let delete = button("🗑", "delete").on_click({
         let this = this.clone();
         let room_id = room_id.clone();
@@ -657,6 +722,7 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
         .when(editing_this, |strip| strip.opacity(1.))
         .child(react)
         .child(edit)
+        .child(thread)
         .child(delete)
         .when(editing_this, |strip| {
             strip.child(button("✖", "cancel").on_click({
