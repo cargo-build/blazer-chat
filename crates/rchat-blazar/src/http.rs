@@ -18,7 +18,8 @@ pub struct Request<'a> {
     /// Path including the `/api/v1` prefix, e.g. `/api/v1/login`.
     pub path: &'a str,
     pub headers: Vec<(String, String)>,
-    pub body: Option<String>,
+    /// Raw bytes: JSON for the API calls, multipart for uploads.
+    pub body: Option<Vec<u8>>,
 }
 
 pub struct Response {
@@ -75,12 +76,13 @@ impl HttpTransport {
         method: &str,
         path: &str,
         headers: &[(String, String)],
-        body: &str,
+        content_type: &str,
+        body: &[u8],
     ) -> std::io::Result<Vec<u8>> {
         let mut conn = self.connect().await?;
         let mut head = format!(
-            "{} {} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\ncontent-type: application/json\r\n",
-            method, path, self.host
+            "{} {} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\ncontent-type: {}\r\n",
+            method, path, self.host, content_type
         );
         for (name, value) in headers {
             head.push_str(name);
@@ -90,18 +92,27 @@ impl HttpTransport {
         }
         head.push_str(&format!("content-length: {}\r\n\r\n", body.len()));
         conn.write_all(head.into_bytes()).await?;
-        conn.write_all(body.as_bytes().to_vec()).await?;
+        conn.write_all(body.to_vec()).await?;
         conn.read_to_end(Vec::with_capacity(64 * 1024)).await
     }
 }
 
 impl Transport for HttpTransport {
     async fn call(&self, req: Request<'_>) -> std::io::Result<Response> {
+        // The caller-owned content-type wins (multipart uploads); JSON is
+        // the default.
+        let content_type = req
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("application/json");
         let raw = self
             .exchange(
                 req.method,
                 req.path,
                 &req.headers,
+                content_type,
                 req.body.as_deref().unwrap_or_default(),
             )
             .await?;
@@ -113,7 +124,9 @@ impl HttpTransport {
     /// Binary GET for non-JSON resources (emoji images): status must be
     /// 2xx, the body returns as raw bytes.
     pub async fn get_bytes(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        let raw = self.exchange("GET", path, &[], "").await?;
+        let raw = self
+            .exchange("GET", path, &[], "application/json", b"")
+            .await?;
         let split = raw
             .windows(4)
             .position(|window| window == b"\r\n\r\n")
@@ -302,7 +315,7 @@ mod tests {
             method: "POST",
             path: "/api/v1/login",
             headers: Vec::new(),
-            body: Some(r#"{"user":"probe","password":"probe"}"#.to_owned()),
+            body: Some(br#"{"user":"probe","password":"probe"}"#.to_vec()),
         };
         let response = compio::runtime::Runtime::new()
             .expect("compio runtime")

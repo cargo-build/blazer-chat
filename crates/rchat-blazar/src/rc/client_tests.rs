@@ -52,6 +52,11 @@ impl FakeTransport {
 
 impl Transport for FakeTransport {
     async fn call(&self, request: Request<'_>) -> std::io::Result<Response> {
+        let body = request
+            .body
+            .as_deref()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap_or_default();
         *self.last_request.borrow_mut() = Some(format!(
             "{} {} {} {}",
             request.method,
@@ -62,7 +67,7 @@ impl Transport for FakeTransport {
                 .map(|(name, value)| format!("{name}:{value}"))
                 .collect::<Vec<_>>()
                 .join(" "),
-            request.body.as_deref().unwrap_or_default()
+            body
         ));
         let (status, body) = self.answer_for(request.path);
         Ok(Response {
@@ -90,6 +95,8 @@ const SUBSCRIPTIONS_BODY: &str = r#"{"update":[
     {"rid":"GENERAL","unread":4},
     {"rid":"dm1","unread":0}
 ],"success":true}"#;
+const MEDIA_BODY: &str =
+    r#"{"file":{"_id":"f1","url":"/file-upload/f1/probe.txt"},"success":true}"#;
 const NOT_ALLOWED_BODY: &str =
     r#"{"success":false,"error":"Not allowed [error-action-not-allowed]"}"#;
 const UNAUTHORIZED_BODY: &str =
@@ -112,6 +119,8 @@ fn authenticated_routes() -> Vec<(&'static str, u16, &'static str)> {
         ("chat.delete", 400, NOT_ALLOWED_BODY),
         ("subscriptions.read", 200, REACT_BODY),
         ("subscriptions.get", 200, SUBSCRIPTIONS_BODY),
+        ("rooms.media/", 200, MEDIA_BODY),
+        ("rooms.mediaConfirm/", 200, SEND_BODY),
     ]
 }
 
@@ -220,6 +229,49 @@ fn mark_read_posts_the_rid() {
     let request = transport.last_request();
     assert!(request.contains("POST /api/v1/subscriptions.read"));
     assert!(request.contains(r#""rid":"GENERAL""#));
+}
+
+#[test]
+fn upload_runs_the_two_phase_media_flow() {
+    let transport = FakeTransport::answering(&authenticated_routes());
+    let mut rc = client(transport.clone());
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+
+    let mut file = std::env::temp_dir();
+    file.push("rchat-upload-probe.txt");
+    std::fs::write(&file, b"probe bytes").unwrap();
+
+    let message = futures_lite::future::block_on(rc.upload_file(
+        "GENERAL",
+        file.to_str().unwrap(),
+        "caption",
+    ))
+    .unwrap();
+    assert_eq!(message.id, "m3", "the confirm answers the full message");
+    let request = transport.last_request();
+    assert!(request.contains("POST /api/v1/rooms.mediaConfirm/GENERAL/f1"));
+    assert!(request.contains(r#""msg":"caption""#));
+}
+
+#[test]
+fn multipart_body_writes_the_file_and_caption_parts() {
+    let body = super::client::multipart_body("BOUND", "probe.txt", "text/plain", b"hi", "caption");
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.starts_with("--BOUND\r\n"));
+    assert!(body.contains("content-disposition: form-data; name=\"file\"; filename=\"probe.txt\""));
+    assert!(body.contains("content-type: text/plain\r\n\r\nhi\r\n"));
+    assert!(body.contains("name=\"msg\"\r\n\r\ncaption"));
+    assert!(body.ends_with("--BOUND--\r\n"));
+}
+
+#[test]
+fn mime_type_maps_common_extensions() {
+    assert_eq!(super::client::mime_type("shot.png"), "image/png");
+    assert_eq!(super::client::mime_type("doc.PDF"), "application/pdf");
+    assert_eq!(
+        super::client::mime_type("blob.xyz"),
+        "application/octet-stream"
+    );
 }
 
 #[test]

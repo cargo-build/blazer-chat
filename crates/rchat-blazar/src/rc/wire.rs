@@ -61,6 +61,19 @@ pub struct SuccessResponse {
     pub success: bool,
 }
 
+/// `rooms.media/{rid}` phase one: the stored file's id, consumed by the
+/// confirm call.
+#[derive(Deserialize)]
+pub struct MediaUploadResponse {
+    pub file: MediaFile,
+}
+
+#[derive(Deserialize)]
+pub struct MediaFile {
+    #[serde(rename = "_id")]
+    pub id: String,
+}
+
 #[derive(Deserialize)]
 pub struct WireMessage {
     #[serde(rename = "_id")]

@@ -96,6 +96,26 @@ pub async fn serve(
             }
         }
     });
+    control.post("/send-file", {
+        let self_commands = self_commands.clone();
+        move |JsonExtractor(body): JsonExtractor<FileBody>| {
+            let self_commands = self_commands.clone();
+            async move {
+                if enqueue(
+                    &self_commands,
+                    ChatCommand::UploadFile {
+                        room_id: body.room,
+                        path: body.path,
+                        msg: body.msg,
+                    },
+                ) {
+                    queued()
+                } else {
+                    unavailable(r#"{"queued":false}"#)
+                }
+            }
+        }
+    });
     control.post("/quit", {
         let events = events.clone();
         move || {
@@ -178,6 +198,14 @@ struct RoomBody {
 struct SendBody {
     room: String,
     text: String,
+}
+
+#[derive(Deserialize)]
+struct FileBody {
+    room: String,
+    path: String,
+    #[serde(default)]
+    msg: String,
 }
 
 /// Visible to tests through the app boundary fold: the snapshot is the

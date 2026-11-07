@@ -25,8 +25,9 @@ use serde::Deserialize;
 use crate::http::{HttpTransport, Request, Transport};
 use crate::rc::types::{CustomEmoji, Msg, RcError, RcSettings, Room, Session};
 use crate::rc::wire::{
-    EmojiListResponse, HistoryResponse, LoginResponse, RoomsGetResponse, SendMessageResponse,
-    SubscriptionsGetResponse, SuccessResponse, UpdateMessageResponse, WireMessage,
+    EmojiListResponse, HistoryResponse, LoginResponse, MediaUploadResponse, RoomsGetResponse,
+    SendMessageResponse, SubscriptionsGetResponse, SuccessResponse, UpdateMessageResponse,
+    WireMessage,
 };
 
 /// The typed client: one session, typed results out.
@@ -129,7 +130,7 @@ impl<T: Transport> RcClient<T> {
             method,
             path,
             headers,
-            body,
+            body: body.map(String::into_bytes),
         };
         let response = self.transport.call(request).await.map_err(RcError::Io)?;
         if !(200..300).contains(&response.status) {
@@ -314,6 +315,72 @@ impl<T: Transport> RcClient<T> {
         }
     }
 
+    /// Uploads a file and posts it as a message: the two-phase
+    /// `rooms.media/{rid}` → `rooms.mediaConfirm/{rid}/{fileId}` flow
+    /// (RC 7+; the legacy `rooms.upload` is 404 on RC 8.5). `msg` is the
+    /// caption.
+    pub async fn upload_file(
+        &mut self,
+        room_id: &str,
+        path: &str,
+        msg: &str,
+    ) -> Result<Msg, RcError> {
+        let bytes = std::fs::read(path)
+            .map_err(|error| RcError::Config(format!("read {}: {error}", path)))?;
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("file")
+            .to_owned();
+        let boundary = format!(
+            "rchat-blazar-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.subsec_nanos())
+                .unwrap_or_default()
+        );
+        let body = multipart_body(&boundary, &filename, mime_type(&filename), &bytes, msg);
+
+        let path_prefix = format!("/api/v1/rooms.media/{room_id}");
+        let body = self.call_multipart(&path_prefix, &boundary, body).await?;
+        let parsed: MediaUploadResponse = Self::parse(&body, "rooms.media")?;
+
+        let confirm_path = format!("/api/v1/rooms.mediaConfirm/{room_id}/{}", parsed.file.id);
+        let body = serde_json::json!({ "msg": msg }).to_string();
+        let body = self.call("POST", &confirm_path, Some(body), true).await?;
+        let parsed: SendMessageResponse = Self::parse(&body, "rooms.mediaConfirm")?;
+        Ok(Self::message_into_msg(parsed.message))
+    }
+
+    /// One raw multipart POST; the JSON `call` wraps this for string
+    /// bodies.
+    async fn call_multipart(
+        &self,
+        path: &str,
+        boundary: &str,
+        body: Vec<u8>,
+    ) -> Result<String, RcError> {
+        let mut headers = self.auth_headers()?;
+        headers.push((
+            "content-type".to_owned(),
+            format!("multipart/form-data; boundary={boundary}"),
+        ));
+        let request = Request {
+            method: "POST",
+            path,
+            headers,
+            body: Some(body),
+        };
+        let response = self.transport.call(request).await.map_err(RcError::Io)?;
+        if !(200..300).contains(&response.status) {
+            return Err(RcError::Http {
+                status: response.status,
+                body: response.body.chars().take(300).collect(),
+            });
+        }
+        Ok(response.body)
+    }
+
     /// One wire message → the application message; the single owner of
     /// the mapping.
     fn message_into_msg(message: WireMessage) -> Msg {
@@ -334,5 +401,61 @@ impl<T: Transport> RcClient<T> {
             ts: message.ts.unwrap_or_default(),
             reactions,
         }
+    }
+}
+
+/// Builds the multipart/form-data body for `rooms.media`: one `file`
+/// part plus an optional `msg` text part.
+pub(super) fn multipart_body(
+    boundary: &str,
+    filename: &str,
+    mime: &str,
+    bytes: &[u8],
+    msg: &str,
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    let push = |body: &mut Vec<u8>, part: &str| body.extend_from_slice(part.as_bytes());
+    push(&mut body, &format!("--{boundary}\r\n"));
+    push(
+        &mut body,
+        &format!("content-disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"),
+    );
+    push(&mut body, &format!("content-type: {mime}\r\n\r\n"));
+    body.extend_from_slice(bytes);
+    push(&mut body, "\r\n");
+    if !msg.is_empty() {
+        push(&mut body, &format!("--{boundary}\r\n"));
+        push(
+            &mut body,
+            "content-disposition: form-data; name=\"msg\"\r\n\r\n",
+        );
+        push(&mut body, msg);
+        push(&mut body, "\r\n");
+    }
+    push(&mut body, &format!("--{boundary}--\r\n"));
+    body
+}
+
+/// Minimal extension → MIME map for the file types the client uploads;
+/// unknown extensions upload as `application/octet-stream` (the server
+/// renders them as generic attachments).
+pub(super) fn mime_type(filename: &str) -> &'static str {
+    let extension = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "txt" | "md" | "log" => "text/plain",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
     }
 }

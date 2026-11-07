@@ -47,6 +47,13 @@ pub enum ChatCommand {
         msg_id: String,
         emoji: String,
     },
+    /// Uploads a local file into the room and posts it as a message
+    /// (two-phase rooms.media + mediaConfirm).
+    UploadFile {
+        room_id: String,
+        path: String,
+        msg: String,
+    },
 }
 
 /// What the application reports back; the UI folds these into [`ChatState`].
@@ -485,6 +492,12 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             },
             Err(error) => ChatEvent::Failed(error.to_string()),
         },
+        ChatCommand::UploadFile { room_id, path, msg } => {
+            match client.upload_file(&room_id, &path, &msg).await {
+                Ok(message) => ChatEvent::Sent { message },
+                Err(error) => ChatEvent::Failed(error.to_string()),
+            }
+        }
     }
 }
 
