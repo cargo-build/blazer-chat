@@ -80,9 +80,8 @@ pub struct Session {
 pub struct Room {
     pub id: String,
     pub name: String,
-    /// `c` channel, `p` group, `d` direct — drives the subscription routing
-    /// of the live-updates slice; the M1 REST view renders the name only.
-    #[allow(dead_code)]
+    /// `c` channel, `p` group, `d` direct — drives history routing and the
+    /// live subscription of the M2 slices.
     pub kind: char,
 }
 
@@ -91,12 +90,25 @@ pub struct Room {
 pub struct Msg {
     /// Message identity on the server; consumed by the live-updates slice
     /// (dedup and edits), not by the M1 REST view.
-    #[allow(dead_code)]
     pub id: String,
     pub room_id: String,
     pub sender: String,
     pub text: String,
     pub ts: String,
+}
+
+/// A server-defined custom emoji from `emoji-custom.list`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CustomEmoji {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    pub extension: String,
+    /// Server-side update stamp — drives cache refresh decisions.
+    #[serde(rename = "_updatedAt", default)]
+    pub updated_at: String,
 }
 
 #[derive(Debug)]

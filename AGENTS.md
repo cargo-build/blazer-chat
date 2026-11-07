@@ -16,6 +16,21 @@ product surface targets XWayland.
 (> ~1–2 GiB) run in a task-owned transient systemd user unit and coordinate
 through the shared laptop queue.
 
+**Rust skills:** before writing or refactoring any Rust code, read the
+Rust authoring skills first — `~/.agents/skills/rust-best-practices/SKILL.md`
+(BeautifulRust) — and keep this repository's stack, lint and behavior
+contracts over generic style advice.
+
+**Required skills — use with these exact paths:**
+
+- Rust authoring: `~/.agents/skills/rust-best-practices/SKILL.md`
+- Operator Rust policy: `~/.agents/skills/rust-operator-style/SKILL.md`
+- Rust review: `~/.agents/skills/rust-review/SKILL.md`
+- Porting protocol logic from other languages:
+  `~/.agents/skills/rust-port/SKILL.md`
+- Protocol reverse engineering (Rocket.Chat facts):
+  `~/.config/opencode/skills/reverse-engineer-anything/SKILL.md`
+
 **GPUI pin:** the published `gpui` crate starts with `Application::new()`;
 Zed `main` splits `gpui`/`gpui_platform` and starts differently. Never mix
 the two.

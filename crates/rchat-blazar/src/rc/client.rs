@@ -14,6 +14,8 @@
 //! - `POST /api/v1/chat.sendMessage` `{message:{rid, msg}}` →
 //!   `{message: IMessage, success}` (`rest-typings` schema: `msg` is the
 //!   text field).
+//! - `GET /api/v1/emoji-custom.list` → `{emojis:{update, remove}}`; images
+//!   at `/emoji-custom/{name}.{extension}`.
 //!
 //! The transport speaks `http://` and `https://` (server URL in
 //! `public.toml` says where to connect).
@@ -21,12 +23,13 @@
 use serde::Deserialize;
 
 use crate::http::{HttpTransport, Request, Transport};
-use crate::rc::types::{Msg, RcError, RcSettings, Room, Session};
-use crate::rc::wire::{HistoryResponse, LoginResponse, RoomsGetResponse, SendMessageResponse};
+use crate::rc::types::{CustomEmoji, Msg, RcError, RcSettings, Room, Session};
+use crate::rc::wire::{
+    EmojiListResponse, HistoryResponse, LoginResponse, RoomsGetResponse, SendMessageResponse,
+};
 
 /// The typed client: one session, typed results out.
 pub struct RcClient<T: Transport = HttpTransport> {
-    settings: RcSettings,
     transport: T,
     session: Option<Session>,
     /// `rooms.get` results, keyed by room id — history routes by kind:
@@ -37,20 +40,52 @@ pub struct RcClient<T: Transport = HttpTransport> {
 impl RcClient<HttpTransport> {
     pub fn new(settings: RcSettings) -> Self {
         Self {
-            transport: HttpTransport::new(settings.addr(), settings.is_tls()),
-            settings,
+            transport: HttpTransport::new(
+                settings.addr(),
+                settings.host_header(),
+                settings.is_tls(),
+            ),
             session: None,
             room_kinds: std::collections::HashMap::new(),
         }
     }
+
+    /// Custom emojis of the server: the `update` side of the
+    /// `emoji-custom.list` delta — enough for a name-keyed cache.
+    pub async fn emoji_custom_list(&mut self) -> Result<Vec<CustomEmoji>, RcError> {
+        let body = self
+            .call("GET", "/api/v1/emoji-custom.list", None, true)
+            .await?;
+        let parsed: EmojiListResponse = Self::parse(&body, "emoji-custom.list")?;
+        Ok(parsed
+            .emojis
+            .update
+            .into_iter()
+            .map(|emoji| CustomEmoji {
+                id: emoji.id,
+                name: emoji.name,
+                aliases: emoji.aliases,
+                extension: emoji.extension,
+                updated_at: emoji.updated_at,
+            })
+            .collect())
+    }
+
+    /// The image bytes of a custom emoji (`/emoji-custom/{name}.{ext}`).
+    /// Inherent to the real transport: `get_bytes` is not on the [`Transport`]
+    /// seam (test doubles have no binary bodies).
+    pub async fn emoji_image(&self, name: &str, extension: &str) -> Result<Vec<u8>, RcError> {
+        let path = format!("/emoji-custom/{name}.{extension}");
+        self.transport.get_bytes(&path).await.map_err(RcError::Io)
+    }
 }
 
 impl<T: Transport> RcClient<T> {
-    /// Test seam: any transport, canned or real.
-    #[cfg(test)]
-    pub fn with_transport(settings: RcSettings, transport: T) -> Self {
+    /// Injection point: any transport (canned in tests, real in prod).
+    /// `settings` stays on the signature for call-site symmetry; only the
+    /// transport decides the connection today.
+    pub fn with_transport(_settings: RcSettings, transport: T) -> Self {
         Self {
-            settings,
             transport,
             session: None,
             room_kinds: std::collections::HashMap::new(),
@@ -92,7 +127,6 @@ impl<T: Transport> RcClient<T> {
         let request = Request {
             method,
             path,
-            host: &self.settings.host_header(),
             headers,
             body,
         };

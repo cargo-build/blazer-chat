@@ -62,3 +62,26 @@ pub struct WireMessage {
 pub struct WireUser {
     pub username: Option<String>,
 }
+
+#[derive(Deserialize)]
+pub struct EmojiListResponse {
+    pub emojis: EmojiDelta,
+}
+
+#[derive(Deserialize)]
+pub struct EmojiDelta {
+    #[serde(default)]
+    pub update: Vec<WireEmoji>,
+}
+
+#[derive(Deserialize)]
+pub struct WireEmoji {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    pub extension: String,
+    #[serde(rename = "_updatedAt", default)]
+    pub updated_at: String,
+}

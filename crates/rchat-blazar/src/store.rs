@@ -20,6 +20,7 @@ use crate::rc::{Room, Session};
 const TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("kv");
 const SESSION_KEY: &str = "session";
 const ROOMS_KEY: &str = "rooms";
+const EMOJI_KEY: &str = "emoji";
 
 pub struct Store {
     db: redb::Database,
@@ -110,6 +111,27 @@ impl Store {
 
     pub fn save_rooms(&self, rooms: &[Room]) -> Result<(), String> {
         self.put_json(ROOMS_KEY, &StoredRoomsRef { rooms })
+    }
+
+    /// The cached custom emojis (the merged delta state).
+    pub fn load_emoji(&self) -> Vec<crate::rc::CustomEmoji> {
+        self.get_json(EMOJI_KEY).unwrap_or_default()
+    }
+
+    pub fn save_emoji(&self, emoji: &[crate::rc::CustomEmoji]) -> Result<(), String> {
+        self.put_json(EMOJI_KEY, &emoji)
+    }
+
+    /// The directory custom-emoji images live in; created on demand.
+    pub fn emoji_dir() -> Result<PathBuf, String> {
+        let dir = store_path()?
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        let dir = dir.join("emoji");
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+        Ok(dir)
     }
 }
 

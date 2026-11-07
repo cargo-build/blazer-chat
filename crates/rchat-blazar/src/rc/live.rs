@@ -401,7 +401,11 @@ mod tests {
         let self_dm = std::env::var("RCHAT_SELF_DM").unwrap();
 
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let transport = crate::http::HttpTransport::new(settings.addr(), settings.is_tls());
+            let transport = crate::http::HttpTransport::new(
+                settings.addr(),
+                settings.host_header(),
+                settings.is_tls(),
+            );
             let mut rc = crate::rc::RcClient::with_transport(settings.clone(), transport);
             rc.login(&user, &password).await.unwrap();
             let session = rc.session().unwrap().clone();

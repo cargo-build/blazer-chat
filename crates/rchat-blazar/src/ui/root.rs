@@ -2,12 +2,16 @@
 //! the pure [`ChatState`]; events fold in through the compio pump, clicks
 //! push commands back.
 
+use gpui::{
+    Context, Entity, FocusHandle, Focusable, FontWeight, SharedString, Window, div, img,
+    prelude::*, px, rgb,
+};
 use std::sync::{Arc, Mutex};
 
 use async_channel::Sender;
-use gpui::{Context, Entity, FocusHandle, Focusable, SharedString, Window, div, prelude::*, rgb};
 
 use super::input::{MUTED, PANEL, TextInput};
+use super::markdown::{self, Span};
 use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
 
 const BG: u32 = 0x11151c;
@@ -190,11 +194,7 @@ impl gpui::Render for ChatRoot {
                             .text_color(rgb(MUTED))
                             .child(SharedString::from(message.sender.clone())),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(SharedString::from(message.text.clone())),
-                    )
+                    .child(message_body(&message.text, &self.state.emoji))
             }));
 
         div()
@@ -254,5 +254,67 @@ impl gpui::Render for ChatRoot {
                             .child("Send"),
                     ),
             )
+    }
+}
+
+/// One message body: the text split into lines (newlines preserved), each
+/// line parsed into markdown spans and laid out as a wrapping row so inline
+/// emoji images flow with the text.
+fn message_body(text: &str, emoji: &std::collections::BTreeMap<String, String>) -> gpui::Div {
+    let lines: Vec<gpui::Div> = text
+        .lines()
+        .map(|line| {
+            let mut row = div().flex().flex_wrap().items_center();
+            for span in markdown::parse(line, &|name| emoji.get(name).cloned()) {
+                row = row.child(span_element(span));
+            }
+            row
+        })
+        .collect();
+    div().flex().flex_col().children(lines)
+}
+
+/// One span as an inline element.
+fn span_element(span: Span) -> gpui::Div {
+    match span {
+        Span::Text {
+            text,
+            bold,
+            italic,
+            code,
+            strike,
+        } => {
+            let mut element = div().text_sm().child(SharedString::from(text));
+            if bold {
+                element = element.font_weight(FontWeight::BOLD);
+            }
+            if italic {
+                element = element.italic();
+            }
+            if strike {
+                element = element.line_through();
+            }
+            if code {
+                element = element
+                    .font_family("monospace")
+                    .bg(rgb(0x1c2430))
+                    .px_1()
+                    .rounded_sm();
+            }
+            element
+        }
+        Span::Link { label, .. } => div()
+            .text_sm()
+            .underline()
+            .text_color(rgb(ACCENT))
+            .child(SharedString::from(label)),
+        Span::Mention(name) => div()
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(ACCENT))
+            .child(SharedString::from(name)),
+        Span::Emoji { path } => {
+            div().child(img(std::path::PathBuf::from(&path)).h(px(18.0)).w(px(18.0)))
+        }
     }
 }

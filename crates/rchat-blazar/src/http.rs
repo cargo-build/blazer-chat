@@ -12,12 +12,11 @@ use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::tls::{TlsConnector, TlsStream};
 
-/// One outbound request; `host` goes into the Host header.
+/// One outbound request.
 pub struct Request<'a> {
     pub method: &'a str,
     /// Path including the `/api/v1` prefix, e.g. `/api/v1/login`.
     pub path: &'a str,
-    pub host: &'a str,
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
 }
@@ -38,49 +37,98 @@ pub trait Transport {
 /// The compio implementation: one connection per call, plain TCP or TLS.
 pub struct HttpTransport {
     addr: (String, u16),
+    host: String,
     tls: bool,
     connector: TlsConnector,
 }
 
 impl HttpTransport {
-    pub fn new(addr: (String, u16), tls: bool) -> Self {
+    pub fn new(addr: (String, u16), host: String, tls: bool) -> Self {
         Self {
             addr,
+            host,
             tls,
             connector: TlsConnector::from(
                 compio::tls::native_tls::TlsConnector::new().expect("native-tls connector builds"),
             ),
         }
     }
-}
 
-impl Transport for HttpTransport {
-    async fn call(&self, req: Request<'_>) -> std::io::Result<Response> {
+    /// Opens one connection — plain TCP, or TLS over TCP.
+    async fn connect(&self) -> std::io::Result<Conn> {
         let tcp = TcpStream::connect(self.addr.clone()).await?;
-        let mut conn = if self.tls {
-            Conn::Tls(Box::new(self.connector.connect(&self.addr.0, tcp).await?))
+        if self.tls {
+            Ok(Conn::Tls(Box::new(
+                self.connector.connect(&self.addr.0, tcp).await?,
+            )))
         } else {
-            Conn::Plain(tcp)
-        };
+            Ok(Conn::Plain(tcp))
+        }
+    }
 
+    /// One request/response exchange at the byte level: builds the head,
+    /// writes, and reads the raw response. [`HttpTransport::call`] parses
+    /// it into a [`Response`]; [`HttpTransport::get_bytes`] returns the
+    /// body bytes (images).
+    async fn exchange(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &str,
+    ) -> std::io::Result<Vec<u8>> {
+        let mut conn = self.connect().await?;
         let mut head = format!(
             "{} {} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\ncontent-type: application/json\r\n",
-            req.method, req.path, req.host
+            method, path, self.host
         );
-        for (name, value) in &req.headers {
+        for (name, value) in headers {
             head.push_str(name);
             head.push_str(": ");
             head.push_str(value);
             head.push_str("\r\n");
         }
-        let body = req.body.unwrap_or_default();
         head.push_str(&format!("content-length: {}\r\n\r\n", body.len()));
-
         conn.write_all(head.into_bytes()).await?;
-        conn.write_all(body.into_bytes()).await?;
+        conn.write_all(body.as_bytes().to_vec()).await?;
+        conn.read_to_end(Vec::with_capacity(64 * 1024)).await
+    }
+}
 
-        let raw = conn.read_to_end(Vec::with_capacity(64 * 1024)).await?;
+impl Transport for HttpTransport {
+    async fn call(&self, req: Request<'_>) -> std::io::Result<Response> {
+        let raw = self
+            .exchange(
+                req.method,
+                req.path,
+                &req.headers,
+                req.body.as_deref().unwrap_or_default(),
+            )
+            .await?;
         parse_response(&raw)
+    }
+}
+
+impl HttpTransport {
+    /// Binary GET for non-JSON resources (emoji images): status must be
+    /// 2xx, the body returns as raw bytes.
+    pub async fn get_bytes(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        let raw = self.exchange("GET", path, &[], "").await?;
+        let split = raw
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .ok_or_else(|| std::io::Error::other("no HTTP header/body separator"))?;
+        let head = String::from_utf8_lossy(&raw[..split]);
+        let status = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or(0);
+        if !(200..300).contains(&status) {
+            return Err(std::io::Error::other(format!("emoji image http {status}")));
+        }
+        Ok(raw[split + 4..].to_vec())
     }
 }
 
@@ -243,7 +291,8 @@ mod tests {
         let url = std::env::var("RCHAT_LIVE_URL")
             .unwrap_or_else(|_| "https://rocketchat-student.21-school.ru".to_owned());
         let settings = crate::rc::RcSettings::parse(&url).unwrap();
-        let transport = HttpTransport::new(settings.addr(), settings.is_tls());
+        let transport =
+            HttpTransport::new(settings.addr(), settings.host_header(), settings.is_tls());
         println!(
             "connecting to {:?} (tls={})",
             settings.addr(),
@@ -252,7 +301,6 @@ mod tests {
         let request = Request {
             method: "POST",
             path: "/api/v1/login",
-            host: &settings.host_header(),
             headers: Vec::new(),
             body: Some(r#"{"user":"probe","password":"probe"}"#.to_owned()),
         };

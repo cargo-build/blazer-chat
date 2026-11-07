@@ -50,6 +50,10 @@ pub enum ChatEvent {
     },
     /// A message delivered by the live WebSocket stream (M2 S2).
     LiveMessage(Msg),
+    /// The custom-emoji cache: (name, image path) pairs.
+    Emoji {
+        emojis: Vec<(String, String)>,
+    },
     Quit,
 }
 
@@ -63,6 +67,8 @@ pub struct ChatState {
     pub active_room: Option<String>,
     pub messages: std::collections::HashMap<String, Vec<Msg>>,
     pub error: Option<String>,
+    /// Custom emoji: name → cached image path.
+    pub emoji: std::collections::BTreeMap<String, String>,
 }
 
 impl ChatState {
@@ -102,6 +108,10 @@ impl ChatState {
                     entry.push(message);
                 }
                 self.error = None;
+                None
+            }
+            ChatEvent::Emoji { emojis } => {
+                self.emoji = emojis.iter().cloned().collect();
                 None
             }
             ChatEvent::Quit => None,
@@ -200,9 +210,10 @@ async fn drive(
     snapshot: Arc<Mutex<Option<UiSnapshot>>>,
 ) {
     // Persistence is an optimization: an unreadable store degrades to
-    // in-memory-only and never blocks the chat.
+    // in-memory-only and never blocks the chat. Shared so background tasks
+    // (emoji cache) can use the same redb handle.
     let store = match Store::open() {
-        Ok(store) => Some(store),
+        Ok(store) => Some(std::sync::Arc::new(store)),
         Err(error) => {
             eprintln!("rchat-blazar: local store unavailable: {error}");
             None
@@ -334,15 +345,23 @@ async fn drive(
     }
 
     while let Ok(command) = commands.recv().await {
-        let event = execute(&mut client, store.as_ref(), command).await;
+        let event = execute(&mut client, store.as_deref(), command).await;
         match &event {
             ChatEvent::LoggedIn { .. } if live.is_none() => {
-                if let Some(session) = store.as_ref().and_then(|store| store.load_session()) {
+                if let Some(store) = store.as_ref()
+                    && let Some(session) = store.load_session()
+                {
                     live = Some(spawn_live(
                         settings_for_live.clone(),
-                        session,
+                        session.clone(),
                         events.clone(),
                     ));
+                    spawn_emoji(
+                        settings_for_live.clone(),
+                        session,
+                        store.clone(),
+                        events.clone(),
+                    );
                 } else {
                     eprintln!("rchat-blazar: live layer disabled: no stored session");
                 }
@@ -356,6 +375,81 @@ async fn drive(
         }
         let _ = events.send(event).await;
     }
+}
+
+/// Refreshes the custom-emoji cache in the background: fetch the
+/// `emoji-custom.list` delta, merge with the store, download images that
+/// have no file yet, then hand the name→path map to the UI. First run
+/// downloads every image (minutes, silently); later runs only new ones.
+fn spawn_emoji(
+    settings: RcSettings,
+    session: crate::rc::Session,
+    store: std::sync::Arc<Store>,
+    events: Sender<ChatEvent>,
+) {
+    compio::runtime::spawn(async move {
+        let transport = crate::http::HttpTransport::new(
+            settings.addr(),
+            settings.host_header(),
+            settings.is_tls(),
+        );
+        let mut client = crate::rc::RcClient::with_transport(settings, transport);
+        client.set_session(session);
+
+        let fresh = match client.emoji_custom_list().await {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                eprintln!("rchat-blazar: emoji list unavailable: {error}");
+                return;
+            }
+        };
+
+        let mut merged = store.load_emoji();
+        for emoji in fresh {
+            match merged
+                .iter()
+                .position(|known: &crate::rc::CustomEmoji| known.id == emoji.id)
+            {
+                Some(index) => merged[index] = emoji,
+                None => merged.push(emoji),
+            }
+        }
+
+        let dir = match Store::emoji_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                eprintln!("rchat-blazar: {error}");
+                return;
+            }
+        };
+        for emoji in &merged {
+            let path = dir.join(format!("{}.{}", emoji.name, emoji.extension));
+            if path.exists() {
+                continue;
+            }
+            match client.emoji_image(&emoji.name, &emoji.extension).await {
+                Ok(bytes) => {
+                    if let Err(error) = std::fs::write(&path, bytes) {
+                        eprintln!("rchat-blazar: emoji image {}: {error}", path.display());
+                    }
+                }
+                Err(error) => eprintln!("rchat-blazar: emoji {}: {error}", emoji.name),
+            }
+        }
+        if let Err(error) = store.save_emoji(&merged) {
+            eprintln!("rchat-blazar: emoji cache not stored: {error}");
+        }
+
+        let emojis: Vec<(String, String)> = merged
+            .into_iter()
+            .map(|emoji| {
+                let path = dir.join(format!("{}.{}", emoji.name, emoji.extension));
+                (emoji.name, path.display().to_string())
+            })
+            .collect();
+        let _ = events.send(ChatEvent::Emoji { emojis }).await;
+    })
+    .detach();
 }
 
 /// Starts the live WebSocket connection in its own task on the compio

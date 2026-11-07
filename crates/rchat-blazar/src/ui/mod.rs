@@ -3,6 +3,7 @@
 //! derives from it; no I/O happens on the UI thread.
 
 mod input;
+mod markdown;
 mod root;
 
 use gpui::{
