@@ -95,6 +95,8 @@ fn authenticated_routes() -> Vec<(&'static str, u16, &'static str)> {
         ("login", 200, LOGIN_BODY),
         ("rooms.get", 200, ROOMS_BODY),
         ("channels.history", 200, HISTORY_BODY),
+        ("groups.history", 200, HISTORY_BODY),
+        ("im.history", 200, HISTORY_BODY),
         ("chat.sendMessage", 200, SEND_BODY),
     ]
 }
@@ -164,9 +166,39 @@ fn send_speaks_the_msg_field() {
 }
 
 #[test]
+fn history_routes_by_room_kind() {
+    let transport = FakeTransport::answering(&authenticated_routes());
+    let mut rc = client(transport.clone());
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    futures_lite::future::block_on(rc.rooms()).unwrap();
+
+    // priv1 is a group ('p'), dm1 is direct ('d') in the rooms fixture.
+    futures_lite::future::block_on(rc.history("priv1")).unwrap();
+    assert!(
+        transport
+            .last_request()
+            .contains("GET /api/v1/groups.history?roomId=priv1")
+    );
+
+    futures_lite::future::block_on(rc.history("dm1")).unwrap();
+    assert!(
+        transport
+            .last_request()
+            .contains("GET /api/v1/im.history?roomId=dm1")
+    );
+
+    futures_lite::future::block_on(rc.history("GENERAL")).unwrap();
+    assert!(
+        transport
+            .last_request()
+            .contains("GET /api/v1/channels.history?roomId=GENERAL")
+    );
+}
+
+#[test]
 fn unauthenticated_calls_refuse_before_the_wire() {
     let transport = FakeTransport::answering(&authenticated_routes());
-    let rc = client(transport);
+    let mut rc = client(transport);
     match futures_lite::future::block_on(rc.history("GENERAL")) {
         Err(RcError::NoSession) => {}
         other => panic!("expected NoSession, got {other:?}"),

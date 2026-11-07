@@ -74,6 +74,7 @@ impl ChatState {
             ChatEvent::Messages { room_id, messages } => {
                 self.messages.insert(room_id.clone(), messages);
                 self.active_room = Some(room_id);
+                self.error = None;
                 None
             }
             ChatEvent::Sent { message } => {

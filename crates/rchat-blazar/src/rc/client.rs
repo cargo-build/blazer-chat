@@ -29,6 +29,9 @@ pub struct RcClient<T: Transport = HttpTransport> {
     settings: RcSettings,
     transport: T,
     session: Option<Session>,
+    /// `rooms.get` results, keyed by room id — history routes by kind:
+    /// `c` → channels.history, `p` → groups.history, `d` → im.history.
+    room_kinds: std::collections::HashMap<String, char>,
 }
 
 impl RcClient<HttpTransport> {
@@ -37,6 +40,7 @@ impl RcClient<HttpTransport> {
             transport: HttpTransport::new(settings.addr(), settings.is_tls()),
             settings,
             session: None,
+            room_kinds: std::collections::HashMap::new(),
         }
     }
 }
@@ -49,6 +53,7 @@ impl<T: Transport> RcClient<T> {
             settings,
             transport,
             session: None,
+            room_kinds: std::collections::HashMap::new(),
         }
     }
 
@@ -123,10 +128,10 @@ impl<T: Transport> RcClient<T> {
         Ok(session)
     }
 
-    pub async fn rooms(&self) -> Result<Vec<Room>, RcError> {
+    pub async fn rooms(&mut self) -> Result<Vec<Room>, RcError> {
         let body = self.call("GET", "/api/v1/rooms.get", None, true).await?;
         let parsed: RoomsGetResponse = Self::parse(&body, "rooms.get")?;
-        Ok(parsed
+        let rooms: Vec<Room> = parsed
             .update
             .into_iter()
             .filter_map(|room| {
@@ -137,19 +142,31 @@ impl<T: Transport> RcClient<T> {
                     _ => return None,
                 };
                 Some(Room {
-                    id: room.id,
+                    id: room.id.clone(),
                     name,
                     kind,
                 })
             })
-            .collect())
+            .collect();
+        self.room_kinds = rooms
+            .iter()
+            .map(|room| (room.id.clone(), room.kind))
+            .collect();
+        Ok(rooms)
     }
 
-    /// History of a channel-type room, oldest message first.
-    pub async fn history(&self, room_id: &str) -> Result<Vec<Msg>, RcError> {
-        let path = format!("/api/v1/channels.history?roomId={room_id}&count=50");
+    /// History of a room, oldest message first. The endpoint routes by the
+    /// room kind from `rooms.get`: channels, groups, direct messages —
+    /// each has its own REST path with the same response shape.
+    pub async fn history(&mut self, room_id: &str) -> Result<Vec<Msg>, RcError> {
+        let endpoint = match self.room_kinds.get(room_id).copied().unwrap_or('c') {
+            'p' => "groups.history",
+            'd' => "im.history",
+            _ => "channels.history",
+        };
+        let path = format!("/api/v1/{endpoint}?roomId={room_id}&count=50");
         let body = self.call("GET", &path, None, true).await?;
-        let parsed: HistoryResponse = Self::parse(&body, "channels.history")?;
+        let parsed: HistoryResponse = Self::parse(&body, endpoint)?;
         Ok(parsed
             .messages
             .into_iter()
