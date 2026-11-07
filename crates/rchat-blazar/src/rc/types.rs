@@ -102,9 +102,21 @@ pub struct Msg {
     pub ts: String,
     /// Thread parent id when this is a thread reply.
     pub tmid: Option<String>,
+    /// An uploaded attachment; the pane renders it as a chip that opens
+    /// the file on the server.
+    pub file: Option<AttachedFile>,
     /// Reaction name (colons stripped) → user count; the live stream is
     /// the authority and replaces this map on every redelivery.
     pub reactions: std::collections::BTreeMap<String, u32>,
+}
+
+/// One uploaded attachment.
+#[derive(Clone, Debug)]
+pub struct AttachedFile {
+    pub name: String,
+    pub size: u64,
+    /// Absolute URL on the server (browser-openable).
+    pub url: String,
 }
 
 /// A server-defined custom emoji from `emoji-custom.list`.

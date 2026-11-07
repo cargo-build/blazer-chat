@@ -23,7 +23,7 @@
 use serde::Deserialize;
 
 use crate::http::{HttpTransport, Request, Transport};
-use crate::rc::types::{CustomEmoji, Msg, RcError, RcSettings, Room, Session};
+use crate::rc::types::{AttachedFile, CustomEmoji, Msg, RcError, RcSettings, Room, Session};
 use crate::rc::wire::{
     EmojiListResponse, HistoryResponse, LoginResponse, MediaUploadResponse, RoomsGetResponse,
     SendMessageResponse, SubscriptionsGetResponse, SuccessResponse, UpdateMessageResponse,
@@ -37,6 +37,8 @@ pub struct RcClient<T: Transport = HttpTransport> {
     /// `rooms.get` results, keyed by room id — history routes by kind:
     /// `c` → channels.history, `p` → groups.history, `d` → im.history.
     room_kinds: std::collections::HashMap<String, char>,
+    /// The server origin (`https://host:port`) for file URLs.
+    origin: String,
 }
 
 impl RcClient<HttpTransport> {
@@ -49,6 +51,7 @@ impl RcClient<HttpTransport> {
             ),
             session: None,
             room_kinds: std::collections::HashMap::new(),
+            origin: Self::origin_of(&settings),
         }
     }
 
@@ -86,11 +89,12 @@ impl<T: Transport> RcClient<T> {
     /// Injection point: any transport (canned in tests, real in prod).
     /// `settings` stays on the signature for call-site symmetry; only the
     /// transport decides the connection today.
-    pub fn with_transport(_settings: RcSettings, transport: T) -> Self {
+    pub fn with_transport(settings: RcSettings, transport: T) -> Self {
         Self {
             transport,
             session: None,
             room_kinds: std::collections::HashMap::new(),
+            origin: Self::origin_of(&settings),
         }
     }
 
@@ -251,7 +255,7 @@ impl<T: Transport> RcClient<T> {
         Ok(parsed
             .messages
             .into_iter()
-            .map(Self::message_into_msg)
+            .map(|message| self.message_into_msg(message))
             .rev()
             .collect())
     }
@@ -262,7 +266,7 @@ impl<T: Transport> RcClient<T> {
             .call("POST", "/api/v1/chat.sendMessage", Some(body), true)
             .await?;
         let parsed: SendMessageResponse = Self::parse(&body, "chat.sendMessage")?;
-        Ok(Self::message_into_msg(parsed.message))
+        Ok(self.message_into_msg(parsed.message))
     }
 
     /// Edits a message authored by the session's own user (`chat.update`).
@@ -278,7 +282,7 @@ impl<T: Transport> RcClient<T> {
             .call("POST", "/api/v1/chat.update", Some(body), true)
             .await?;
         let parsed: UpdateMessageResponse = Self::parse(&body, "chat.update")?;
-        Ok(Self::message_into_msg(parsed.message))
+        Ok(self.message_into_msg(parsed.message))
     }
 
     /// Deletes a message (`chat.delete`); servers may refuse by policy
@@ -314,7 +318,7 @@ impl<T: Transport> RcClient<T> {
         Ok(parsed
             .messages
             .into_iter()
-            .map(Self::message_into_msg)
+            .map(|message| self.message_into_msg(message))
             .rev()
             .collect())
     }
@@ -329,7 +333,7 @@ impl<T: Transport> RcClient<T> {
             .call("POST", "/api/v1/chat.sendMessage", Some(body), true)
             .await?;
         let parsed: SendMessageResponse = Self::parse(&body, "chat.sendMessage")?;
-        Ok(Self::message_into_msg(parsed.message))
+        Ok(self.message_into_msg(parsed.message))
     }
 
     /// Marks the room read server-side (`subscriptions.read`), so the
@@ -381,7 +385,7 @@ impl<T: Transport> RcClient<T> {
         let body = serde_json::json!({ "msg": msg }).to_string();
         let body = self.call("POST", &confirm_path, Some(body), true).await?;
         let parsed: SendMessageResponse = Self::parse(&body, "rooms.mediaConfirm")?;
-        Ok(Self::message_into_msg(parsed.message))
+        Ok(self.message_into_msg(parsed.message))
     }
 
     /// One raw multipart POST; the JSON `call` wraps this for string
@@ -415,7 +419,7 @@ impl<T: Transport> RcClient<T> {
 
     /// One wire message → the application message; the single owner of
     /// the mapping.
-    fn message_into_msg(message: WireMessage) -> Msg {
+    fn message_into_msg(&self, message: WireMessage) -> Msg {
         let reactions = message
             .reactions
             .unwrap_or_default()
@@ -425,6 +429,19 @@ impl<T: Transport> RcClient<T> {
                 (count > 0).then(|| (name.trim_matches(':').to_owned(), count))
             })
             .collect();
+        let file = message.file.map(|file| {
+            let name = file.name.unwrap_or_else(|| "file".to_owned());
+            AttachedFile {
+                url: format!(
+                    "{}/file-upload/{}/{}",
+                    self.origin.clone(),
+                    file.id,
+                    name.replace(' ', "%20")
+                ),
+                name,
+                size: file.size.unwrap_or_default(),
+            }
+        });
         Msg {
             id: message.id,
             room_id: message.rid,
@@ -432,8 +449,16 @@ impl<T: Transport> RcClient<T> {
             text: message.msg.unwrap_or_default(),
             ts: message.ts.unwrap_or_default(),
             tmid: message.tmid,
+            file,
             reactions,
         }
+    }
+
+    /// The server origin for file URLs (`https://host:port`).
+    fn origin_of(settings: &RcSettings) -> String {
+        let (host, port) = settings.addr();
+        let scheme = if settings.is_tls() { "https" } else { "http" };
+        format!("{scheme}://{host}:{port}")
     }
 }
 

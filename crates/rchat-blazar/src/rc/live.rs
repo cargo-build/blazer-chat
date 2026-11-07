@@ -411,6 +411,7 @@ fn message_from_event(event: &Value) -> Option<Msg> {
             .get("tmid")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        file: None,
         reactions,
     })
 }

@@ -39,7 +39,10 @@ pub fn run(settings: RcSettings) {
             gpui::KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, None),
         ]);
 
-        let bounds = Bounds::centered(None, size(px(1000.0), px(640.0)), cx);
+        // Full-HD request: niri derives the tiled column width from the
+        // requested size's proportion of the view — the client opens as
+        // the workspace's main surface.
+        let bounds = Bounds::centered(None, size(px(1920.0), px(1050.0)), cx);
         let window = cx
             .open_window(
                 WindowOptions {

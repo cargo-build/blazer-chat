@@ -45,6 +45,8 @@ struct MessageView {
     text: String,
     lines: Vec<Vec<Span>>,
     reactions: Vec<(String, u32)>,
+    /// `(name, url, size)` when the message carries an uploaded file.
+    file: Option<(String, String, u64)>,
 }
 
 impl ChatRoot {
@@ -121,6 +123,10 @@ impl ChatRoot {
                     .iter()
                     .map(|(name, count)| (name.clone(), *count))
                     .collect(),
+                file: message
+                    .file
+                    .as_ref()
+                    .map(|file| (file.name.clone(), file.url.clone(), file.size)),
             })
             .collect();
     }
@@ -362,7 +368,26 @@ impl gpui::Render for ChatRoot {
                             .flex_col()
                             .gap_1()
                             .child(message_element(view))
-                            .child(badges),
+                            .child(badges)
+                            .children(view.file.as_ref().map(|(name, url, size)| {
+                                let url = url.clone();
+                                div()
+                                    .id(SharedString::from(format!("file-{msg_id}")))
+                                    .flex_none()
+                                    .px_1()
+                                    .rounded_xs()
+                                    .bg(rgb(PANEL))
+                                    .text_sm()
+                                    .text_color(rgb(ACCENT))
+                                    .underline()
+                                    .cursor_pointer()
+                                    .child(SharedString::from(format!(
+                                        "📎 {} ({})",
+                                        name,
+                                        human_bytes(*size)
+                                    )))
+                                    .on_click(move |_, _, cx| cx.open_url(&url))
+                            })),
                     )
                     .child(action_strip(ActionContext {
                         this: this.clone(),
@@ -736,4 +761,14 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
                 }
             }))
         })
+}
+
+/// Sizes in human units for attachment chips.
+fn human_bytes(size: u64) -> String {
+    match size {
+        0 => "0 B".to_owned(),
+        size if size < 1024 => format!("{size} B"),
+        size if size < 1024 * 1024 => format!("{:.1} KB", size as f64 / 1024.0),
+        size => format!("{:.1} MB", size as f64 / (1024.0 * 1024.0)),
+    }
 }

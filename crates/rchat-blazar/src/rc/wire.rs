@@ -89,9 +89,23 @@ pub struct WireMessage {
     /// Thread parent id when the message is a thread reply.
     #[serde(default)]
     pub tmid: Option<String>,
+    /// An uploaded attachment (rooms.media / file uploads).
+    #[serde(default)]
+    pub file: Option<WireFile>,
     /// Reaction name (server sends it colon-wrapped) → participant list.
     #[serde(default)]
     pub reactions: Option<std::collections::BTreeMap<String, WireReaction>>,
+}
+
+#[derive(Deserialize)]
+pub struct WireFile {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(rename = "type")]
+    pub mime: Option<String>,
 }
 
 #[derive(Deserialize)]

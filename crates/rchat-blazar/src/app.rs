@@ -425,18 +425,24 @@ impl UiSnapshot {
             messages: state
                 .active_messages()
                 .iter()
-                .map(|message| match message.reactions.is_empty() {
-                    true => format!("{}: {}", message.sender, message.text),
-                    false => format!(
-                        "{}: {} {}",
-                        message.sender,
-                        message.text,
-                        message
-                            .reactions
-                            .iter()
-                            .map(|(name, count)| format!("[{name} ×{count}]"))
-                            .collect::<String>(),
-                    ),
+                .map(|message| {
+                    let mut line = match message.reactions.is_empty() {
+                        true => format!("{}: {}", message.sender, message.text),
+                        false => format!(
+                            "{}: {} {}",
+                            message.sender,
+                            message.text,
+                            message
+                                .reactions
+                                .iter()
+                                .map(|(name, count)| format!("[{name} ×{count}]"))
+                                .collect::<String>(),
+                        ),
+                    };
+                    if let Some(file) = &message.file {
+                        line.push_str(&format!(" [📎 {}]", file.name));
+                    }
+                    line
                 })
                 .collect(),
             error: state.error.clone(),
@@ -706,6 +712,7 @@ mod tests {
             text: text.to_owned(),
             ts: String::new(),
             tmid: None,
+            file: None,
             reactions: Default::default(),
         }
     }
