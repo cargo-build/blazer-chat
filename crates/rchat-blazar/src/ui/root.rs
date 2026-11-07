@@ -105,7 +105,7 @@ impl ChatRoot {
         cx.spawn(async move |root, cx| {
             while let Ok(event) = events.recv().await {
                 if let ChatEvent::Quit = event {
-                    let _ = cx.update(|app| app.quit());
+                    cx.update(|app| app.quit());
                     break;
                 }
                 if root
@@ -220,7 +220,7 @@ impl ChatRoot {
         {
             return;
         }
-        let at_bottom = self.scroll.offset().y >= -self.scroll.max_offset().height;
+        let at_bottom = self.scroll.offset().y >= -self.scroll.max_offset().y;
         let emoji = &self.state.emoji;
         let chat_avatars = &self.state.avatars;
         self.views = self
@@ -420,7 +420,7 @@ impl ChatRoot {
         self.editing = Some((room_id, msg_id));
         self.composer
             .update(cx, |composer, cx| composer.set_content(&text, cx));
-        window.focus(&self.composer.read(cx).focus_handle(cx));
+        window.focus(&self.composer.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 

@@ -6,9 +6,8 @@ mod input;
 mod markdown;
 mod root;
 
-use gpui::{
-    App, Application, Bounds, Focusable, WindowBounds, WindowOptions, actions, prelude::*, px, size,
-};
+use gpui::{App, Bounds, Focusable, WindowBounds, WindowOptions, actions, prelude::*, px, size};
+use gpui_platform::application;
 
 use crate::rc::RcSettings;
 use input::{
@@ -22,7 +21,7 @@ actions!(zoom, [ZoomIn, ZoomOut, ZoomReset]);
 const APP_ID: &str = "rchat-blazar";
 
 pub fn run(settings: RcSettings) {
-    Application::new().run(|cx: &mut App| {
+    application().run(|cx: &mut App| {
         let service = crate::app::spawn(settings);
 
         cx.bind_keys([
@@ -67,7 +66,7 @@ pub fn run(settings: RcSettings) {
 
         // Closing the last window ends the process; the compio thread is a
         // daemon by construction (the channel close is its shutdown signal).
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
             }
@@ -76,7 +75,7 @@ pub fn run(settings: RcSettings) {
 
         window
             .update(cx, |root, window, cx| {
-                window.focus(&root.composer.read(cx).focus_handle(cx));
+                window.focus(&root.composer.read(cx).focus_handle(cx), cx);
             })
             .expect("focus the composer");
         cx.activate(true);

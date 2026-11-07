@@ -10,8 +10,8 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div,
-    fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
+    ShapedLine, SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, div, fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::*;
 
@@ -598,8 +598,15 @@ impl Element for TextElement {
             .line
             .take()
             .expect("layout exists from request_layout");
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .expect("line paint succeeds for a shaped line");
+        line.paint(
+            bounds.origin,
+            window.line_height(),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
+        .expect("line paint succeeds for a shaped line");
 
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
