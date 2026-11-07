@@ -12,10 +12,18 @@ executors. The GUI is a native Wayland surface, never XWayland.
 ## Layout
 
 ```
-crates/rchat-blazar/   the application
-  src/main.rs          entry point
-  src/service.rs       compio executor: tako endpoint + client fetches
-  src/ui.rs            GPUI window fed by compio events
+crates/rchat-blazar/
+  src/main.rs          entry point: compio thread + GPUI loop, channels across
+  src/settings.rs      AppSettings <- public.toml (server url; no secrets)
+  src/http.rs          transport layer: HTTP/1.1 on compio behind `Transport`
+  src/rc/              protocol layer: Rocket.Chat REST client (login, rooms,
+                       history, send), typed domain models, private wire shapes
+  src/app.rs           application layer: command/event loop, pure ChatState
+                       fold, redb store wiring, unix control socket
+  src/store.rs         local persistence (redb): resumable session + rooms
+  src/ui/              interface layer: window (mod), chat view (root),
+                       composer vendored from gpui examples (input)
+dev/docker-compose.yml local Rocket.Chat + mongo dev server
 ```
 
 ## Development
@@ -27,3 +35,7 @@ toolchain.
 - `just run` — launches the Wayland window
 - `just gate` — formatting, clippy `-D warnings`, tests; the minimum before a
   change lands
+
+A local server for live testing: `docker compose -f dev/docker-compose.yml up
+-d`, then `export RCHAT_USER=... RCHAT_PASSWORD=...` and point `public.toml`
+at `http://127.0.0.1:3000`.

@@ -1,0 +1,12 @@
+//! `rc` — the Rocket.Chat protocol layer: typed client, domain types and
+//! settings. The rest of the app never sees wire shapes or HTTP details.
+
+mod client;
+mod types;
+mod wire;
+
+pub use client::RcClient;
+pub use types::{Msg, RcError, RcSettings, Room, Session};
+
+#[cfg(test)]
+mod client_tests;

@@ -1,0 +1,6 @@
+# Public, non-secret settings of rchat-blazar.
+# Credentials never go here: use the RCHAT_USER / RCHAT_PASSWORD environment
+# variables or the control socket (POST /login {user, password}).
+
+[server]
+url = "http://127.0.0.1:3000"

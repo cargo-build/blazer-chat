@@ -1,13 +1,24 @@
 //! rchat-blazar — application entry point.
 //!
-//! M0 wire-up: [`service`] owns the compio executor (a tako endpoint plus the
-//! client loop that proves it serves), [`ui`] owns the GPUI window.
-//! `async-channel` carries events and requests across the boundary — channels,
-//! not nested executors.
+//! Layers, one owner each: [`http`] carries bytes, [`rc`] speaks the
+//! Rocket.Chat REST protocol, [`app`] owns the command/event boundary and
+//! the compio thread, [`ui`] owns the GPUI window. `async-channel` carries
+//! events and requests across the boundary — channels, not nested executors.
 
-mod service;
+mod app;
+mod http;
+mod rc;
+mod settings;
+mod store;
 mod ui;
 
 fn main() {
-    ui::run();
+    let settings = match settings::AppSettings::load() {
+        Ok(settings) => settings.server,
+        Err(error) => {
+            eprintln!("rchat-blazar: {error}");
+            std::process::exit(1);
+        }
+    };
+    ui::run(settings);
 }
