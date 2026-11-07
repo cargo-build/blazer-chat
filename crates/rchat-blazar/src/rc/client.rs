@@ -206,6 +206,7 @@ impl<T: Transport> RcClient<T> {
                     name,
                     kind,
                     unread: 0,
+                    lm: room.lm,
                 })
             })
             .collect();
@@ -213,6 +214,10 @@ impl<T: Transport> RcClient<T> {
             .iter()
             .map(|room| (room.id.clone(), room.kind))
             .collect();
+
+        // The sidebar reads like the original client: newest activity
+        // first; rooms without `lm` sink to the bottom.
+        rooms.sort_by(|a, b| b.lm.as_deref().cmp(&a.lm.as_deref()));
 
         // Seed the unread badges from the subscription state (`rooms.get`
         // carries none; the notify stream only delivers later changes).

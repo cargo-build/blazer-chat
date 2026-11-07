@@ -40,6 +40,10 @@ pub struct WireRoom {
     /// derives from it when `name` is absent.
     #[serde(default)]
     pub usernames: Option<Vec<String>>,
+    /// Last-message timestamp; the room list sorts by it (missing =
+    /// oldest).
+    #[serde(default)]
+    pub lm: Option<String>,
 }
 
 #[derive(Deserialize)]

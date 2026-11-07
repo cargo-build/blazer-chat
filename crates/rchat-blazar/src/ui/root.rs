@@ -82,7 +82,7 @@ impl ChatRoot {
             composer: cx.new(|cx| TextInput::new("Message…", cx)),
             focus: cx.focus_handle(),
             views: Vec::new(),
-            messages_list: ListState::new(0, ListAlignment::Bottom, px(64.)),
+            messages_list: ListState::new(0, ListAlignment::Bottom, px(64.)).measure_all(),
             search: cx.new(|cx| TextInput::new("Search…", cx)),
             editing: None,
         }
@@ -127,6 +127,12 @@ impl ChatRoot {
             })
             .collect();
         self.messages_list.reset(self.views.len());
+        // Pin to the newest message; unmeasured heights after a reset
+        // otherwise anchor the Bottom-aligned list at a zero viewport.
+        if !self.views.is_empty() {
+            self.messages_list
+                .scroll_to_reveal_item(self.views.len() - 1);
+        }
     }
 
     /// Mirrors the entity into the control-socket snapshot. The UI thread
@@ -267,6 +273,7 @@ impl gpui::Render for ChatRoot {
         let room_count = self.state.rooms.len();
         let rooms = uniform_list("rooms", room_count, move |range, _window, cx| {
             let root = this.read(cx);
+
             range
                 .map(|index| {
                     let room = &root.state.rooms[index];
@@ -302,7 +309,9 @@ impl gpui::Render for ChatRoot {
                         })
                 })
                 .collect::<Vec<_>>()
-        });
+        })
+        .flex_1()
+        .min_h_0();
 
         // The pane virtualizes: `list` materializes only the visible
         // rows, pins to the newest while the user is at the bottom
@@ -311,6 +320,7 @@ impl gpui::Render for ChatRoot {
         let state = self.messages_list.clone();
         let messages = list(state, move |index, _window, cx| {
             let root = this.read(cx);
+
             let view = &root.views[index];
             let room_id = view.room_id.clone();
             let msg_id = view.id.clone();

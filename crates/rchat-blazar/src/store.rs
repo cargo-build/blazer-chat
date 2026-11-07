@@ -194,6 +194,7 @@ mod tests {
             name: "general".to_owned(),
             kind: 'c',
             unread: 0,
+            lm: None,
         }];
         store.save_rooms(&rooms).unwrap();
         assert_eq!(store.load_rooms().unwrap(), rooms);

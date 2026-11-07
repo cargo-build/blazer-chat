@@ -70,6 +70,8 @@ pub struct DdpLive {
     room_sub: Option<String>,
     /// The id of the always-on `subscriptions-changed` subscription.
     notify_sub: Option<String>,
+    /// The watched room, remembered across reconnects (resubscribe).
+    watched: Option<String>,
 }
 
 /// What the live connection watches. The only permitted write target is the
@@ -104,6 +106,7 @@ impl DdpLive {
             next_id: 0,
             room_sub: None,
             notify_sub: None,
+            watched: None,
         };
 
         // DDP handshake: the server either accepts our protocol version or
@@ -174,7 +177,7 @@ impl DdpLive {
     /// one line. Returns when the transport closes or the control channel
     /// does (application gone).
     pub async fn run(
-        mut self,
+        &mut self,
         events: Sender<LiveEvent>,
         commands: Receiver<LiveCommand>,
         keepalive: std::time::Duration,
@@ -216,7 +219,13 @@ impl DdpLive {
         }))
         .await?;
         self.room_sub = Some(id.to_owned());
+        self.watched = Some(room_id.to_owned());
         Ok(())
+    }
+
+    /// The watched room, to resubscribe after a reconnect.
+    pub fn watched(&self) -> Option<&str> {
+        self.watched.as_deref()
     }
 
     /// Next frame for the run loop: control commands are drained without
@@ -590,17 +599,19 @@ mod tests {
             rc.login(&user, &password).await.unwrap();
             let session = rc.session().unwrap().clone();
 
-            let mut live = DdpLive::connect(&websocket_url(&settings), &session)
-                .await
-                .expect("ddp connect + resume login");
-            live.watch(&self_dm).await.expect("subscribe the room");
-
             let (events, received) = async_channel::unbounded::<LiveEvent>();
             // The control channel never sends and never closes in the probe.
             let (never_tx, never_rx) = async_channel::unbounded();
             let _ = never_tx;
-            compio::runtime::spawn(live.run(events, never_rx, std::time::Duration::from_secs(10)))
-                .detach();
+            let mut live = DdpLive::connect(&websocket_url(&settings), &session)
+                .await
+                .expect("ddp connect + resume login");
+            live.watch(&self_dm).await.expect("subscribe the room");
+            let run = async move {
+                live.run(events, never_rx, std::time::Duration::from_secs(10))
+                    .await
+            };
+            compio::runtime::spawn(run).detach();
 
             // Let the subscription register server-side, then write through
             // REST; the live stream must deliver what REST already returned.

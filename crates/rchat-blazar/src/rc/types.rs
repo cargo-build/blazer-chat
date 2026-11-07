@@ -86,6 +86,8 @@ pub struct Room {
     /// Unread count from the `subscriptions-changed` stream; cleared
     /// locally when the room opens (server-side via `subscriptions.read`).
     pub unread: u32,
+    /// Last-message timestamp; the list sorts by it, newest first.
+    pub lm: Option<String>,
 }
 
 /// One chat message, oldest position last.

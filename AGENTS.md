@@ -12,7 +12,10 @@ product surface targets XWayland.
 **Version control:** `jj` only — never `git add`/`commit`/`checkout`/`push`
 (`git rev-parse` for build scripts is fine). `main` is the integration line.
 
-**Verification:** `just gate` is the minimum before landing. Heavy commands
+**Verification:** `just gate` is the minimum before landing, and any
+slice touching `ui/` lands only with an in-view compositor screenshot —
+socket JSON never proves pixels (the M4 empty-pane regression hid for
+four milestones behind green tests). Heavy commands
 (> ~1–2 GiB) run in a task-owned transient systemd user unit and coordinate
 through the shared laptop queue.
 

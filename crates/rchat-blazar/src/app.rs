@@ -122,6 +122,8 @@ pub enum ChatEvent {
     },
     /// The thread view closed; the pane returns to the room.
     ThreadClosed,
+    /// The live layer connected or dropped.
+    LiveStatus(bool),
     /// The custom-emoji cache: (name, image path) pairs.
     Emoji {
         emojis: Vec<(String, String)>,
@@ -148,6 +150,8 @@ pub struct ChatState {
     pub search_query: Option<String>,
     /// Open thread view: `(room_id, tmid)`; the pane shows the thread.
     pub open_thread: Option<(String, String)>,
+    /// Whether the live WebSocket is connected.
+    pub live_connected: bool,
     /// Fetched threads by their root message id, oldest first.
     threads: std::collections::HashMap<String, Vec<Msg>>,
 }
@@ -196,6 +200,7 @@ impl ChatState {
                 None
             }
             ChatEvent::Sent { message } => {
+                self.bump_room_activity(&message.room_id, message.ts.clone());
                 match message.tmid.clone() {
                     // Thread replies surface in their thread view only.
                     Some(tmid) => {
@@ -209,6 +214,7 @@ impl ChatState {
                 None
             }
             ChatEvent::LiveMessage(message) => {
+                self.bump_room_activity(&message.room_id, message.ts.clone());
                 // The stream redelivers what REST already folded in and
                 // re-sends edited messages under the same id: replace by
                 // the server id, newest delivery wins.
@@ -291,6 +297,10 @@ impl ChatState {
                 self.open_thread = None;
                 None
             }
+            ChatEvent::LiveStatus(connected) => {
+                self.live_connected = connected;
+                None
+            }
             ChatEvent::Emoji { emojis } => {
                 self.emoji = emojis.iter().cloned().collect();
                 None
@@ -310,6 +320,15 @@ impl ChatState {
     /// The open thread's messages, oldest first.
     pub fn thread(&self, tmid: &str) -> &[Msg] {
         self.threads.get(tmid).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Room activity bump: new messages raise the room to the top.
+    fn bump_room_activity(&mut self, room_id: &str, ts: String) {
+        if let Some(room) = self.rooms.iter_mut().find(|room| room.id == room_id) {
+            room.lm = Some(ts);
+            self.rooms
+                .sort_by(|a, b| b.lm.as_deref().cmp(&a.lm.as_deref()));
+        }
     }
 
     /// Case-insensitive substring search over the cached messages (the
@@ -357,6 +376,8 @@ pub struct UiSnapshot {
     pub search: Vec<String>,
     /// The open thread's messages: `"sender: text"`.
     pub thread: Vec<String>,
+    /// Whether the live WebSocket is connected.
+    pub live: bool,
     pub active_room: Option<String>,
     pub messages: Vec<String>,
     pub error: Option<String>,
@@ -399,6 +420,7 @@ impl UiSnapshot {
                     .unwrap_or_default(),
                 None => Vec::new(),
             },
+            live: state.live_connected,
             active_room: state.active_room.clone(),
             messages: state
                 .active_messages()
@@ -672,6 +694,7 @@ mod tests {
             name: name.to_owned(),
             kind: 'c',
             unread: 0,
+            lm: None,
         }
     }
 
