@@ -102,6 +102,10 @@ pub struct Msg {
     pub ts: String,
     /// Thread parent id when this is a thread reply.
     pub tmid: Option<String>,
+    /// Reply count when this message starts a thread (wire `tcount`).
+    pub tcount: Option<u32>,
+    /// The thread's last message timestamp (wire `tlm`).
+    pub tlm: Option<String>,
     /// An uploaded attachment; the pane renders it as a chip that opens
     /// the file on the server.
     pub file: Option<AttachedFile>,

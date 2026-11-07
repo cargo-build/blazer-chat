@@ -834,6 +834,8 @@ mod tests {
             text: text.to_owned(),
             ts: String::new(),
             tmid: None,
+            tcount: None,
+            tlm: None,
             file: None,
             reactions: Default::default(),
         }

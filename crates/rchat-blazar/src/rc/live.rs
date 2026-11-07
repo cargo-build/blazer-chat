@@ -484,6 +484,14 @@ fn message_from_event(event: &Value) -> Option<Msg> {
             .get("tmid")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        tcount: message
+            .get("tcount")
+            .and_then(Value::as_u64)
+            .map(|n| n as u32),
+        tlm: message
+            .get("tlm")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         file: None,
         reactions,
     })

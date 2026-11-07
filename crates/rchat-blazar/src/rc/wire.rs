@@ -89,6 +89,12 @@ pub struct WireMessage {
     /// Thread parent id when the message is a thread reply.
     #[serde(default)]
     pub tmid: Option<String>,
+    /// Reply count when the message starts a thread (wire `tcount`).
+    #[serde(default)]
+    pub tcount: Option<u32>,
+    /// The thread's last message timestamp (wire `tlm`).
+    #[serde(default)]
+    pub tlm: Option<String>,
     /// An uploaded attachment (rooms.media / file uploads).
     #[serde(default)]
     pub file: Option<WireFile>,

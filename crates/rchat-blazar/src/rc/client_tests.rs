@@ -307,6 +307,26 @@ fn attachments_decode_with_the_server_url_and_mime() {
 }
 
 #[test]
+fn thread_metadata_decodes_from_history() {
+    let body = r#"{"messages":[{"_id":"root1","rid":"GENERAL","msg":"root",
+        "u":{"username":"tester"},"tcount":2,"tlm":"2026-11-07T19:31:08.613Z"}],
+        "success":true}"#;
+    let routes = vec![
+        ("login", 200, LOGIN_BODY),
+        ("rooms.get", 200, ROOMS_BODY),
+        ("subscriptions.get", 200, SUBSCRIPTIONS_BODY),
+        ("channels.history", 200, body),
+    ];
+    let transport = FakeTransport::answering(&routes);
+    let mut rc = client(transport);
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    futures_lite::future::block_on(rc.rooms()).unwrap();
+    let messages = futures_lite::future::block_on(rc.history("GENERAL")).unwrap();
+    assert_eq!(messages[0].tcount, Some(2));
+    assert_eq!(messages[0].tlm.as_deref(), Some("2026-11-07T19:31:08.613Z"));
+}
+
+#[test]
 fn threads_fetch_and_reply_with_the_documented_shapes() {
     let transport = FakeTransport::answering(&authenticated_routes());
     let mut rc = client(transport.clone());

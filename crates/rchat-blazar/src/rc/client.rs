@@ -469,6 +469,8 @@ impl<T: Transport> RcClient<T> {
             text: message.msg.unwrap_or_default(),
             ts: message.ts.unwrap_or_default(),
             tmid: message.tmid,
+            tcount: message.tcount,
+            tlm: message.tlm,
             file,
             reactions,
         }

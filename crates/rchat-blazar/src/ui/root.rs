@@ -59,6 +59,9 @@ struct MessageView {
     image_path: Option<String>,
     /// Cached avatar path for the sender; initials render as fallback.
     avatar: Option<String>,
+    /// `(reply count, formatted last reply)` when this message starts a
+    /// thread.
+    thread: Option<(u32, String)>,
 }
 
 impl ChatRoot {
@@ -176,6 +179,9 @@ impl ChatRoot {
                     .as_ref()
                     .and_then(|file| file.image_path.clone()),
                 avatar: chat_avatars.get(&message.sender).cloned(),
+                thread: message
+                    .tcount
+                    .map(|count| (count, pretty_time(message.tlm.as_deref().unwrap_or("")))),
             })
             .collect();
         if switched || at_bottom {
@@ -446,6 +452,38 @@ impl gpui::Render for ChatRoot {
                                     ),
                             )
                             .child(message_element(view))
+                            .children(view.thread.as_ref().map(|(count, last)| {
+                                let pill = div()
+                                    .id(SharedString::from(format!("thread-{msg_id}")))
+                                    .mt_0p5()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(rgb(PANEL))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(ROW_HOVER)))
+                                    .on_click({
+                                        let this = this.clone();
+                                        let tmid = msg_id.clone();
+                                        move |_, _, cx| {
+                                            this.update(cx, |chat, cx| {
+                                                let _ = chat.commands.try_send(
+                                                    ChatCommand::OpenThread { tmid: tmid.clone() },
+                                                );
+                                                cx.notify();
+                                            });
+                                        }
+                                    })
+                                    .child(SharedString::from(format!(
+                                        "View thread · {count} {} · {last}",
+                                        if *count == 1 { "reply" } else { "replies" }
+                                    )));
+                                div().flex().flex_col().items_start().child(pill)
+                            }))
                             .children(view.file.as_ref().map(|(name, url, size)| {
                                 attachment_card(
                                     &msg_id,
@@ -1008,7 +1046,7 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
             .child(label)
     };
 
-    let react = button("👍", "react").on_click({
+    let react = button("🎉", "react").on_click({
         let this = this.clone();
         let room_id = room_id.clone();
         let msg_id = msg_id.clone();
