@@ -26,7 +26,7 @@ use crate::http::{HttpTransport, Request, Transport};
 use crate::rc::types::{CustomEmoji, Msg, RcError, RcSettings, Room, Session};
 use crate::rc::wire::{
     EmojiListResponse, HistoryResponse, LoginResponse, RoomsGetResponse, SendMessageResponse,
-    SuccessResponse, UpdateMessageResponse, WireMessage,
+    SubscriptionsGetResponse, SuccessResponse, UpdateMessageResponse, WireMessage,
 };
 
 /// The typed client: one session, typed results out.
@@ -186,7 +186,7 @@ impl<T: Transport> RcClient<T> {
             .session
             .as_ref()
             .map(|session| session.username.clone());
-        let rooms: Vec<Room> = parsed
+        let mut rooms: Vec<Room> = parsed
             .update
             .into_iter()
             .filter_map(|room| {
@@ -204,6 +204,7 @@ impl<T: Transport> RcClient<T> {
                     id: room.id.clone(),
                     name,
                     kind,
+                    unread: 0,
                 })
             })
             .collect();
@@ -211,6 +212,21 @@ impl<T: Transport> RcClient<T> {
             .iter()
             .map(|room| (room.id.clone(), room.kind))
             .collect();
+
+        // Seed the unread badges from the subscription state (`rooms.get`
+        // carries none; the notify stream only delivers later changes).
+        let body = self
+            .call("GET", "/api/v1/subscriptions.get", None, true)
+            .await?;
+        if let Ok(parsed) = Self::parse::<SubscriptionsGetResponse>(&body, "subscriptions.get") {
+            for room in &mut rooms {
+                if let Some(sub) = parsed.update.iter().find(|sub| sub.room_id == room.id)
+                    && let Some(unread) = sub.unread
+                {
+                    room.unread = unread;
+                }
+            }
+        }
         Ok(rooms)
     }
 
@@ -279,6 +295,21 @@ impl<T: Transport> RcClient<T> {
             true => Ok(()),
             false => Err(RcError::Refused(
                 "chat.react answered success=false".to_owned(),
+            )),
+        }
+    }
+
+    /// Marks the room read server-side (`subscriptions.read`), so the
+    /// unread stream stops counting it.
+    pub async fn mark_read(&mut self, room_id: &str) -> Result<(), RcError> {
+        let body = serde_json::json!({ "rid": room_id }).to_string();
+        let body = self
+            .call("POST", "/api/v1/subscriptions.read", Some(body), true)
+            .await?;
+        match Self::parse::<SuccessResponse>(&body, "subscriptions.read")?.success {
+            true => Ok(()),
+            false => Err(RcError::Refused(
+                "subscriptions.read answered success=false".to_owned(),
             )),
         }
     }

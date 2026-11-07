@@ -257,6 +257,7 @@ impl gpui::Render for ChatRoot {
                     let room = &root.state.rooms[index];
                     let room_id = room.id.clone();
                     let selected = active.as_deref() == Some(room.id.as_str());
+                    let unread = room.unread;
                     let this = this.clone();
                     div()
                         .id(SharedString::from(room.id.clone()))
@@ -271,6 +272,19 @@ impl gpui::Render for ChatRoot {
                             this.update(cx, |chat, cx| chat.open_room(room_id.clone(), cx));
                         })
                         .child(SharedString::from(room.name.clone()))
+                        // Unread badge: count from the subscriptions stream.
+                        .when(unread > 0, |row| {
+                            row.child(
+                                div().flex_1().flex().justify_end().child(
+                                    div()
+                                        .px_1()
+                                        .rounded_xs()
+                                        .bg(rgb(ACCENT))
+                                        .text_xs()
+                                        .child(SharedString::from(unread.to_string())),
+                                ),
+                            )
+                        })
                 })
                 .collect::<Vec<_>>()
         });

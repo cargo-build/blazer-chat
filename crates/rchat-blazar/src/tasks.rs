@@ -6,7 +6,7 @@ use async_channel::Sender;
 
 use crate::app::ChatEvent;
 use crate::http::HttpTransport;
-use crate::rc::{DdpLive, LiveCommand, RcClient, RcSettings, Session, websocket_url};
+use crate::rc::{DdpLive, LiveCommand, LiveEvent, RcClient, RcSettings, Session, websocket_url};
 use crate::store::Store;
 
 /// Starts the live WebSocket connection in its own task; returns the
@@ -22,12 +22,18 @@ pub fn spawn_live(
         let url = websocket_url(&settings);
         match DdpLive::connect(&url, &session).await {
             Ok(live) => {
-                // The protocol layer emits raw messages; the application
-                // boundary wraps them into chat events.
-                let (messages, message_rx) = async_channel::unbounded();
+                // The protocol layer emits raw live updates; the
+                // application boundary wraps them into chat events.
+                let (updates, update_rx) = async_channel::unbounded();
                 let forward = compio::runtime::spawn(async move {
-                    while let Ok(message) = message_rx.recv().await {
-                        if events.send(ChatEvent::LiveMessage(message)).await.is_err() {
+                    while let Ok(event) = update_rx.recv().await {
+                        let chat_event = match event {
+                            LiveEvent::Message(message) => ChatEvent::LiveMessage(message),
+                            LiveEvent::Unread { room_id, unread } => {
+                                ChatEvent::UnreadCount { room_id, unread }
+                            }
+                        };
+                        if events.send(chat_event).await.is_err() {
                             break;
                         }
                     }
@@ -35,7 +41,7 @@ pub fn spawn_live(
                 // The messages sender moves into run() and drops when the
                 // connection ends, which unblocks the forward task below.
                 let result = live
-                    .run(messages, receiver, std::time::Duration::from_secs(30))
+                    .run(updates, receiver, std::time::Duration::from_secs(30))
                     .await;
                 let _ = forward.await;
                 if let Err(error) = result {

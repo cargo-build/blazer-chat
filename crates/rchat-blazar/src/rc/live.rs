@@ -26,6 +26,21 @@ use compio_ws::{WebSocketStream, connect_async_tls_with_config};
 /// The collection that carries the watched room's chat messages.
 const ROOM_STREAM: &str = "stream-room-messages";
 
+/// The collection that carries per-user updates; we subscribe the
+/// `subscriptions-changed` event for unread badges.
+const NOTIFY_STREAM: &str = "stream-notify-user";
+
+/// The notify event carrying per-room unread counts.
+const SUBSCRIPTIONS_CHANGED: &str = "subscriptions-changed";
+
+/// One live update: a chat message from the watched room, or an unread
+/// count from the user's subscription stream.
+#[derive(Debug)]
+pub enum LiveEvent {
+    Message(Msg),
+    Unread { room_id: String, unread: u32 },
+}
+
 /// One unit of work for the live loop: a decoded wire frame, the keepalive
 /// tick, or a control command from the application.
 #[derive(Debug)]
@@ -34,6 +49,8 @@ enum Frame {
     Ping,
     /// A decoded chat message from the watched room's stream.
     RoomMessage(Msg),
+    /// An unread-count update from the user's subscription stream.
+    Notify { room_id: String, unread: u32 },
     /// Watch another room's message stream (control command).
     Watch(String),
     /// Nothing arrived within the keepalive window — send a ping.
@@ -51,6 +68,8 @@ pub struct DdpLive {
     next_id: u32,
     /// The id of the current `stream-room-messages` subscription, if any.
     room_sub: Option<String>,
+    /// The id of the always-on `subscriptions-changed` subscription.
+    notify_sub: Option<String>,
 }
 
 /// What the live connection watches. The only permitted write target is the
@@ -84,6 +103,7 @@ impl DdpLive {
             ws,
             next_id: 0,
             room_sub: None,
+            notify_sub: None,
         };
 
         // DDP handshake: the server either accepts our protocol version or
@@ -121,6 +141,15 @@ impl DdpLive {
                     .unwrap_or("unknown")
             )));
         }
+        // The unread stream is per-user and always on: the initial burst
+        // carries every room's current unread count.
+        let id = live.next_id();
+        live.send_json(serde_json::json!({
+            "msg": "sub", "id": id, "name": NOTIFY_STREAM,
+            "params": [format!("{}/{}", session.user_id, SUBSCRIPTIONS_CHANGED)],
+        }))
+        .await?;
+        live.notify_sub = Some(id.to_owned());
         Ok(live)
     }
 
@@ -146,14 +175,17 @@ impl DdpLive {
     /// does (application gone).
     pub async fn run(
         mut self,
-        events: Sender<Msg>,
+        events: Sender<LiveEvent>,
         commands: Receiver<LiveCommand>,
         keepalive: std::time::Duration,
     ) -> Result<(), RcError> {
         loop {
             match self.next_frame(keepalive, &commands).await? {
                 Frame::RoomMessage(message) => {
-                    let _ = events.send(message).await;
+                    let _ = events.send(LiveEvent::Message(message)).await;
+                }
+                Frame::Notify { room_id, unread } => {
+                    let _ = events.send(LiveEvent::Unread { room_id, unread }).await;
                 }
                 Frame::Watch(room_id) => self.watch(&room_id).await?,
                 Frame::Ping => self.reply_pong(None).await?,
@@ -283,6 +315,34 @@ fn decode_document(document: Value) -> Frame {
                 None => Frame::Document(document),
             }
         }
+        // subscriptions-changed: args = [type, subscription]; "removed"
+        // rooms drop off the list, the rest carry rid + unread. The
+        // initial burst after subscribing sets every room's badge.
+        Some("changed")
+            if document.get("collection").and_then(Value::as_str) == Some(NOTIFY_STREAM) =>
+        {
+            let notify = document.get("fields").and_then(|fields| {
+                let event = fields.get("eventName").and_then(Value::as_str)?;
+                let event = event.rsplit('/').next()?;
+                if event != SUBSCRIPTIONS_CHANGED {
+                    return None;
+                }
+                let args = fields.get("args")?.as_array()?;
+                let kind = args.first()?.as_str()?;
+                if !matches!(kind, "updated" | "inserted") {
+                    return None;
+                }
+                let subscription = args.get(1)?;
+                Some((
+                    subscription.get("rid")?.as_str()?.to_owned(),
+                    subscription.get("unread")?.as_u64()? as u32,
+                ))
+            });
+            match notify {
+                Some((room_id, unread)) => Frame::Notify { room_id, unread },
+                None => Frame::Document(document),
+            }
+        }
         _ => Frame::Document(document),
     }
 }
@@ -351,6 +411,44 @@ fn live_io(error: WsError) -> RcError {
 mod tests {
     use super::*;
 
+    /// subscriptions-changed decodes into an unread update; foreign
+    /// events and removed-type args fall through to Document.
+    #[test]
+    fn notify_frames_decode_into_unread_updates() {
+        let frame = decode_document(serde_json::json!({
+            "msg": "changed", "collection": "stream-notify-user",
+            "fields": {
+                "eventName": "27wWpti9Nii4yRxac/subscriptions-changed",
+                "args": ["updated", {"rid": "dm1", "unread": 3}]
+            }
+        }));
+        match frame {
+            Frame::Notify { room_id, unread } => {
+                assert_eq!(room_id, "dm1");
+                assert_eq!(unread, 3);
+            }
+            other => panic!("expected Notify, got {other:?}"),
+        }
+
+        let removed = decode_document(serde_json::json!({
+            "msg": "changed", "collection": "stream-notify-user",
+            "fields": {
+                "eventName": "id/subscriptions-changed",
+                "args": ["removed", {"rid": "dm1"}]
+            }
+        }));
+        assert!(matches!(removed, Frame::Document(_)));
+
+        let foreign = decode_document(serde_json::json!({
+            "msg": "changed", "collection": "stream-notify-user",
+            "fields": {
+                "eventName": "id/message",
+                "args": [{"rid": "dm1"}]
+            }
+        }));
+        assert!(matches!(foreign, Frame::Document(_)));
+    }
+
     #[test]
     fn decodes_a_stream_event_into_a_room_message() {
         let frame = decode_document(serde_json::json!({
@@ -407,6 +505,67 @@ mod tests {
     /// target), and expect the live stream to deliver it. Ignored by
     /// default; run with RCHAT_LIVE_URL / RCHAT_USER / RCHAT_PASSWORD /
     /// RCHAT_SELF_DM set: `cargo test -- --ignored --nocapture`.
+    /// Live: the `subscriptions-changed` stream must carry unread counts —
+    /// a REST send into the self-DM (the only permitted write target)
+    /// while another room id is reported must surface as a Notify frame.
+    #[test]
+    #[ignore = "live network probe"]
+    fn live_notify_stream_delivers_unread_counts() {
+        let url = std::env::var("RCHAT_LIVE_URL")
+            .unwrap_or_else(|_| "https://rocketchat-student.21-school.ru".to_owned());
+        let settings = crate::rc::RcSettings::parse(&url).unwrap();
+        let user = std::env::var("RCHAT_USER").unwrap();
+        let password = std::env::var("RCHAT_PASSWORD").unwrap();
+        let self_dm = std::env::var("RCHAT_SELF_DM").unwrap();
+
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let transport = crate::http::HttpTransport::new(
+                settings.addr(),
+                settings.host_header(),
+                settings.is_tls(),
+            );
+            let mut rc = crate::rc::RcClient::with_transport(settings.clone(), transport);
+            rc.login(&user, &password).await.unwrap();
+            let session = rc.session().unwrap().clone();
+
+            let mut live = DdpLive::connect(&websocket_url(&settings), &session)
+                .await
+                .expect("ddp connect + resume login");
+            live.watch(&self_dm).await.expect("subscribe the room");
+
+            // One send while the stream is up: the subscription burst plus
+            // the send's own unread update must arrive.
+            sleep(std::time::Duration::from_secs(2)).await;
+            rc.send(&self_dm, "notify probe").await.expect("rest send");
+
+            let mut saw_notify = false;
+            for _ in 0..30 {
+                let frame = live
+                    .next_wire_frame(std::time::Duration::from_secs(2))
+                    .await;
+                match frame {
+                    Ok(Frame::Notify { room_id, unread }) => {
+                        println!("notify: {room_id} unread={unread}");
+                        if room_id == self_dm {
+                            saw_notify = true;
+                            break;
+                        }
+                    }
+                    Ok(Frame::Document(document)) => println!("doc: {document}"),
+                    Ok(_) => continue,
+                    Err(error) => {
+                        println!("wire error: {error}");
+                        break;
+                    }
+                }
+            }
+            assert!(
+                saw_notify,
+                "no Notify frame for the self-DM within the window"
+            );
+        });
+    }
+
     #[test]
     #[ignore = "live network probe"]
     fn live_ddp_delivers_a_self_dm_message() {
@@ -432,7 +591,7 @@ mod tests {
                 .expect("ddp connect + resume login");
             live.watch(&self_dm).await.expect("subscribe the room");
 
-            let (events, received) = async_channel::unbounded();
+            let (events, received) = async_channel::unbounded::<LiveEvent>();
             // The control channel never sends and never closes in the probe.
             let (never_tx, never_rx) = async_channel::unbounded();
             let _ = never_tx;
@@ -447,10 +606,24 @@ mod tests {
                 .await
                 .expect("rest send");
 
-            let delivered = futures_lite::future::or(async { received.recv().await.ok() }, async {
-                sleep(std::time::Duration::from_secs(15)).await;
-                None
-            })
+            // Unread bursts from subscriptions-changed may interleave;
+            // wait for the probe message itself.
+            let delivered = futures_lite::future::or(
+                async {
+                    loop {
+                        match received.recv().await.ok()? {
+                            LiveEvent::Message(message) if message.id == sent.id => {
+                                break Some(message);
+                            }
+                            _ => continue,
+                        }
+                    }
+                },
+                async {
+                    sleep(std::time::Duration::from_secs(15)).await;
+                    None
+                },
+            )
             .await
             .expect("the live stream delivered the message within 15s");
             assert_eq!(delivered.id, sent.id, "same message, live-delivered");

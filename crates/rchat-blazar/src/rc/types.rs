@@ -83,6 +83,9 @@ pub struct Room {
     /// `c` channel, `p` group, `d` direct — drives history routing and the
     /// live subscription of the M2 slices.
     pub kind: char,
+    /// Unread count from the `subscriptions-changed` stream; cleared
+    /// locally when the room opens (server-side via `subscriptions.read`).
+    pub unread: u32,
 }
 
 /// One chat message, oldest position last.

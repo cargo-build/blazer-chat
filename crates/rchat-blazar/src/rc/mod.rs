@@ -7,7 +7,7 @@ mod types;
 mod wire;
 
 pub use client::RcClient;
-pub use live::{DdpLive, LiveCommand, websocket_url};
+pub use live::{DdpLive, LiveCommand, LiveEvent, websocket_url};
 pub use types::{CustomEmoji, Msg, RcError, RcSettings, Room, Session};
 
 #[cfg(test)]

@@ -83,6 +83,12 @@ pub enum ChatEvent {
         msg_id: String,
         emoji: String,
     },
+    /// The user's `subscriptions-changed` stream reported a room's
+    /// unread count (initial burst + every new message).
+    UnreadCount {
+        room_id: String,
+        unread: u32,
+    },
     /// The custom-emoji cache: (name, image path) pairs.
     Emoji {
         emojis: Vec<(String, String)>,
@@ -102,6 +108,9 @@ pub struct ChatState {
     pub error: Option<String>,
     /// Custom emoji: name → cached image path.
     pub emoji: std::collections::BTreeMap<String, String>,
+    /// Unread counts that arrived before the room list (the DDP burst
+    /// beats the REST `rooms.get`); applied when rooms fold in.
+    pending_unread: std::collections::HashMap<String, u32>,
 }
 
 impl ChatState {
@@ -119,10 +128,21 @@ impl ChatState {
             }
             ChatEvent::Rooms { rooms } => {
                 self.rooms = rooms;
+                // Apply unread counts that arrived before the list did.
+                for room in &mut self.rooms {
+                    if let Some(unread) = self.pending_unread.remove(&room.id) {
+                        room.unread = unread;
+                    }
+                }
                 None
             }
             ChatEvent::Messages { room_id, messages } => {
                 self.messages.insert(room_id.clone(), messages);
+                // The room is on screen now; the server-side read receipt
+                // went out with the history call.
+                if let Some(room) = self.rooms.iter_mut().find(|room| room.id == room_id) {
+                    room.unread = 0;
+                }
                 self.active_room = Some(room_id);
                 self.error = None;
                 None
@@ -180,6 +200,17 @@ impl ChatState {
                 }
                 None
             }
+            ChatEvent::UnreadCount { room_id, unread } => {
+                match self.rooms.iter_mut().find(|room| room.id == room_id) {
+                    Some(room) => room.unread = unread,
+                    // The room list is still in flight — remember until it
+                    // arrives.
+                    None => {
+                        self.pending_unread.insert(room_id, unread);
+                    }
+                }
+                None
+            }
             ChatEvent::Emoji { emojis } => {
                 self.emoji = emojis.iter().cloned().collect();
                 None
@@ -203,7 +234,10 @@ impl ChatState {
 pub struct UiSnapshot {
     pub status: String,
     pub username: Option<String>,
+    /// Room display names in list order.
     pub rooms: Vec<String>,
+    /// Rooms with a nonzero unread count: `"name ×count"`.
+    pub badges: Vec<String>,
     pub active_room: Option<String>,
     pub messages: Vec<String>,
     pub error: Option<String>,
@@ -219,6 +253,12 @@ impl UiSnapshot {
             },
             username: state.username.clone(),
             rooms: state.rooms.iter().map(|room| room.name.clone()).collect(),
+            badges: state
+                .rooms
+                .iter()
+                .filter(|room| room.unread > 0)
+                .map(|room| format!("{} ×{}", room.name, room.unread))
+                .collect(),
             active_room: state.active_room.clone(),
             messages: state
                 .active_messages()
@@ -404,7 +444,15 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             Err(error) => ChatEvent::Failed(error.to_string()),
         },
         ChatCommand::OpenRoom { room_id } => match client.history(&room_id).await {
-            Ok(messages) => ChatEvent::Messages { room_id, messages },
+            Ok(messages) => {
+                // Server-side read receipt: the unread stream stops
+                // counting this room. Cosmetic — a refusal is logged, not
+                // banner-worthy.
+                if let Err(error) = client.mark_read(&room_id).await {
+                    eprintln!("rchat-blazar: mark read: {error}");
+                }
+                ChatEvent::Messages { room_id, messages }
+            }
             Err(error) => ChatEvent::Failed(error.to_string()),
         },
         ChatCommand::Send { room_id, text } => match client.send(&room_id, &text).await {
@@ -450,6 +498,7 @@ mod tests {
             id: id.to_owned(),
             name: name.to_owned(),
             kind: 'c',
+            unread: 0,
         }
     }
 
@@ -545,6 +594,42 @@ mod tests {
         });
         let messages = state.active_messages();
         assert!(messages[0].reactions.is_empty());
+    }
+
+    #[test]
+    fn unread_folds_in_and_clears_when_the_room_opens() {
+        let mut state = ChatState::default();
+
+        // The DDP unread burst usually arrives before the REST room list:
+        // counts buffered while rooms are in flight must surface when the
+        // list folds in.
+        state.apply(ChatEvent::UnreadCount {
+            room_id: "dm1".to_owned(),
+            unread: 7,
+        });
+        state.apply(ChatEvent::Rooms {
+            rooms: vec![room("GENERAL", "general"), {
+                let mut dm = room("dm1", "alice");
+                dm.kind = 'd';
+                dm
+            }],
+        });
+        assert_eq!(state.rooms[1].unread, 7, "pre-rooms count applied");
+
+        state.apply(ChatEvent::UnreadCount {
+            room_id: "dm1".to_owned(),
+            unread: 2,
+        });
+        assert_eq!(state.rooms[1].unread, 2);
+
+        state.apply(ChatEvent::Messages {
+            room_id: "dm1".to_owned(),
+            messages: vec![message("m1", "alice", "hi")],
+        });
+        assert_eq!(state.rooms[1].unread, 0, "opening the room clears it");
+
+        let snapshot = UiSnapshot::from_state(&state);
+        assert!(snapshot.badges.is_empty());
     }
 
     #[test]

@@ -86,6 +86,10 @@ const HISTORY_BODY: &str = r#"{"messages":[
 const SEND_BODY: &str = r#"{"message":{"_id":"m3","rid":"GENERAL","msg":"hello","ts":"2026-11-07T15:00:03Z","u":{"username":"tester"},"channels":[]},"success":true}"#;
 const UPDATE_BODY: &str = r#"{"message":{"_id":"m3","rid":"GENERAL","msg":"edited","ts":"2026-11-07T15:00:03Z","u":{"username":"tester"}},"success":true}"#;
 const REACT_BODY: &str = r#"{"success":true}"#;
+const SUBSCRIPTIONS_BODY: &str = r#"{"update":[
+    {"rid":"GENERAL","unread":4},
+    {"rid":"dm1","unread":0}
+],"success":true}"#;
 const NOT_ALLOWED_BODY: &str =
     r#"{"success":false,"error":"Not allowed [error-action-not-allowed]"}"#;
 const UNAUTHORIZED_BODY: &str =
@@ -106,6 +110,8 @@ fn authenticated_routes() -> Vec<(&'static str, u16, &'static str)> {
         ("chat.update", 200, UPDATE_BODY),
         ("chat.react", 200, REACT_BODY),
         ("chat.delete", 400, NOT_ALLOWED_BODY),
+        ("subscriptions.read", 200, REACT_BODY),
+        ("subscriptions.get", 200, SUBSCRIPTIONS_BODY),
     ]
 }
 
@@ -135,10 +141,13 @@ fn rooms_maps_channel_private_and_direct() {
     assert_eq!(rooms.len(), 4);
     assert_eq!(rooms[0].name, "general");
     assert_eq!(rooms[0].kind, 'c');
+    // Unread badges seed from subscriptions.get.
+    assert_eq!(rooms[0].unread, 4);
     assert_eq!(rooms[1].kind, 'p');
     // DMs display the other participant; a self-DM shows the own username.
     assert_eq!(rooms[2].name, "alice");
     assert_eq!(rooms[2].kind, 'd');
+    assert_eq!(rooms[2].unread, 0);
     assert_eq!(rooms[3].name, "tester");
     assert_eq!(rooms[3].kind, 'd');
 }
@@ -199,6 +208,18 @@ fn update_edits_and_react_toggles_with_the_documented_bodies() {
     // emoji name — live-verified against RC 8.5.
     assert!(request.contains(r#""messageId":"m3""#));
     assert!(request.contains(r#""emoji":"tada""#));
+}
+
+#[test]
+fn mark_read_posts_the_rid() {
+    let transport = FakeTransport::answering(&authenticated_routes());
+    let mut rc = client(transport.clone());
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+
+    futures_lite::future::block_on(rc.mark_read("GENERAL")).unwrap();
+    let request = transport.last_request();
+    assert!(request.contains("POST /api/v1/subscriptions.read"));
+    assert!(request.contains(r#""rid":"GENERAL""#));
 }
 
 #[test]

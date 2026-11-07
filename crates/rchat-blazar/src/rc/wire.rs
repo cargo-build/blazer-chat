@@ -80,6 +80,20 @@ pub struct WireReaction {
     pub usernames: Option<Vec<String>>,
 }
 
+/// `subscriptions.get` rows: the per-user subscription state the room
+/// list merges its unread badges from.
+#[derive(Deserialize)]
+pub struct SubscriptionsGetResponse {
+    pub update: Vec<WireSubscription>,
+}
+
+#[derive(Deserialize)]
+pub struct WireSubscription {
+    #[serde(rename = "rid")]
+    pub room_id: String,
+    pub unread: Option<u32>,
+}
+
 #[derive(Deserialize)]
 pub struct WireUser {
     pub username: Option<String>,
