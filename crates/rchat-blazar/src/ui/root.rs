@@ -181,7 +181,6 @@ impl ChatRoot {
     /// Re-parses the active room's messages into render views (markdown
     /// spans with emoji paths resolved).
     fn rebuild_views(&mut self) {
-        let started = std::time::Instant::now();
         let switched = self.pinned_room.as_deref() != self.state.active_room.as_deref();
         // Nothing visible changed (badge/event churn): keep the views.
         if !switched
@@ -252,11 +251,6 @@ impl ChatRoot {
         self.views_version = self.state.messages_version;
         self.views_emoji_version = self.state.emoji_version;
         self.views_avatars_version = self.state.avatars_version;
-        eprintln!(
-            "PERF rebuild_views: {} msgs in {:?} (switched={switched})",
-            self.views.len(),
-            started.elapsed(),
-        );
     }
 
     /// Mirrors the entity into the control-socket snapshot. The UI thread
