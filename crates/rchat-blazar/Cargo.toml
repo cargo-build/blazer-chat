@@ -18,6 +18,8 @@ tako-rs = { version = "2.6", default-features = false, features = ["compio"] }
 unicode-segmentation = "1"
 futures-lite = "2"
 compio-ws = { version = "0.4", features = ["native-tls"] }
+# File downloads arrive force-gzipped (server ignores Accept-Encoding).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 futures-lite = "2"

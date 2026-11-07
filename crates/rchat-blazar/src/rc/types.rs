@@ -110,6 +110,28 @@ pub struct Msg {
     pub reactions: std::collections::BTreeMap<String, u32>,
 }
 
+/// One `stream-notify-user/{uid}/notification` event: a message for the
+/// user outside the room they are reading. Wire shape per the vendored
+/// ruqola client's captured document (`rocketchataccount.cpp`).
+#[derive(Clone, Debug)]
+#[expect(
+    dead_code,
+    reason = "wire-complete decode; the popup UI consumes the rest next slice"
+)]
+pub struct Notification {
+    pub title: String,
+    /// Envelope fallback text (present when `payload.message` is not).
+    pub text: String,
+    pub room_id: String,
+    pub sender: Option<String>,
+    /// `"d"` DM, `"c"` channel, `"p"` private group.
+    pub room_type: Option<String>,
+    pub message_id: Option<String>,
+    pub tmid: Option<String>,
+    /// The body from `payload.message.msg`, when present.
+    pub message: Option<String>,
+}
+
 /// One uploaded attachment.
 #[derive(Clone, Debug)]
 pub struct AttachedFile {
@@ -117,6 +139,18 @@ pub struct AttachedFile {
     pub size: u64,
     /// Absolute URL on the server (browser-openable).
     pub url: String,
+    /// Server-relative download path (authenticated GET).
+    pub path: String,
+    pub mime: String,
+    /// Cached image path once the preview is fetched (images only).
+    pub image_path: Option<String>,
+}
+
+impl AttachedFile {
+    /// Inline-previewable: raster images the GPU stack can decode.
+    pub fn is_image(&self) -> bool {
+        self.mime.starts_with("image/") && self.mime != "image/svg+xml"
+    }
 }
 
 /// A server-defined custom emoji from `emoji-custom.list`.
@@ -161,3 +195,30 @@ impl fmt::Display for RcError {
 }
 
 impl std::error::Error for RcError {}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)] // tests assert the expected path
+mod tests {
+    use super::*;
+
+    fn attachment(mime: &str) -> AttachedFile {
+        AttachedFile {
+            name: "probe".to_owned(),
+            size: 1,
+            url: "https://example.com/file-upload/x/probe".to_owned(),
+            path: "/file-upload/x/probe".to_owned(),
+            mime: mime.to_owned(),
+            image_path: None,
+        }
+    }
+
+    #[test]
+    fn image_classification_accepts_raster_and_rejects_svg() {
+        assert!(attachment("image/png").is_image());
+        assert!(attachment("image/jpeg").is_image());
+        assert!(attachment("image/webp").is_image());
+        assert!(!attachment("image/svg+xml").is_image(), "svg is not raster");
+        assert!(!attachment("text/plain").is_image());
+        assert!(!attachment("application/pdf").is_image());
+    }
+}

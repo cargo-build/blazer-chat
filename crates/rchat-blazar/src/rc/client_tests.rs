@@ -97,6 +97,10 @@ const SUBSCRIPTIONS_BODY: &str = r#"{"update":[
 ],"success":true}"#;
 const MEDIA_BODY: &str =
     r#"{"file":{"_id":"f1","url":"/file-upload/f1/probe.txt"},"success":true}"#;
+const FILE_HISTORY_BODY: &str = r#"{"messages":[
+    {"_id":"f1","rid":"GENERAL","msg":"caption","ts":"2026-11-07T15:00:05Z","u":{"username":"tester"},
+     "file":{"_id":"abc123","name":"probe image.png","size":42,"type":"image/png","typeGroup":"image"}}
+],"success":true,"unreadNotLoaded":0}"#;
 const THREAD_BODY: &str = r#"{"messages":[{"_id":"r1","rid":"GENERAL","msg":"reply","tmid":"root","u":{"username":"tester"}}],"success":true}"#;
 const NOT_ALLOWED_BODY: &str =
     r#"{"success":false,"error":"Not allowed [error-action-not-allowed]"}"#;
@@ -273,6 +277,32 @@ fn mime_type_maps_common_extensions() {
     assert_eq!(
         super::client::mime_type("blob.xyz"),
         "application/octet-stream"
+    );
+}
+
+#[test]
+fn attachments_decode_with_the_server_url_and_mime() {
+    let routes = vec![
+        ("login", 200, LOGIN_BODY),
+        ("rooms.get", 200, ROOMS_BODY),
+        ("subscriptions.get", 200, SUBSCRIPTIONS_BODY),
+        ("channels.history", 200, FILE_HISTORY_BODY),
+    ];
+    let transport = FakeTransport::answering(&routes);
+    let mut rc = client(transport);
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    // History routes by the cached room kind: GENERAL is a channel.
+    futures_lite::future::block_on(rc.rooms()).unwrap();
+
+    let messages = futures_lite::future::block_on(rc.history("GENERAL")).unwrap();
+    let file = messages[0].file.as_ref().expect("the file decodes");
+    assert_eq!(file.name, "probe image.png");
+    assert_eq!(file.size, 42);
+    assert!(file.is_image());
+    assert_eq!(file.path, "/file-upload/abc123/probe%20image.png");
+    assert_eq!(
+        file.url,
+        "http://127.0.0.1:3000/file-upload/abc123/probe%20image.png"
     );
 }
 

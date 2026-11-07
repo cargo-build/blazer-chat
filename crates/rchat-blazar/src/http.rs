@@ -5,7 +5,7 @@
 //! (plain TCP for `http://`, TLS via native-tls for `https://`), and
 //! protocol tests substitute their own.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read as _};
 
 use compio::buf::BufResult;
 use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -124,24 +124,44 @@ impl HttpTransport {
     /// Binary GET for non-JSON resources (emoji images): status must be
     /// 2xx, the body returns as raw bytes.
     pub async fn get_bytes(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        self.get_bytes_with_headers(path, &[]).await
+    }
+
+    /// Binary GET with explicit headers (auth for file downloads). The
+    /// server force-gzips file responses (ignoring `Accept-Encoding`),
+    /// so a `content-encoding: gzip` body is decoded here.
+    pub async fn get_bytes_with_headers(
+        &self,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> std::io::Result<Vec<u8>> {
         let raw = self
-            .exchange("GET", path, &[], "application/json", b"")
+            .exchange("GET", path, headers, "application/json", b"")
             .await?;
-        let split = raw
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-            .ok_or_else(|| std::io::Error::other("no HTTP header/body separator"))?;
-        let head = String::from_utf8_lossy(&raw[..split]);
-        let status = head
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|code| code.parse::<u16>().ok())
-            .unwrap_or(0);
-        if !(200..300).contains(&status) {
-            return Err(std::io::Error::other(format!("emoji image http {status}")));
+        let wire = parse_wire(&raw)?;
+        if !(200..300).contains(&wire.status) {
+            return Err(std::io::Error::other(format!(
+                "binary get http {}",
+                wire.status
+            )));
         }
-        Ok(raw[split + 4..].to_vec())
+        let gzipped = wire
+            .head
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .any(|(name, value)| {
+                name.trim().eq_ignore_ascii_case("content-encoding")
+                    && value.trim().eq_ignore_ascii_case("gzip")
+            });
+        if !gzipped {
+            return Ok(wire.body);
+        }
+        let mut decoded = Vec::with_capacity(wire.body.len() * 4);
+        flate2::read::GzDecoder::new(&wire.body[..])
+            .read_to_end(&mut decoded)
+            .map_err(|error| std::io::Error::other(format!("gzip decode: {error}")))?;
+        Ok(decoded)
     }
 }
 
@@ -178,17 +198,27 @@ impl Conn {
     }
 }
 
-/// Splits head/body, decodes content-length or chunked bodies, and reports
-/// the status code — all on raw bytes: content-length counts bytes, and
-/// slicing a lossy-UTF-8 string at byte offsets panics on multibyte input.
-/// Truncated reads surface as InvalidData, not empty bodies.
-fn parse_response(raw: &[u8]) -> std::io::Result<Response> {
+/// Wire framing result: status, the decoded body as raw bytes (binary
+/// safe — lossy UTF-8 is a JSON-layer concern), and the header block for
+/// content sniffing.
+struct WireResponse {
+    status: u16,
+    body: Vec<u8>,
+    head: String,
+}
+
+/// Splits head/body, decodes content-length or chunked bodies, and
+/// reports the status code — all on raw bytes: content-length counts
+/// bytes, and slicing a lossy-UTF-8 string at byte offsets panics on
+/// multibyte input. Truncated reads surface as InvalidData, not empty
+/// bodies.
+fn parse_wire(raw: &[u8]) -> std::io::Result<WireResponse> {
     let split = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .ok_or_else(|| invalid("no HTTP header/body separator"))?;
     let head = String::from_utf8_lossy(&raw[..split]);
-    let body = &raw[split + 4..];
+    let rest = &raw[split + 4..];
 
     let status = head
         .lines()
@@ -213,21 +243,34 @@ fn parse_response(raw: &[u8]) -> std::io::Result<Response> {
     }
 
     let body = if chunked {
-        decode_chunked(body).ok_or_else(|| invalid("malformed chunked body"))?
+        decode_chunked(rest).ok_or_else(|| invalid("malformed chunked body"))?
     } else if let Some(length) = content_length {
-        if body.len() < length {
+        if rest.len() < length {
             return Err(invalid("truncated body"));
         }
-        String::from_utf8_lossy(&body[..length]).into_owned()
+        rest[..length].to_vec()
     } else {
-        String::from_utf8_lossy(body).into_owned()
+        rest.to_vec()
     };
 
-    Ok(Response { status, body })
+    Ok(WireResponse {
+        status,
+        body,
+        head: head.into_owned(),
+    })
+}
+
+/// The JSON layer over [`parse_wire`]: bodies are text.
+fn parse_response(raw: &[u8]) -> std::io::Result<Response> {
+    let wire = parse_wire(raw)?;
+    Ok(Response {
+        status: wire.status,
+        body: String::from_utf8_lossy(&wire.body).into_owned(),
+    })
 }
 
 /// Decodes `length\r\n<bytes>\r\n` chunks until the zero chunk.
-fn decode_chunked(body: &[u8]) -> Option<String> {
+fn decode_chunked(body: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(body.len());
     let mut rest = body;
     loop {
@@ -242,7 +285,7 @@ fn decode_chunked(body: &[u8]) -> Option<String> {
         )
         .ok()?;
         if size == 0 {
-            return Some(String::from_utf8_lossy(&out).into_owned());
+            return Some(out);
         }
         let chunk_start = line_end + 2;
         if rest.len() < chunk_start + size {
@@ -262,6 +305,7 @@ fn invalid(message: &str) -> std::io::Error {
 #[allow(clippy::unwrap_used)] // tests assert the expected path
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     #[test]
     fn parses_content_length_body() {
@@ -292,6 +336,32 @@ mod tests {
     fn rejects_truncated_body() {
         let raw = b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nshort";
         assert!(parse_response(raw).is_err());
+    }
+
+    #[test]
+    fn binary_get_decodes_chunked_gzip_body() {
+        // Real-server case: file downloads arrive chunked AND force-gzipped.
+        let payload = b"png-bytes-0123456789";
+        let mut gzipped = Vec::new();
+        flate2::write::GzEncoder::new(&mut gzipped, flate2::Compression::default())
+            .write_all(payload)
+            .unwrap();
+        let mut framed = format!("{:x}\r\n", gzipped.len()).into_bytes();
+        framed.extend_from_slice(&gzipped);
+        framed.extend_from_slice(b"\r\n0\r\n\r\n");
+        let raw = [
+            b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\ncontent-encoding: gzip\r\n\r\n"
+                .as_slice(),
+            &framed,
+        ]
+        .concat();
+        let wire = parse_wire(&raw).unwrap();
+        assert_eq!(wire.status, 200);
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(&wire.body[..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, payload);
     }
 
     /// Live roundtrip against a real https server: TCP → TLS → request →

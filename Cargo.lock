@@ -4882,6 +4882,7 @@ dependencies = [
  "async-channel 2.5.0",
  "compio",
  "compio-ws",
+ "flate2",
  "futures-lite 2.6.1",
  "gpui",
  "redb",

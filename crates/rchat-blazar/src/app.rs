@@ -15,7 +15,7 @@ use async_channel::{Receiver, Sender, unbounded};
 use serde::Serialize;
 
 use crate::control;
-use crate::rc::{LiveCommand, Msg, RcClient, RcError, RcSettings, Room};
+use crate::rc::{AttachedFile, LiveCommand, Msg, RcClient, RcError, RcSettings, Room};
 use crate::store::Store;
 use crate::tasks::{spawn_emoji, spawn_live};
 
@@ -99,6 +99,8 @@ pub enum ChatEvent {
         room_id: String,
         msg_id: String,
     },
+    /// A popup-grade notification for the user (M4).
+    Notification(crate::rc::Notification),
     /// The server accepted the reaction toggle; the fold applies it
     /// locally until the live stream redelivers the message.
     ReactionToggled {
@@ -154,6 +156,9 @@ pub struct ChatState {
     pub live_connected: bool,
     /// Fetched threads by their root message id, oldest first.
     threads: std::collections::HashMap<String, Vec<Msg>>,
+    /// Notifications for rooms other than the active one, pending
+    /// display (newest last, bounded).
+    pub notifications: Vec<crate::rc::Notification>,
 }
 
 /// One local-search hit.
@@ -305,6 +310,16 @@ impl ChatState {
                 self.emoji = emojis.iter().cloned().collect();
                 None
             }
+            ChatEvent::Notification(note) => {
+                // The active room's traffic is on screen already; popups
+                // carry only the rest. Bounded: the oldest fall off.
+                if self.active_room.as_deref() != Some(note.room_id.as_str()) {
+                    self.notifications.push(note);
+                    let excess = self.notifications.len().saturating_sub(8);
+                    self.notifications.drain(0..excess);
+                }
+                None
+            }
             ChatEvent::Quit => None,
         }
     }
@@ -378,6 +393,8 @@ pub struct UiSnapshot {
     pub thread: Vec<String>,
     /// Whether the live WebSocket is connected.
     pub live: bool,
+    /// Pending notifications: `"title: body"`.
+    pub notifications: Vec<String>,
     pub active_room: Option<String>,
     pub messages: Vec<String>,
     pub error: Option<String>,
@@ -443,6 +460,14 @@ impl UiSnapshot {
                         line.push_str(&format!(" [📎 {}]", file.name));
                     }
                     line
+                })
+                .collect(),
+            notifications: state
+                .notifications
+                .iter()
+                .map(|note| {
+                    let body = note.message.as_deref().unwrap_or(&note.text);
+                    format!("{}: {}", note.title, body)
                 })
                 .collect(),
             error: state.error.clone(),
@@ -575,6 +600,23 @@ async fn drive(
     }
 }
 
+/// Fetches one image attachment into the cache, returning the path for
+/// the UI. The chip is the fallback when this fails.
+async fn fetch_image_preview(
+    client: &mut RcClient,
+    store: &Store,
+    room_id: &str,
+    file: &AttachedFile,
+) -> Result<std::path::PathBuf, RcError> {
+    let bytes = client.file_bytes(&file.path).await?;
+    // `/file-upload/{file_id}/{name}` — the id segment, not the
+    // dash-riddled display name.
+    let file_id = file.path.split('/').nth(2).unwrap_or("file");
+    store
+        .save_attachment(room_id, file_id, &file.name, &bytes)
+        .map_err(RcError::Config)
+}
+
 /// One command → one event; failures always surface as `Failed`. `store`
 /// persists the session and room cache; a 401 clears the stored session.
 async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatCommand) -> ChatEvent {
@@ -612,12 +654,32 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             Err(error) => ChatEvent::Failed(error.to_string()),
         },
         ChatCommand::OpenRoom { room_id } => match client.history(&room_id).await {
-            Ok(messages) => {
+            Ok(mut messages) => {
                 // Server-side read receipt: the unread stream stops
                 // counting this room. Cosmetic — a refusal is logged, not
                 // banner-worthy.
                 if let Err(error) = client.mark_read(&room_id).await {
                     eprintln!("rchat-blazar: mark read: {error}");
+                }
+                // Inline image previews: fetch into the cache; a chip
+                // remains the fallback for anything that fails.
+                if let Some(store) = store {
+                    for message in &mut messages {
+                        if let Some(file) = &message.file
+                            && file.is_image()
+                        {
+                            match fetch_image_preview(client, store, &room_id, file).await {
+                                Ok(path) => {
+                                    if let Some(fresh) = message.file.as_mut() {
+                                        fresh.image_path = Some(path.display().to_string());
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!("rchat-blazar: preview {}: {error}", file.name)
+                                }
+                            }
+                        }
+                    }
                 }
                 ChatEvent::Messages { room_id, messages }
             }
@@ -859,6 +921,30 @@ mod tests {
         state.apply(ChatEvent::ThreadClosed);
         assert!(state.open_thread.is_none());
         assert_eq!(state.thread("root").len(), 2, "the thread stays cached");
+    }
+
+    #[test]
+    fn notifications_fold_for_other_rooms_and_skip_the_active_one() {
+        let mut state = ChatState {
+            active_room: Some("dm".to_owned()),
+            ..ChatState::default()
+        };
+        let note = |room: &str| crate::rc::Notification {
+            title: "laurent".to_owned(),
+            text: String::new(),
+            room_id: room.to_owned(),
+            sender: Some("laurent".to_owned()),
+            room_type: Some("d".to_owned()),
+            message_id: None,
+            tmid: None,
+            message: Some("hello".to_owned()),
+        };
+        state.apply(ChatEvent::Notification(note("other")));
+        state.apply(ChatEvent::Notification(note("dm")));
+        assert_eq!(state.notifications.len(), 1, "the active room is skipped");
+        assert_eq!(state.notifications[0].room_id, "other");
+        let snapshot = UiSnapshot::from_state(&state);
+        assert_eq!(snapshot.notifications, vec!["laurent: hello".to_owned()]);
     }
 
     #[test]

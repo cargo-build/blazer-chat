@@ -133,6 +133,51 @@ impl Store {
             .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
         Ok(dir)
     }
+
+    /// Directory for downloaded attachment previews.
+    pub fn attachments_dir() -> Result<PathBuf, String> {
+        let dir = store_path()?
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        let dir = dir.join("attachments");
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+        Ok(dir)
+    }
+
+    /// Persists an attachment's bytes under the cache; returns the path
+    /// for the UI. Sanitized `{file_id}-{name}` keeps rooms separate.
+    pub fn save_attachment(
+        &self,
+        room_id: &str,
+        file_id: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, String> {
+        let dir = Self::attachments_dir()?.join(sanitize(room_id));
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+        let safe_name = sanitize(name);
+        let path = dir.join(format!("{file_id}-{safe_name}"));
+        std::fs::write(&path, bytes)
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        Ok(path)
+    }
+}
+
+/// Filesystem-safe component (one owner; room ids and file names).
+fn sanitize(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn store_path() -> Result<PathBuf, String> {
@@ -182,6 +227,19 @@ mod tests {
 
         store.clear_session().unwrap();
         assert!(store.load_session().is_none());
+    }
+
+    #[test]
+    fn attachments_persist_under_their_room() {
+        let store = temp_store();
+        let path = store
+            .save_attachment("GENERAL", "abc123", "probe image.png", b"png-bytes")
+            .unwrap();
+        assert!(
+            path.to_string_lossy()
+                .contains("GENERAL/abc123-probe_image.png")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"png-bytes");
     }
 
     #[test]

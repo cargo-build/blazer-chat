@@ -83,6 +83,15 @@ impl RcClient<HttpTransport> {
         let path = format!("/emoji-custom/{name}.{extension}");
         self.transport.get_bytes(&path).await.map_err(RcError::Io)
     }
+
+    /// Downloads an attachment (authenticated GET) as raw bytes.
+    pub async fn file_bytes(&self, path: &str) -> Result<Vec<u8>, RcError> {
+        let headers = self.auth_headers()?;
+        self.transport
+            .get_bytes_with_headers(path, &headers)
+            .await
+            .map_err(RcError::Io)
+    }
 }
 
 impl<T: Transport> RcClient<T> {
@@ -431,15 +440,16 @@ impl<T: Transport> RcClient<T> {
             .collect();
         let file = message.file.map(|file| {
             let name = file.name.unwrap_or_else(|| "file".to_owned());
+            let path = format!("/file-upload/{}/{}", file.id, name.replace(' ', "%20"));
             AttachedFile {
-                url: format!(
-                    "{}/file-upload/{}/{}",
-                    self.origin.clone(),
-                    file.id,
-                    name.replace(' ', "%20")
-                ),
+                url: format!("{}{}", self.origin.clone(), path),
+                path,
+                mime: file
+                    .mime
+                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
                 name,
                 size: file.size.unwrap_or_default(),
+                image_path: None,
             }
         });
         Msg {

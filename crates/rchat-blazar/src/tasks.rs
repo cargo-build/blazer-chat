@@ -38,10 +38,11 @@ pub fn spawn_live(
             compio::runtime::spawn(async move {
                 while let Ok(event) = update_rx.recv().await {
                     let chat_event = match event {
-                        LiveEvent::Message(message) => ChatEvent::LiveMessage(message),
+                        LiveEvent::Message(message) => ChatEvent::LiveMessage(*message),
                         LiveEvent::Unread { room_id, unread } => {
                             ChatEvent::UnreadCount { room_id, unread }
                         }
+                        LiveEvent::Notification(note) => ChatEvent::Notification(note),
                     };
                     if events.send(chat_event).await.is_err() {
                         break;

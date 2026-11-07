@@ -3,8 +3,8 @@
 //! push commands back.
 
 use gpui::{
-    Context, Entity, FocusHandle, Focusable, FontWeight, SharedString, Window, div, img,
-    prelude::*, px, rgb, uniform_list,
+    Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, ScrollHandle, SharedString, Window,
+    div, hsla, img, prelude::*, px, rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +18,8 @@ const BG: u32 = 0x11151c;
 const BORDER: u32 = 0x394354;
 const TEXT: u32 = 0xe8eaed;
 const ACCENT: u32 = 0x4f8cff;
+/// One step above the pane background: the hovered message row.
+const ROW_HOVER: u32 = 0x1a2230;
 
 /// The one window's root view.
 pub(crate) struct ChatRoot {
@@ -32,6 +34,10 @@ pub(crate) struct ChatRoot {
     search: Entity<TextInput>,
     /// `(room_id, msg_id)` while the composer edits an existing message.
     editing: Option<(String, String)>,
+    /// The pane's scroll; pins to the newest message on room switches.
+    scroll: ScrollHandle,
+    /// Room whose messages the scroll handle last re-pinned.
+    pinned_room: Option<String>,
 }
 
 /// One precomputed message row of the active room: the pane renders
@@ -47,6 +53,8 @@ struct MessageView {
     reactions: Vec<(String, u32)>,
     /// `(name, url, size)` when the message carries an uploaded file.
     file: Option<(String, String, u64)>,
+    /// Cached preview path for image attachments.
+    image_path: Option<String>,
 }
 
 impl ChatRoot {
@@ -84,6 +92,8 @@ impl ChatRoot {
             views: Vec::new(),
             search: cx.new(|cx| TextInput::new("Search…", cx)),
             editing: None,
+            scroll: ScrollHandle::new(),
+            pinned_room: None,
         }
     }
 
@@ -102,6 +112,8 @@ impl ChatRoot {
     /// Re-parses the active room's messages into render views (markdown
     /// spans with emoji paths resolved).
     fn rebuild_views(&mut self) {
+        let switched = self.pinned_room.as_deref() != self.state.active_room.as_deref();
+        let at_bottom = self.scroll.offset().y >= -self.scroll.max_offset().height;
         let emoji = &self.state.emoji;
         self.views = self
             .state
@@ -110,7 +122,7 @@ impl ChatRoot {
             .map(|message| MessageView {
                 id: message.id.clone(),
                 room_id: message.room_id.clone(),
-                ts: message.ts.split('T').nth(1).unwrap_or_default().to_owned(),
+                ts: pretty_time(&message.ts),
                 sender: message.sender.clone(),
                 text: message.text.clone(),
                 lines: message
@@ -127,8 +139,16 @@ impl ChatRoot {
                     .file
                     .as_ref()
                     .map(|file| (file.name.clone(), file.url.clone(), file.size)),
+                image_path: message
+                    .file
+                    .as_ref()
+                    .and_then(|file| file.image_path.clone()),
             })
             .collect();
+        if switched || at_bottom {
+            self.scroll.scroll_to_bottom();
+            self.pinned_room = self.state.active_room.clone();
+        }
     }
 
     /// Mirrors the entity into the control-socket snapshot. The UI thread
@@ -317,7 +337,7 @@ impl gpui::Render for ChatRoot {
             .id("messages")
             .flex()
             .flex_col()
-            .gap_1()
+            .track_scroll(&self.scroll)
             .overflow_y_scroll()
             .children(self.views.iter().map(|view| {
                 let room_id = view.room_id.clone();
@@ -333,11 +353,13 @@ impl gpui::Render for ChatRoot {
                     .gap_1()
                     .children(view.reactions.iter().map(|(name, count)| {
                         div()
-                            .px_1()
-                            .rounded_xs()
+                            .px_1p5()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(BORDER))
                             .bg(rgb(PANEL))
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(TEXT))
                             .child(SharedString::from(format!("{name} ×{count}")))
                     }));
                 div()
@@ -346,48 +368,48 @@ impl gpui::Render for ChatRoot {
                     .flex()
                     .gap_2()
                     .items_start()
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .child(SharedString::from(view.ts.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .child(SharedString::from(view.sender.clone())),
-                    )
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .hover(|style| style.bg(rgb(ROW_HOVER)))
+                    .child(avatar(&view.sender))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap_1()
-                            .child(message_element(view))
-                            .child(badges)
-                            .children(view.file.as_ref().map(|(name, url, size)| {
-                                let url = url.clone();
+                            .gap_0p5()
+                            .child(
                                 div()
-                                    .id(SharedString::from(format!("file-{msg_id}")))
-                                    .flex_none()
-                                    .px_1()
-                                    .rounded_xs()
-                                    .bg(rgb(PANEL))
-                                    .text_sm()
-                                    .text_color(rgb(ACCENT))
-                                    .underline()
-                                    .cursor_pointer()
-                                    .child(SharedString::from(format!(
-                                        "📎 {} ({})",
-                                        name,
-                                        human_bytes(*size)
-                                    )))
-                                    .on_click(move |_, _, cx| cx.open_url(&url))
-                            })),
+                                    .flex()
+                                    .items_baseline()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(TEXT))
+                                            .child(SharedString::from(view.sender.clone())),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .child(SharedString::from(view.ts.clone())),
+                                    ),
+                            )
+                            .child(message_element(view))
+                            .children(view.file.as_ref().map(|(name, url, size)| {
+                                attachment_card(
+                                    &msg_id,
+                                    name,
+                                    url,
+                                    *size,
+                                    view.image_path.as_deref(),
+                                )
+                            }))
+                            .child(badges),
                     )
                     .child(action_strip(ActionContext {
                         this: this.clone(),
@@ -439,7 +461,8 @@ impl gpui::Render for ChatRoot {
                             div()
                                 .flex_none()
                                 .text_sm()
-                                .text_color(rgb(MUTED))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(TEXT))
                                 .child(SharedString::from(message.sender.clone())),
                         )
                         .child(
@@ -601,6 +624,136 @@ impl gpui::Render for ChatRoot {
 /// One message body: the text split into lines (newlines preserved), each
 /// line parsed into markdown spans and laid out as a wrapping row so inline
 /// emoji images flow with the text.
+/// The sender's initial on a per-user color disc (Rocket.Chat colors
+/// usernames too).
+fn avatar(sender: &str) -> gpui::Div {
+    let initial = sender
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .next()
+        .unwrap_or('?');
+    div()
+        .flex_none()
+        .size(px(32.0))
+        .rounded_full()
+        .bg(user_color(sender))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_sm()
+        .text_color(white())
+        .child(SharedString::from(initial.to_string()))
+}
+
+/// Deterministic per-sender accent from the name itself.
+fn user_color(sender: &str) -> Hsla {
+    let hash = sender.bytes().fold(5381u32, |acc, byte| {
+        acc.wrapping_mul(33).wrapping_add(u32::from(byte))
+    });
+    hsla((hash % 360) as f32, 0.55, 0.62, 1.0)
+}
+
+/// `2026-11-07T20:32:00.514Z` → `8:32 PM` (server stamps are UTC;
+/// local-offset rendering is a known gap).
+fn pretty_time(ts: &str) -> String {
+    let Some((_, time)) = ts.split_once('T') else {
+        return ts.to_owned();
+    };
+    let mut parts = time.split(':');
+    let (Some(hour), Some(minute)) = (parts.next(), parts.next()) else {
+        return ts.to_owned();
+    };
+    let Ok(hour) = hour.parse::<u32>() else {
+        return ts.to_owned();
+    };
+    let (hour, suffix) = match hour {
+        0 => (12, "AM"),
+        1..=11 => (hour, "AM"),
+        12 => (12, "PM"),
+        _ => (hour - 12, "PM"),
+    };
+    format!("{hour}:{minute} {suffix}")
+}
+
+/// One attachment as a card: type tile, name link, size — with the
+/// fetched image inline when cached (the original client's look).
+fn attachment_card(
+    msg_id: &str,
+    name: &str,
+    url: &str,
+    size: u64,
+    image_path: Option<&str>,
+) -> gpui::Div {
+    let extension = name
+        .rsplit('.')
+        .next()
+        .filter(|_| name.contains('.'))
+        .unwrap_or("file")
+        .to_uppercase();
+    let url = url.to_owned();
+    div()
+        .mt_0p5()
+        .max_w(px(420.0))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_2()
+        .rounded_md()
+        .bg(rgb(PANEL))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(40.0))
+                        .rounded_sm()
+                        .bg(rgb(BORDER))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(TEXT))
+                        .child(SharedString::from(extension)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("file-{msg_id}")))
+                                .text_sm()
+                                .text_color(rgb(ACCENT))
+                                .cursor_pointer()
+                                .hover(|style| style.underline())
+                                .child(SharedString::from(name.to_owned()))
+                                .on_click(move |_, _, cx| cx.open_url(&url)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(SharedString::from(human_bytes(size))),
+                        ),
+                ),
+        )
+        .children(image_path.map(|path| {
+            img(std::path::PathBuf::from(path))
+                .max_w(px(400.0))
+                .rounded_sm()
+        }))
+}
+
 fn message_element(view: &MessageView) -> gpui::Div {
     let lines: Vec<gpui::Div> = view
         .lines

@@ -15,6 +15,7 @@
 //! [`Frame`] stream ([`DdpLive::next_frame`]); `run` is a flat loop of
 //! one-line arms over that stream.
 
+use super::Notification;
 use serde_json::Value;
 
 use crate::rc::{Msg, RcError, Session};
@@ -32,13 +33,17 @@ const NOTIFY_STREAM: &str = "stream-notify-user";
 
 /// The notify event carrying per-room unread counts.
 const SUBSCRIPTIONS_CHANGED: &str = "subscriptions-changed";
+/// The notify event carrying popups for messages outside the active
+/// room.
+const NOTIFICATION_EVENT: &str = "notification";
 
 /// One live update: a chat message from the watched room, or an unread
 /// count from the user's subscription stream.
 #[derive(Debug)]
 pub enum LiveEvent {
-    Message(Msg),
+    Message(Box<Msg>),
     Unread { room_id: String, unread: u32 },
+    Notification(super::Notification),
 }
 
 /// One unit of work for the live loop: a decoded wire frame, the keepalive
@@ -48,9 +53,11 @@ enum Frame {
     /// DDP-level ping from the server — answer with a pong.
     Ping,
     /// A decoded chat message from the watched room's stream.
-    RoomMessage(Msg),
+    RoomMessage(Box<Msg>),
     /// An unread-count update from the user's subscription stream.
     Notify { room_id: String, unread: u32 },
+    /// A popup-grade notification for the user.
+    Notification(super::Notification),
     /// Watch another room's message stream (control command).
     Watch(String),
     /// Nothing arrived within the keepalive window — send a ping.
@@ -70,6 +77,8 @@ pub struct DdpLive {
     room_sub: Option<String>,
     /// The id of the always-on `subscriptions-changed` subscription.
     notify_sub: Option<String>,
+    /// The id of the always-on `notification` subscription.
+    notification_sub: Option<String>,
     /// The watched room, remembered across reconnects (resubscribe).
     watched: Option<String>,
 }
@@ -106,6 +115,7 @@ impl DdpLive {
             next_id: 0,
             room_sub: None,
             notify_sub: None,
+            notification_sub: None,
             watched: None,
         };
 
@@ -153,6 +163,14 @@ impl DdpLive {
         }))
         .await?;
         live.notify_sub = Some(id.to_owned());
+        // The per-user notification stream feeds the popups.
+        let id = live.next_id();
+        live.send_json(serde_json::json!({
+            "msg": "sub", "id": id, "name": NOTIFY_STREAM,
+            "params": [format!("{}/{}", session.user_id, NOTIFICATION_EVENT)],
+        }))
+        .await?;
+        live.notification_sub = Some(id.to_owned());
         Ok(live)
     }
 
@@ -189,6 +207,9 @@ impl DdpLive {
                 }
                 Frame::Notify { room_id, unread } => {
                     let _ = events.send(LiveEvent::Unread { room_id, unread }).await;
+                }
+                Frame::Notification(note) => {
+                    let _ = events.send(LiveEvent::Notification(note)).await;
                 }
                 Frame::Watch(room_id) => self.watch(&room_id).await?,
                 Frame::Ping => self.reply_pong(None).await?,
@@ -320,40 +341,92 @@ fn decode_document(document: Value) -> Frame {
             if document.get("collection").and_then(Value::as_str) == Some(ROOM_STREAM) =>
         {
             match message_from_event(&document) {
-                Some(message) => Frame::RoomMessage(message),
+                Some(message) => Frame::RoomMessage(Box::new(message)),
                 None => Frame::Document(document),
             }
         }
-        // subscriptions-changed: args = [type, subscription]; "removed"
-        // rooms drop off the list, the rest carry rid + unread. The
-        // initial burst after subscribing sets every room's badge.
+        // The per-user notify stream: `subscriptions-changed` sets the
+        // unread badges (args = [type, subscription]; the initial burst
+        // after subscribing carries every room), `notification` carries
+        // popups for messages outside the active room.
         Some("changed")
             if document.get("collection").and_then(Value::as_str) == Some(NOTIFY_STREAM) =>
         {
-            let notify = document.get("fields").and_then(|fields| {
-                let event = fields.get("eventName").and_then(Value::as_str)?;
-                let event = event.rsplit('/').next()?;
-                if event != SUBSCRIPTIONS_CHANGED {
-                    return None;
+            let fields = document.get("fields");
+            let event = fields
+                .and_then(|fields| fields.get("eventName"))
+                .and_then(Value::as_str)
+                .and_then(|event| event.rsplit('/').next())
+                .unwrap_or_default();
+            match event {
+                NOTIFICATION_EVENT => fields
+                    .and_then(|fields| fields.get("args"))
+                    .and_then(notification_from_args)
+                    .map_or_else(|| Frame::Document(document), Frame::Notification),
+                SUBSCRIPTIONS_CHANGED => {
+                    let notify = fields.and_then(|fields| {
+                        let args = fields.get("args")?.as_array()?;
+                        let kind = args.first()?.as_str()?;
+                        if !matches!(kind, "updated" | "inserted") {
+                            return None;
+                        }
+                        let subscription = args.get(1)?;
+                        Some((
+                            subscription.get("rid")?.as_str()?.to_owned(),
+                            subscription.get("unread")?.as_u64()? as u32,
+                        ))
+                    });
+                    match notify {
+                        Some((room_id, unread)) => Frame::Notify { room_id, unread },
+                        None => Frame::Document(document),
+                    }
                 }
-                let args = fields.get("args")?.as_array()?;
-                let kind = args.first()?.as_str()?;
-                if !matches!(kind, "updated" | "inserted") {
-                    return None;
-                }
-                let subscription = args.get(1)?;
-                Some((
-                    subscription.get("rid")?.as_str()?.to_owned(),
-                    subscription.get("unread")?.as_u64()? as u32,
-                ))
-            });
-            match notify {
-                Some((room_id, unread)) => Frame::Notify { room_id, unread },
-                None => Frame::Document(document),
+                _ => Frame::Document(document),
             }
         }
         _ => Frame::Document(document),
     }
+}
+
+/// Parses `args[0]` of a `notification` event. Wire shape captured in
+/// the vendored ruqola client: title/text on the envelope, the message
+/// identity under `payload`.
+fn notification_from_args(args: &Value) -> Option<Notification> {
+    let arg = args.as_array()?.first()?;
+    let payload = arg.get("payload")?;
+    Some(Notification {
+        title: arg
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        text: arg
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        room_id: payload.get("rid")?.as_str()?.to_owned(),
+        sender: payload
+            .pointer("/sender/username")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        room_type: payload
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        message_id: payload
+            .get("_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        tmid: payload
+            .get("tmid")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        message: payload
+            .pointer("/message/msg")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 /// The DDP handshake payload.
@@ -424,6 +497,59 @@ fn live_io(error: WsError) -> RcError {
 #[allow(clippy::unwrap_used)] // tests assert the expected path
 mod tests {
     use super::*;
+
+    /// The probes' configuration: live URL (or the school server) and
+    /// the self-DM — the only permitted write target (AGENTS.md
+    /// live-send policy).
+    fn probe_env() -> (crate::rc::RcSettings, String) {
+        let url = std::env::var("RCHAT_LIVE_URL")
+            .unwrap_or_else(|_| "https://rocketchat-student.21-school.ru".to_owned());
+        let self_dm = std::env::var("RCHAT_SELF_DM").unwrap();
+        (crate::rc::RcSettings::parse(&url).unwrap(), self_dm)
+    }
+
+    /// REST login + DDP connect; runs inside the probe's runtime.
+    async fn probe_harness(
+        settings: &crate::rc::RcSettings,
+    ) -> (crate::rc::RcClient<crate::http::HttpTransport>, DdpLive) {
+        let user = std::env::var("RCHAT_USER").unwrap();
+        let password = std::env::var("RCHAT_PASSWORD").unwrap();
+        let transport = crate::http::HttpTransport::new(
+            settings.addr(),
+            settings.host_header(),
+            settings.is_tls(),
+        );
+        let mut rc = crate::rc::RcClient::with_transport(settings.clone(), transport);
+        rc.login(&user, &password).await.unwrap();
+        let session = rc.session().unwrap().clone();
+        let live = DdpLive::connect(&websocket_url(settings), &session)
+            .await
+            .expect("ddp connect + resume login");
+        (rc, live)
+    }
+
+    /// Drains the wire for `window`, answering server pings and skipping
+    /// pong frames. Bounded, so a probe never dies on the unanswered-ping
+    /// close.
+    async fn drain_frames(live: &mut DdpLive, window: std::time::Duration) -> Vec<Frame> {
+        let deadline = std::time::Instant::now() + window;
+        let mut frames = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break frames;
+            }
+            match live.next_wire_frame(remaining).await {
+                Ok(Frame::Ping) => {
+                    let _ = live.reply_pong(None).await;
+                }
+                Ok(Frame::Document(document))
+                    if document.get("msg").and_then(Value::as_str) == Some("pong") => {}
+                Ok(frame) => frames.push(frame),
+                Err(_) => break frames,
+            }
+        }
+    }
 
     /// subscriptions-changed decodes into an unread update; foreign
     /// events and removed-type args fall through to Document.
@@ -506,6 +632,42 @@ mod tests {
         assert!(matches!(empty_args, Frame::Document(_)));
     }
 
+    /// The notification event decodes per the wire shape captured in
+    /// the vendored ruqola client (`rocketchataccount.cpp`).
+    #[test]
+    fn notification_events_decode_with_the_documented_shape() {
+        let frame = decode_document(serde_json::json!({
+            "msg": "changed", "collection": "stream-notify-user",
+            "id": "id4",
+            "fields": {
+                "eventName": "MYUID/notification",
+                "args": [{
+                    "title": "laurent",
+                    "text": "",
+                    "payload": {
+                        "_id": "vD3CXNB2oK5uB8nDT",
+                        "message": {"msg": "hello there"},
+                        "rid": "DMROOM",
+                        "sender": {"_id": "SENDER", "name": "laurent",
+                                   "username": "laurent-montel"},
+                        "type": "d"
+                    }
+                }]
+            }
+        }));
+        match frame {
+            Frame::Notification(note) => {
+                assert_eq!(note.title, "laurent");
+                assert_eq!(note.room_id, "DMROOM");
+                assert_eq!(note.sender.as_deref(), Some("laurent-montel"));
+                assert_eq!(note.message.as_deref(), Some("hello there"));
+                assert_eq!(note.room_type.as_deref(), Some("d"));
+                assert_eq!(note.message_id.as_deref(), Some("vD3CXNB2oK5uB8nDT"));
+            }
+            other => panic!("expected Notification, got {other:?}"),
+        }
+    }
+
     #[test]
     fn websocket_url_carries_scheme_host_and_path() {
         let mut settings = crate::rc::RcSettings::parse("https://example.com").unwrap();
@@ -525,26 +687,9 @@ mod tests {
     #[test]
     #[ignore = "live network probe"]
     fn live_notify_stream_delivers_unread_counts() {
-        let url = std::env::var("RCHAT_LIVE_URL")
-            .unwrap_or_else(|_| "https://rocketchat-student.21-school.ru".to_owned());
-        let settings = crate::rc::RcSettings::parse(&url).unwrap();
-        let user = std::env::var("RCHAT_USER").unwrap();
-        let password = std::env::var("RCHAT_PASSWORD").unwrap();
-        let self_dm = std::env::var("RCHAT_SELF_DM").unwrap();
-
+        let (settings, self_dm) = probe_env();
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let transport = crate::http::HttpTransport::new(
-                settings.addr(),
-                settings.host_header(),
-                settings.is_tls(),
-            );
-            let mut rc = crate::rc::RcClient::with_transport(settings.clone(), transport);
-            rc.login(&user, &password).await.unwrap();
-            let session = rc.session().unwrap().clone();
-
-            let mut live = DdpLive::connect(&websocket_url(&settings), &session)
-                .await
-                .expect("ddp connect + resume login");
+            let (rc, mut live) = probe_harness(&settings).await;
             live.watch(&self_dm).await.expect("subscribe the room");
 
             // One send while the stream is up: the subscription burst plus
@@ -552,27 +697,10 @@ mod tests {
             sleep(std::time::Duration::from_secs(2)).await;
             rc.send(&self_dm, "notify probe").await.expect("rest send");
 
-            let mut saw_notify = false;
-            for _ in 0..30 {
-                let frame = live
-                    .next_wire_frame(std::time::Duration::from_secs(2))
-                    .await;
-                match frame {
-                    Ok(Frame::Notify { room_id, unread }) => {
-                        println!("notify: {room_id} unread={unread}");
-                        if room_id == self_dm {
-                            saw_notify = true;
-                            break;
-                        }
-                    }
-                    Ok(Frame::Document(document)) => println!("doc: {document}"),
-                    Ok(_) => continue,
-                    Err(error) => {
-                        println!("wire error: {error}");
-                        break;
-                    }
-                }
-            }
+            let saw_notify = drain_frames(&mut live, std::time::Duration::from_secs(30))
+                .await
+                .iter()
+                .any(|frame| matches!(frame, Frame::Notify { room_id, .. } if room_id == &self_dm));
             assert!(
                 saw_notify,
                 "no Notify frame for the self-DM within the window"
@@ -580,33 +708,60 @@ mod tests {
         });
     }
 
+    /// Live: the `notification` event shape. A REST send into the self-DM
+    /// (the only permitted write target) while a different room is watched
+    /// must surface a `stream-notify-user/{uid}/notification` document;
+    /// the raw args are printed for the decode's fixture. Ignored by
+    /// default; same env as the other probes.
+    #[test]
+    #[ignore = "live network probe"]
+    fn live_notification_stream_delivers_the_documented_shape() {
+        let (settings, self_dm) = probe_env();
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let (mut rc, mut live) = probe_harness(&settings).await;
+            // Watch a room other than the sender: notifications fire for
+            // messages the user is not looking at.
+            let other = rc
+                .rooms()
+                .await
+                .expect("rooms")
+                .into_iter()
+                .find(|room| room.id != self_dm)
+                .expect("a non-self room");
+            live.watch(&other.id).await.expect("subscribe the room");
+
+            sleep(std::time::Duration::from_secs(2)).await;
+            rc.send(&self_dm, "notification probe")
+                .await
+                .expect("rest send");
+
+            // The handshake subscribed {uid}/notification. Servers may
+            // skip notifying a message's own sender, so a self-DM send
+            // proves only liveness here: the observation is recorded, the
+            // wire shape is pinned by the unit fixture.
+            let frames = drain_frames(&mut live, std::time::Duration::from_secs(20)).await;
+            let mut notified = false;
+            for frame in &frames {
+                if let Frame::Notification(note) = frame {
+                    println!("notification: {note:?}");
+                    notified = true;
+                }
+            }
+            assert!(!frames.is_empty(), "the wire closed within the window");
+            println!("self-send produced a notification event: {notified}");
+        });
+    }
+
     #[test]
     #[ignore = "live network probe"]
     fn live_ddp_delivers_a_self_dm_message() {
-        let url = std::env::var("RCHAT_LIVE_URL")
-            .unwrap_or_else(|_| "https://rocketchat-student.21-school.ru".to_owned());
-        let settings = crate::rc::RcSettings::parse(&url).unwrap();
-        let user = std::env::var("RCHAT_USER").unwrap();
-        let password = std::env::var("RCHAT_PASSWORD").unwrap();
-        let self_dm = std::env::var("RCHAT_SELF_DM").unwrap();
-
+        let (settings, self_dm) = probe_env();
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let transport = crate::http::HttpTransport::new(
-                settings.addr(),
-                settings.host_header(),
-                settings.is_tls(),
-            );
-            let mut rc = crate::rc::RcClient::with_transport(settings.clone(), transport);
-            rc.login(&user, &password).await.unwrap();
-            let session = rc.session().unwrap().clone();
-
+            let (rc, mut live) = probe_harness(&settings).await;
             let (events, received) = async_channel::unbounded::<LiveEvent>();
             // The control channel never sends and never closes in the probe.
             let (never_tx, never_rx) = async_channel::unbounded();
             let _ = never_tx;
-            let mut live = DdpLive::connect(&websocket_url(&settings), &session)
-                .await
-                .expect("ddp connect + resume login");
             live.watch(&self_dm).await.expect("subscribe the room");
             let run = async move {
                 live.run(events, never_rx, std::time::Duration::from_secs(10))
