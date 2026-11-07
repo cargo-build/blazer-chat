@@ -36,6 +36,10 @@ pub struct WireRoom {
     pub name: Option<String>,
     #[serde(rename = "t")]
     pub kind: Option<String>,
+    /// Direct-message participants (`[others…, me]`); the display name
+    /// derives from it when `name` is absent.
+    #[serde(default)]
+    pub usernames: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

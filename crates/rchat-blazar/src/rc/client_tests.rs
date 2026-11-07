@@ -76,7 +76,8 @@ const LOGIN_BODY: &str = r#"{"status":"success","data":{"userId":"u1","authToken
 const ROOMS_BODY: &str = r#"{"update":[
     {"_id":"GENERAL","name":"general","t":"c","lastMessage":{}},
     {"_id":"priv1","name":"secret","t":"p"},
-    {"_id":"dm1","t":"d","usernames":["tester","alice"]}
+    {"_id":"dm1","t":"d","usernames":["tester","alice"]},
+    {"_id":"selfdm","t":"d","usernames":["tester"]}
 ],"remove":[],"success":true}"#;
 const HISTORY_BODY: &str = r#"{"messages":[
     {"_id":"m2","rid":"GENERAL","msg":"second","ts":"2026-11-07T15:00:02Z","u":{"username":"alice"}},
@@ -124,11 +125,15 @@ fn rooms_maps_channel_private_and_direct() {
     futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
 
     let rooms = futures_lite::future::block_on(rc.rooms()).unwrap();
-    assert_eq!(rooms.len(), 3);
+    assert_eq!(rooms.len(), 4);
     assert_eq!(rooms[0].name, "general");
     assert_eq!(rooms[0].kind, 'c');
     assert_eq!(rooms[1].kind, 'p');
-    assert_eq!(rooms[2].name, "dm:dm1");
+    // DMs display the other participant; a self-DM shows the own username.
+    assert_eq!(rooms[2].name, "alice");
+    assert_eq!(rooms[2].kind, 'd');
+    assert_eq!(rooms[3].name, "tester");
+    assert_eq!(rooms[3].kind, 'd');
 }
 
 #[test]

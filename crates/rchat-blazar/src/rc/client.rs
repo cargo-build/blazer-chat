@@ -144,6 +144,22 @@ impl<T: Transport> RcClient<T> {
         serde_json::from_str(body).map_err(|error| RcError::Parse(format!("{what}: {error}")))
     }
 
+    /// Display name of a direct-message room: the participants other than
+    /// the session's own username, joined; a self-DM shows the own
+    /// username.
+    fn dm_display_name(usernames: &Option<Vec<String>>, me: Option<&str>) -> Option<String> {
+        let names = usernames.as_deref()?;
+        let others: Vec<&str> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| Some(*name) != me)
+            .collect();
+        match others.is_empty() {
+            false => Some(others.join(", ")),
+            true => names.first().map(String::to_owned),
+        }
+    }
+
     pub async fn login(&mut self, user: &str, password: &str) -> Result<Session, RcError> {
         let body = serde_json::json!({ "user": user, "password": password }).to_string();
         let body = self
@@ -165,14 +181,22 @@ impl<T: Transport> RcClient<T> {
     pub async fn rooms(&mut self) -> Result<Vec<Room>, RcError> {
         let body = self.call("GET", "/api/v1/rooms.get", None, true).await?;
         let parsed: RoomsGetResponse = Self::parse(&body, "rooms.get")?;
+        let me = self
+            .session
+            .as_ref()
+            .map(|session| session.username.clone());
         let rooms: Vec<Room> = parsed
             .update
             .into_iter()
             .filter_map(|room| {
                 let kind = room.kind?.chars().next()?;
                 let name = match kind {
+                    // Direct messages have no `name`: the original client
+                    // shows the other participants' usernames, joined; a
+                    // self-DM shows the own username.
+                    'd' => Self::dm_display_name(&room.usernames, me.as_deref())
+                        .or_else(|| Some(format!("dm:{}", room.id)))?,
                     'c' | 'p' => room.name?,
-                    'd' => format!("dm:{}", room.id),
                     _ => return None,
                 };
                 Some(Room {
