@@ -10,8 +10,11 @@ use std::sync::{Arc, Mutex};
 
 use async_channel::Sender;
 
-use super::input::{MUTED, PANEL, TextInput, TextInputEvent};
 use super::markdown::{self, Span};
+use super::{
+    ZoomIn, ZoomOut, ZoomReset,
+    input::{MUTED, PANEL, TextInput, TextInputEvent},
+};
 use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
 
 const BG: u32 = 0x11151c;
@@ -369,6 +372,23 @@ impl ChatRoot {
     fn logout(&mut self, cx: &mut Context<Self>) {
         let _ = self.commands.try_send(ChatCommand::Logout);
         self.user_menu_open = false;
+        cx.notify();
+    }
+
+    /// Browser-style zoom: rem scaling resizes every styled element
+    /// (gpui lays spacing and text out in rems).
+    fn zoom_in(&mut self, _: &ZoomIn, window: &mut Window, cx: &mut Context<Self>) {
+        window.set_rem_size((window.rem_size() * 1.1).min(px(32.0)));
+        cx.notify();
+    }
+
+    fn zoom_out(&mut self, _: &ZoomOut, window: &mut Window, cx: &mut Context<Self>) {
+        window.set_rem_size((window.rem_size() / 1.1).max(px(10.0)));
+        cx.notify();
+    }
+
+    fn zoom_reset(&mut self, _: &ZoomReset, window: &mut Window, cx: &mut Context<Self>) {
+        window.set_rem_size(px(16.0));
         cx.notify();
     }
 
@@ -1222,6 +1242,9 @@ impl gpui::Render for ChatRoot {
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
             .track_focus(&self.focus)
+            .on_action(cx.listener(Self::zoom_in))
+            .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::zoom_reset))
             .child(top_bar)
             .child(error)
             .child(

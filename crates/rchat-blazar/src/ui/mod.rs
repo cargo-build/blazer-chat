@@ -7,7 +7,7 @@ mod markdown;
 mod root;
 
 use gpui::{
-    App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size,
+    App, Application, Bounds, Focusable, WindowBounds, WindowOptions, actions, prelude::*, px, size,
 };
 
 use crate::rc::RcSettings;
@@ -15,6 +15,8 @@ use input::{
     Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
     SelectRight, ShowCharacterPalette,
 };
+
+actions!(zoom, [ZoomIn, ZoomOut, ZoomReset]);
 
 /// Wayland app-id of the surface.
 const APP_ID: &str = "rchat-blazar";
@@ -37,6 +39,11 @@ pub fn run(settings: RcSettings) {
             gpui::KeyBinding::new("home", Home, None),
             gpui::KeyBinding::new("end", End, None),
             gpui::KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, None),
+            // Browser-style zoom: rem scaling, works anywhere in the UI.
+            gpui::KeyBinding::new("ctrl-=", ZoomIn, None),
+            gpui::KeyBinding::new("ctrl-+", ZoomIn, None),
+            gpui::KeyBinding::new("ctrl--", ZoomOut, None),
+            gpui::KeyBinding::new("ctrl-0", ZoomReset, None),
         ]);
 
         // Full-HD request: niri derives the tiled column width from the
