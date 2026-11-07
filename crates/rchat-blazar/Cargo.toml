@@ -16,6 +16,8 @@ serde_json = "1"
 toml = "0.9"
 tako-rs = { version = "2.6", default-features = false, features = ["compio"] }
 unicode-segmentation = "1"
+futures-lite = "2"
+compio-ws = { version = "0.4", features = ["native-tls"] }
 
 [dev-dependencies]
 futures-lite = "2"

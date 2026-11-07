@@ -21,7 +21,7 @@ use tako::router::Router;
 use tako::types::Response;
 use tako::{CompioServer, StatusCode, header};
 
-use crate::rc::{Msg, RcClient, RcError, RcSettings, Room};
+use crate::rc::{DdpLive, LiveCommand, Msg, RcClient, RcError, RcSettings, Room, websocket_url};
 use crate::store::Store;
 
 /// What the UI (or the control socket) asks the application to do.
@@ -35,10 +35,21 @@ pub enum ChatCommand {
 /// What the application reports back; the UI folds these into [`ChatState`].
 pub enum ChatEvent {
     Failed(String),
-    LoggedIn { username: String },
-    Rooms { rooms: Vec<Room> },
-    Messages { room_id: String, messages: Vec<Msg> },
-    Sent { message: Msg },
+    LoggedIn {
+        username: String,
+    },
+    Rooms {
+        rooms: Vec<Room>,
+    },
+    Messages {
+        room_id: String,
+        messages: Vec<Msg>,
+    },
+    Sent {
+        message: Msg,
+    },
+    /// A message delivered by the live WebSocket stream (M2 S2).
+    LiveMessage(Msg),
     Quit,
 }
 
@@ -80,6 +91,17 @@ impl ChatState {
             ChatEvent::Sent { message } => {
                 let room_id = message.room_id.clone();
                 self.messages.entry(room_id).or_default().push(message);
+                None
+            }
+            ChatEvent::LiveMessage(message) => {
+                // The stream may redeliver what REST already folded in:
+                // dedup by the message's server id.
+                let room_id = message.room_id.clone();
+                let entry = self.messages.entry(room_id).or_default();
+                if !entry.iter().any(|known| known.id == message.id) {
+                    entry.push(message);
+                }
+                self.error = None;
                 None
             }
             ChatEvent::Quit => None,
@@ -187,7 +209,11 @@ async fn drive(
         }
     };
 
+    // The live layer follows the session (clone before the client moves it)
+    // and is started from the loop once a session exists.
+    let settings_for_live = settings.clone();
     let mut client = RcClient::new(settings);
+    let mut live: Option<Sender<LiveCommand>> = None;
 
     // Resumable start: stored session and rooms paint the UI instantly; a
     // stale token surfaces as a 401 on the first refresh and gets cleared.
@@ -309,8 +335,67 @@ async fn drive(
 
     while let Ok(command) = commands.recv().await {
         let event = execute(&mut client, store.as_ref(), command).await;
+        match &event {
+            ChatEvent::LoggedIn { .. } if live.is_none() => {
+                if let Some(session) = store.as_ref().and_then(|store| store.load_session()) {
+                    live = Some(spawn_live(
+                        settings_for_live.clone(),
+                        session,
+                        events.clone(),
+                    ));
+                } else {
+                    eprintln!("rchat-blazar: live layer disabled: no stored session");
+                }
+            }
+            ChatEvent::Messages { room_id, .. } => {
+                if let Some(live) = live.as_ref() {
+                    let _ = live.try_send(LiveCommand::Watch(room_id.clone()));
+                }
+            }
+            _ => {}
+        }
         let _ = events.send(event).await;
     }
+}
+
+/// Starts the live WebSocket connection in its own task on the compio
+/// thread; returns the control channel. Failures degrade to a stderr note —
+/// the REST loop keeps working without the live layer.
+fn spawn_live(
+    settings: RcSettings,
+    session: crate::rc::Session,
+    events: Sender<ChatEvent>,
+) -> Sender<LiveCommand> {
+    let (commands, receiver) = async_channel::unbounded();
+    compio::runtime::spawn(async move {
+        let url = websocket_url(&settings);
+        match DdpLive::connect(&url, &session).await {
+            Ok(live) => {
+                // The protocol layer emits raw messages; the application
+                // boundary wraps them into chat events.
+                let (messages, message_rx) = async_channel::unbounded();
+                let forward = compio::runtime::spawn(async move {
+                    while let Ok(message) = message_rx.recv().await {
+                        if events.send(ChatEvent::LiveMessage(message)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                // The messages sender moves into run() and drops when the
+                // connection ends, which unblocks the forward task below.
+                let result = live
+                    .run(messages, receiver, std::time::Duration::from_secs(30))
+                    .await;
+                let _ = forward.await;
+                if let Err(error) = result {
+                    eprintln!("rchat-blazar: live connection ended: {error}");
+                }
+            }
+            Err(error) => eprintln!("rchat-blazar: live layer unavailable: {error}"),
+        }
+    })
+    .detach(); // background task; failures degrade to the stderr notes above
+    commands
 }
 
 /// One command → one event; failures always surface as `Failed`. `store`

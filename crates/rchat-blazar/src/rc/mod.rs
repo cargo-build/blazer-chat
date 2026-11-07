@@ -2,10 +2,12 @@
 //! settings. The rest of the app never sees wire shapes or HTTP details.
 
 mod client;
+pub mod live;
 mod types;
 mod wire;
 
 pub use client::RcClient;
+pub use live::{DdpLive, LiveCommand, websocket_url};
 pub use types::{Msg, RcError, RcSettings, Room, Session};
 
 #[cfg(test)]

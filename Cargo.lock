@@ -4881,6 +4881,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
  "compio",
+ "compio-ws",
  "futures-lite 2.6.1",
  "gpui",
  "redb",
