@@ -88,6 +88,8 @@ pub struct Room {
     pub unread: u32,
     /// Last-message timestamp; the list sorts by it, newest first.
     pub lm: Option<String>,
+    /// The newest message's sender and text for the sidebar preview.
+    pub preview: Option<(String, String)>,
 }
 
 /// One chat message, oldest position last.

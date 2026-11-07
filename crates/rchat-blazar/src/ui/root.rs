@@ -353,6 +353,7 @@ impl gpui::Render for ChatRoot {
                         .id(SharedString::from(room.id.clone()))
                         .px_2()
                         .py_1()
+                        .h(px(48.0))
                         .rounded_sm()
                         .text_sm()
                         .overflow_hidden()
@@ -362,11 +363,46 @@ impl gpui::Render for ChatRoot {
                         .on_click(move |_, _, cx| {
                             this.update(cx, |chat, cx| chat.open_room(room_id.clone(), cx));
                         })
-                        .child(SharedString::from(room.name.clone()))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_1()
+                                        .items_baseline()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .child(SharedString::from(room.name.clone())),
+                                        )
+                                        .children(room.lm.as_ref().map(|ts| {
+                                            div()
+                                                .flex_none()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .child(SharedString::from(pretty_time(ts)))
+                                        })),
+                                )
+                                .children(room.preview.as_ref().map(|(sender, text)| {
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(SharedString::from(format!("{sender}: {text}")))
+                                })),
+                        )
                         // Unread badge: count from the subscriptions stream.
                         .when(unread > 0, |row| {
                             row.child(
-                                div().flex_1().flex().justify_end().child(
+                                div().flex_none().items_start().child(
                                     div()
                                         .px_1()
                                         .rounded_xs()
@@ -400,21 +436,29 @@ impl gpui::Render for ChatRoot {
                     self.editing.as_ref(),
                     Some((room, msg)) if *room == room_id && *msg == msg_id
                 );
-                let badges = div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(view.reactions.iter().map(|(name, count)| {
-                        div()
-                            .px_1p5()
-                            .rounded_full()
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .bg(rgb(PANEL))
-                            .text_xs()
-                            .text_color(rgb(TEXT))
+                let emoji = &self.state.emoji;
+                let badges =
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(view.reactions.iter().map(|(name, count)| {
+                            let pill = div()
+                                .px_1p5()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .bg(rgb(PANEL))
+                                .text_xs()
+                                .text_color(rgb(TEXT));
+                            match emoji.get(name) {
+                                Some(path) => pill.flex().gap_1().items_center().child(
+                                    img(std::path::PathBuf::from(path)).h(px(14.0)).w(px(14.0)),
+                                ),
+                                None => pill,
+                            }
                             .child(SharedString::from(format!("{name} ×{count}")))
-                    }));
+                        }));
                 div()
                     .id(SharedString::from(format!("msg-{msg_id}")))
                     .group("msg")
@@ -620,6 +664,13 @@ impl gpui::Render for ChatRoot {
                         }),
                 )
         };
+        let pane_title = self
+            .state
+            .rooms
+            .iter()
+            .find(|room| Some(room.id.as_str()) == self.state.active_room.as_deref())
+            .map(|room| room.name.clone())
+            .unwrap_or_else(|| "messages".to_owned());
         let pane = if let Some((room_id, tmid)) = self.state.open_thread.clone() {
             // Thread view: back button, then the thread's messages.
             let this = search_this.clone();
@@ -764,7 +815,7 @@ impl gpui::Render for ChatRoot {
                     .gap_3()
                     .child(panel("rooms", rooms, Some(px(240.0))))
                     .child(panel(
-                        "messages",
+                        &pane_title,
                         div().flex().flex_col().min_h_0().child(toasts).child(pane),
                         None,
                     )),

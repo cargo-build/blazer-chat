@@ -230,6 +230,17 @@ impl<T: Transport> RcClient<T> {
                     kind,
                     unread: 0,
                     lm: room.lm,
+                    preview: room.last_message.and_then(|last| {
+                        // Markdown markers are noise in a one-line
+                        // preview; the symbols carry no formatting here.
+                        let text: String = last
+                            .msg?
+                            .chars()
+                            .filter(|c| !matches!(c, '*' | '_' | '`' | '~'))
+                            .collect();
+                        let sender = last.u.and_then(|user| user.username).unwrap_or_default();
+                        Some((sender, text))
+                    }),
                 })
             })
             .collect();

@@ -440,7 +440,21 @@ impl UiSnapshot {
                 (None, _) => "not logged in".to_owned(),
             },
             username: state.username.clone(),
-            rooms: state.rooms.iter().map(|room| room.name.clone()).collect(),
+            rooms: state
+                .rooms
+                .iter()
+                .map(|room| match &room.preview {
+                    Some((sender, text)) => {
+                        let mut snippet = text.replace('\n', " ");
+                        if snippet.chars().count() > 80 {
+                            snippet = snippet.chars().take(80).collect();
+                            snippet.push('…');
+                        }
+                        format!("{} — {}: {}", room.name, sender, snippet)
+                    }
+                    None => room.name.clone(),
+                })
+                .collect(),
             badges: state
                 .rooms
                 .iter()
@@ -823,6 +837,7 @@ mod tests {
             kind: 'c',
             unread: 0,
             lm: None,
+            preview: None,
         }
     }
 

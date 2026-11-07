@@ -44,6 +44,19 @@ pub struct WireRoom {
     /// oldest).
     #[serde(default)]
     pub lm: Option<String>,
+    /// The room's newest message — the sidebar preview.
+    #[serde(default)]
+    #[serde(rename = "lastMessage")]
+    pub last_message: Option<WireLastMessage>,
+}
+
+/// The sidebar preview source (wire `lastMessage`).
+#[derive(Deserialize)]
+pub struct WireLastMessage {
+    #[serde(default)]
+    pub msg: Option<String>,
+    #[serde(default)]
+    pub u: Option<WireUser>,
 }
 
 #[derive(Deserialize)]
