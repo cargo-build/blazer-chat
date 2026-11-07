@@ -21,10 +21,32 @@ use crate::tasks::{spawn_emoji, spawn_live};
 
 /// What the UI (or the control socket) asks the application to do.
 pub enum ChatCommand {
-    Login { user: String, password: String },
+    Login {
+        user: String,
+        password: String,
+    },
     RefreshRooms,
-    OpenRoom { room_id: String },
-    Send { room_id: String, text: String },
+    OpenRoom {
+        room_id: String,
+    },
+    Send {
+        room_id: String,
+        text: String,
+    },
+    EditMessage {
+        room_id: String,
+        msg_id: String,
+        text: String,
+    },
+    DeleteMessage {
+        room_id: String,
+        msg_id: String,
+    },
+    React {
+        room_id: String,
+        msg_id: String,
+        emoji: String,
+    },
 }
 
 /// What the application reports back; the UI folds these into [`ChatState`].
@@ -45,6 +67,22 @@ pub enum ChatEvent {
     },
     /// A message delivered by the live WebSocket stream (M2 S2).
     LiveMessage(Msg),
+    /// The server accepted an edit and answered with the fresh message.
+    MessageUpdated {
+        message: Msg,
+    },
+    /// The server accepted the deletion.
+    MessageDeleted {
+        room_id: String,
+        msg_id: String,
+    },
+    /// The server accepted the reaction toggle; the fold applies it
+    /// locally until the live stream redelivers the message.
+    ReactionToggled {
+        room_id: String,
+        msg_id: String,
+        emoji: String,
+    },
     /// The custom-emoji cache: (name, image path) pairs.
     Emoji {
         emojis: Vec<(String, String)>,
@@ -95,14 +133,51 @@ impl ChatState {
                 None
             }
             ChatEvent::LiveMessage(message) => {
-                // The stream may redeliver what REST already folded in:
-                // dedup by the message's server id.
+                // The stream redelivers what REST already folded in and
+                // re-sends edited messages under the same id: replace by
+                // the server id, newest delivery wins.
                 let room_id = message.room_id.clone();
                 let entry = self.messages.entry(room_id).or_default();
-                if !entry.iter().any(|known| known.id == message.id) {
-                    entry.push(message);
+                match entry.iter_mut().find(|known| known.id == message.id) {
+                    Some(known) => *known = message,
+                    None => entry.push(message),
                 }
                 self.error = None;
+                None
+            }
+            ChatEvent::MessageUpdated { message } => {
+                let room_id = message.room_id.clone();
+                if let Some(room) = self.messages.get_mut(&room_id)
+                    && let Some(known) = room.iter_mut().find(|known| known.id == message.id)
+                {
+                    *known = message;
+                }
+                None
+            }
+            ChatEvent::MessageDeleted { room_id, msg_id } => {
+                if let Some(room) = self.messages.get_mut(&room_id) {
+                    room.retain(|known| known.id != msg_id);
+                }
+                None
+            }
+            ChatEvent::ReactionToggled {
+                room_id,
+                msg_id,
+                emoji,
+            } => {
+                // Local toggle until the authoritative live redelivery.
+                if let Some(room) = self.messages.get_mut(&room_id)
+                    && let Some(message) = room.iter_mut().find(|known| known.id == msg_id)
+                {
+                    let count = message.reactions.entry(emoji.clone()).or_default();
+                    match *count {
+                        0 => *count = 1,
+                        1 => {
+                            message.reactions.remove(&emoji);
+                        }
+                        past => *count = past - 1,
+                    }
+                }
                 None
             }
             ChatEvent::Emoji { emojis } => {
@@ -148,7 +223,19 @@ impl UiSnapshot {
             messages: state
                 .active_messages()
                 .iter()
-                .map(|message| format!("{}: {}", message.sender, message.text))
+                .map(|message| match message.reactions.is_empty() {
+                    true => format!("{}: {}", message.sender, message.text),
+                    false => format!(
+                        "{}: {} {}",
+                        message.sender,
+                        message.text,
+                        message
+                            .reactions
+                            .iter()
+                            .map(|(name, count)| format!("[{name} ×{count}]"))
+                            .collect::<String>(),
+                    ),
+                })
                 .collect(),
             error: state.error.clone(),
         }
@@ -324,6 +411,32 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             Ok(message) => ChatEvent::Sent { message },
             Err(error) => ChatEvent::Failed(error.to_string()),
         },
+        ChatCommand::EditMessage {
+            room_id,
+            msg_id,
+            text,
+        } => match client.update_message(&room_id, &msg_id, &text).await {
+            Ok(message) => ChatEvent::MessageUpdated { message },
+            Err(error) => ChatEvent::Failed(error.to_string()),
+        },
+        ChatCommand::DeleteMessage { room_id, msg_id } => {
+            match client.delete_message(&room_id, &msg_id).await {
+                Ok(()) => ChatEvent::MessageDeleted { room_id, msg_id },
+                Err(error) => ChatEvent::Failed(error.to_string()),
+            }
+        }
+        ChatCommand::React {
+            room_id,
+            msg_id,
+            emoji,
+        } => match client.react(&msg_id, &emoji).await {
+            Ok(()) => ChatEvent::ReactionToggled {
+                room_id,
+                msg_id,
+                emoji,
+            },
+            Err(error) => ChatEvent::Failed(error.to_string()),
+        },
     }
 }
 
@@ -347,6 +460,7 @@ mod tests {
             sender: sender.to_owned(),
             text: text.to_owned(),
             ts: String::new(),
+            reactions: Default::default(),
         }
     }
 
@@ -379,6 +493,77 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[1].text, "second");
         assert_eq!(messages[2].text, "third");
+    }
+
+    #[test]
+    fn edits_replace_and_deletes_remove_by_server_id() {
+        let mut state = ChatState::default();
+        state.apply(ChatEvent::Messages {
+            room_id: "GENERAL".to_owned(),
+            messages: vec![
+                message("m1", "tester", "first"),
+                message("m2", "tester", "old"),
+            ],
+        });
+
+        let mut edited = message("m2", "tester", "new text");
+        edited.reactions.insert("tada".to_owned(), 2);
+        state.apply(ChatEvent::MessageUpdated {
+            message: edited.clone(),
+        });
+        let messages = state.active_messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].text, "new text");
+        assert_eq!(messages[1].reactions.get("tada"), Some(&2));
+
+        state.apply(ChatEvent::MessageDeleted {
+            room_id: "GENERAL".to_owned(),
+            msg_id: "m1".to_owned(),
+        });
+        let messages = state.active_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "m2");
+    }
+
+    #[test]
+    fn reaction_toggle_adds_then_removes_locally() {
+        let mut state = ChatState::default();
+        state.apply(ChatEvent::Messages {
+            room_id: "GENERAL".to_owned(),
+            messages: vec![message("m1", "tester", "hello")],
+        });
+
+        state.apply(ChatEvent::ReactionToggled {
+            room_id: "GENERAL".to_owned(),
+            msg_id: "m1".to_owned(),
+            emoji: "thumbsup".to_owned(),
+        });
+        state.apply(ChatEvent::ReactionToggled {
+            room_id: "GENERAL".to_owned(),
+            msg_id: "m1".to_owned(),
+            emoji: "thumbsup".to_owned(),
+        });
+        let messages = state.active_messages();
+        assert!(messages[0].reactions.is_empty());
+    }
+
+    #[test]
+    fn snapshot_lines_carry_reaction_badges() {
+        let mut state = ChatState::default();
+        state.apply(ChatEvent::Messages {
+            room_id: "GENERAL".to_owned(),
+            messages: vec![message("m1", "tester", "hello")],
+        });
+        state.apply(ChatEvent::ReactionToggled {
+            room_id: "GENERAL".to_owned(),
+            msg_id: "m1".to_owned(),
+            emoji: "tada".to_owned(),
+        });
+        let snapshot = UiSnapshot::from_state(&state);
+        assert_eq!(
+            snapshot.messages,
+            vec!["tester: hello [tada ×1]".to_owned()]
+        );
     }
 
     #[test]

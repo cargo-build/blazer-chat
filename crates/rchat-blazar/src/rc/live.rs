@@ -303,6 +303,22 @@ pub fn websocket_url(settings: &crate::rc::RcSettings) -> String {
 /// `fields.args[0]` is an IMessage.
 fn message_from_event(event: &Value) -> Option<Msg> {
     let message = event.get("fields")?.get("args")?.as_array()?.first()?;
+    let reactions = message
+        .get("reactions")
+        .and_then(Value::as_object)
+        .map(|reactions| {
+            reactions
+                .iter()
+                .filter_map(|(name, reaction)| {
+                    let count = reaction
+                        .get("usernames")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len) as u32;
+                    (count > 0).then(|| (name.trim_matches(':').to_owned(), count))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Some(Msg {
         id: message.get("_id")?.as_str()?.to_owned(),
         room_id: message.get("rid")?.as_str()?.to_owned(),
@@ -322,6 +338,7 @@ fn message_from_event(event: &Value) -> Option<Msg> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
+        reactions,
     })
 }
 

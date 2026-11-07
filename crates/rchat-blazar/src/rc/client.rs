@@ -26,6 +26,7 @@ use crate::http::{HttpTransport, Request, Transport};
 use crate::rc::types::{CustomEmoji, Msg, RcError, RcSettings, Room, Session};
 use crate::rc::wire::{
     EmojiListResponse, HistoryResponse, LoginResponse, RoomsGetResponse, SendMessageResponse,
+    SuccessResponse, UpdateMessageResponse, WireMessage,
 };
 
 /// The typed client: one session, typed results out.
@@ -228,13 +229,7 @@ impl<T: Transport> RcClient<T> {
         Ok(parsed
             .messages
             .into_iter()
-            .map(|message| Msg {
-                id: message.id,
-                room_id: message.rid,
-                sender: message.u.and_then(|user| user.username).unwrap_or_default(),
-                text: message.msg.unwrap_or_default(),
-                ts: message.ts.unwrap_or_default(),
-            })
+            .map(Self::message_into_msg)
             .rev()
             .collect())
     }
@@ -245,16 +240,68 @@ impl<T: Transport> RcClient<T> {
             .call("POST", "/api/v1/chat.sendMessage", Some(body), true)
             .await?;
         let parsed: SendMessageResponse = Self::parse(&body, "chat.sendMessage")?;
-        Ok(Msg {
-            id: parsed.message.id,
-            room_id: parsed.message.rid,
-            sender: parsed
-                .message
-                .u
-                .and_then(|user| user.username)
-                .unwrap_or_default(),
-            text: parsed.message.msg.unwrap_or_default(),
-            ts: parsed.message.ts.unwrap_or_default(),
-        })
+        Ok(Self::message_into_msg(parsed.message))
+    }
+
+    /// Edits a message authored by the session's own user (`chat.update`).
+    pub async fn update_message(
+        &self,
+        room_id: &str,
+        msg_id: &str,
+        text: &str,
+    ) -> Result<Msg, RcError> {
+        let body =
+            serde_json::json!({ "roomId": room_id, "msgId": msg_id, "text": text }).to_string();
+        let body = self
+            .call("POST", "/api/v1/chat.update", Some(body), true)
+            .await?;
+        let parsed: UpdateMessageResponse = Self::parse(&body, "chat.update")?;
+        Ok(Self::message_into_msg(parsed.message))
+    }
+
+    /// Deletes a message (`chat.delete`); servers may refuse by policy
+    /// (`error-action-not-allowed`) even for the author's own messages.
+    pub async fn delete_message(&self, room_id: &str, msg_id: &str) -> Result<(), RcError> {
+        let body = serde_json::json!({ "roomId": room_id, "msgId": msg_id }).to_string();
+        self.call("POST", "/api/v1/chat.delete", Some(body), true)
+            .await?;
+        Ok(())
+    }
+
+    /// Toggles a reaction (`chat.react`): the emoji name without colons —
+    /// a repeat call removes it. Unicode emoji pass through as-is.
+    pub async fn react(&self, msg_id: &str, emoji: &str) -> Result<(), RcError> {
+        let body = serde_json::json!({ "messageId": msg_id, "emoji": emoji }).to_string();
+        let body = self
+            .call("POST", "/api/v1/chat.react", Some(body), true)
+            .await?;
+        match Self::parse::<SuccessResponse>(&body, "chat.react")?.success {
+            true => Ok(()),
+            false => Err(RcError::Refused(
+                "chat.react answered success=false".to_owned(),
+            )),
+        }
+    }
+
+    /// One wire message → the application message; the single owner of
+    /// the mapping.
+    fn message_into_msg(message: WireMessage) -> Msg {
+        let reactions = message
+            .reactions
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(name, reaction)| {
+                let count = reaction.usernames.map_or(0, |users| users.len() as u32);
+                (count > 0).then(|| (name.trim_matches(':').to_owned(), count))
+            })
+            .collect();
+        Msg {
+            id: message.id,
+            room_id: message.rid,
+            sender: message.u.and_then(|user| user.username).unwrap_or_default(),
+            text: message.msg.unwrap_or_default(),
+            ts: message.ts.unwrap_or_default(),
+            reactions,
+        }
     }
 }

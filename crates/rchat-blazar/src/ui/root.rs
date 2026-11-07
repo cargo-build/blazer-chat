@@ -28,14 +28,21 @@ pub(crate) struct ChatRoot {
     focus: FocusHandle,
     /// Render views of the active room's messages, rebuilt on events.
     views: Vec<MessageView>,
+    /// `(room_id, msg_id)` while the composer edits an existing message.
+    editing: Option<(String, String)>,
 }
 
 /// One precomputed message row of the active room: the pane renders
 /// these without re-parsing markdown per frame.
 struct MessageView {
+    id: String,
+    room_id: String,
     ts: String,
     sender: String,
+    /// Raw text — the edit action puts it back into the composer.
+    text: String,
     lines: Vec<Vec<Span>>,
+    reactions: Vec<(String, u32)>,
 }
 
 impl ChatRoot {
@@ -71,6 +78,7 @@ impl ChatRoot {
             composer: cx.new(|cx| TextInput::new("Message…", cx)),
             focus: cx.focus_handle(),
             views: Vec::new(),
+            editing: None,
         }
     }
 
@@ -95,12 +103,20 @@ impl ChatRoot {
             .active_messages()
             .iter()
             .map(|message| MessageView {
+                id: message.id.clone(),
+                room_id: message.room_id.clone(),
                 ts: message.ts.split('T').nth(1).unwrap_or_default().to_owned(),
                 sender: message.sender.clone(),
+                text: message.text.clone(),
                 lines: message
                     .text
                     .lines()
                     .map(|line| markdown::parse(line, &|name| emoji.get(name).cloned()))
+                    .collect(),
+                reactions: message
+                    .reactions
+                    .iter()
+                    .map(|(name, count)| (name.clone(), *count))
                     .collect(),
             })
             .collect();
@@ -133,7 +149,56 @@ impl ChatRoot {
         }
         self.composer
             .update(cx, |composer, cx| composer.set_content("", cx));
-        let _ = self.commands.try_send(ChatCommand::Send { room_id, text });
+        match self.editing.take() {
+            Some((_, msg_id)) => {
+                let _ = self.commands.try_send(ChatCommand::EditMessage {
+                    room_id,
+                    msg_id,
+                    text,
+                });
+            }
+            None => {
+                let _ = self.commands.try_send(ChatCommand::Send { room_id, text });
+            }
+        }
+        cx.notify();
+    }
+}
+
+impl ChatRoot {
+    /// Toggles a 👍 reaction on one message (chat.react toggles on
+    /// repeat).
+    fn toggle_reaction(&mut self, room_id: &str, msg_id: &str, cx: &mut Context<Self>) {
+        let _ = self.commands.try_send(ChatCommand::React {
+            room_id: room_id.to_owned(),
+            msg_id: msg_id.to_owned(),
+            emoji: "👍".to_owned(),
+        });
+        cx.notify();
+    }
+
+    /// Puts a message back into the composer for editing; the next
+    /// submit sends `chat.update` instead of a new message.
+    fn begin_edit(
+        &mut self,
+        room_id: String,
+        msg_id: String,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editing = Some((room_id, msg_id));
+        self.composer
+            .update(cx, |composer, cx| composer.set_content(&text, cx));
+        window.focus(&self.composer.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    fn delete_message(&mut self, room_id: &str, msg_id: &str, cx: &mut Context<Self>) {
+        let _ = self.commands.try_send(ChatCommand::DeleteMessage {
+            room_id: room_id.to_owned(),
+            msg_id: msg_id.to_owned(),
+        });
         cx.notify();
     }
 }
@@ -210,16 +275,40 @@ impl gpui::Render for ChatRoot {
                 .collect::<Vec<_>>()
         });
 
-        let messages = div()
-            .id("messages")
-            .flex()
-            .flex_col()
-            .gap_1()
-            .overflow_y_scroll()
-            .children(self.views.iter().map(|view| {
+        // Actions live in a strip revealed on row hover; each row is a
+        // named group so the strip can react to it.
+        let this = cx.entity();
+        let rows = self
+            .views
+            .iter()
+            .map(|view| {
+                let this = this.clone();
+                let room_id = view.room_id.clone();
+                let msg_id = view.id.clone();
+                let edit_text = view.text.clone();
+                let editing_this = matches!(
+                    self.editing.as_ref(),
+                    Some((room, msg)) if *room == room_id && *msg == msg_id
+                );
+                let badges = div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .children(view.reactions.iter().map(|(name, count)| {
+                        div()
+                            .px_1()
+                            .rounded_xs()
+                            .bg(rgb(PANEL))
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(SharedString::from(format!("{name} ×{count}")))
+                    }));
                 div()
+                    .id(SharedString::from(format!("msg-{msg_id}")))
+                    .group("msg")
                     .flex()
                     .gap_2()
+                    .items_start()
                     .child(
                         div()
                             .flex_none()
@@ -234,8 +323,32 @@ impl gpui::Render for ChatRoot {
                             .text_color(rgb(MUTED))
                             .child(SharedString::from(view.sender.clone())),
                     )
-                    .child(message_element(view))
-            }));
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(message_element(view))
+                            .child(badges),
+                    )
+                    .child(action_strip(ActionContext {
+                        this,
+                        room_id,
+                        msg_id,
+                        edit_text,
+                        editing_this,
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let messages = div()
+            .id("messages")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .overflow_y_scroll()
+            .children(rows);
 
         div()
             .flex()
@@ -291,7 +404,10 @@ impl gpui::Render for ChatRoot {
                             .on_click(
                                 cx.listener(|chat, _, window, cx| chat.send_message(window, cx)),
                             )
-                            .child("Send"),
+                            .child(match self.editing.is_some() {
+                                true => "save",
+                                false => "send",
+                            }),
                     ),
             )
     }
@@ -358,4 +474,93 @@ fn span_element(span: Span) -> gpui::Div {
             div().child(img(std::path::PathBuf::from(&path)).h(px(18.0)).w(px(18.0)))
         }
     }
+}
+
+/// What a message row's action buttons need at click time.
+struct ActionContext {
+    this: Entity<ChatRoot>,
+    room_id: String,
+    msg_id: String,
+    edit_text: String,
+    editing_this: bool,
+}
+
+/// The hover-revealed per-message actions: react, edit, delete. The strip
+/// is invisible until its row (`group("msg")`) is hovered; the row being
+/// edited also shows a cancel button.
+fn action_strip(actions: ActionContext) -> gpui::Div {
+    let ActionContext {
+        this,
+        room_id,
+        msg_id,
+        edit_text,
+        editing_this,
+    } = actions;
+
+    let button = |label: &'static str, suffix: &'static str| {
+        div()
+            .id(SharedString::from(format!("{suffix}-{msg_id}")))
+            .px_1()
+            .rounded_xs()
+            .text_xs()
+            .text_color(rgb(MUTED))
+            .cursor_pointer()
+            .child(label)
+    };
+
+    let react = button("👍", "react").on_click({
+        let this = this.clone();
+        let room_id = room_id.clone();
+        let msg_id = msg_id.clone();
+        move |_, _, cx| {
+            this.update(cx, |chat, cx| chat.toggle_reaction(&room_id, &msg_id, cx));
+        }
+    });
+    let edit = button("✏", "edit").on_click({
+        let this = this.clone();
+        let room_id = room_id.clone();
+        let msg_id = msg_id.clone();
+        let edit_text = edit_text.clone();
+        move |_, window, cx| {
+            this.update(cx, |chat, cx| {
+                chat.begin_edit(
+                    room_id.clone(),
+                    msg_id.clone(),
+                    edit_text.clone(),
+                    window,
+                    cx,
+                );
+            });
+        }
+    });
+    let delete = button("🗑", "delete").on_click({
+        let this = this.clone();
+        let room_id = room_id.clone();
+        let msg_id = msg_id.clone();
+        move |_, _, cx| {
+            this.update(cx, |chat, cx| chat.delete_message(&room_id, &msg_id, cx));
+        }
+    });
+
+    div()
+        .flex_none()
+        .flex()
+        .gap_1()
+        .opacity(0.)
+        .group_hover("msg", |style| style.opacity(1.))
+        .when(editing_this, |strip| strip.opacity(1.))
+        .child(react)
+        .child(edit)
+        .child(delete)
+        .when(editing_this, |strip| {
+            strip.child(button("✖", "cancel").on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |chat, cx| {
+                        chat.editing = None;
+                        cx.notify();
+                    });
+                }
+            }))
+        })
 }

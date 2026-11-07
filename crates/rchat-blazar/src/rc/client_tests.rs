@@ -84,6 +84,10 @@ const HISTORY_BODY: &str = r#"{"messages":[
     {"_id":"m1","rid":"GENERAL","msg":"first","ts":"2026-11-07T15:00:01Z","u":{"username":"tester"}}
 ],"success":true,"unreadNotLoaded":0}"#;
 const SEND_BODY: &str = r#"{"message":{"_id":"m3","rid":"GENERAL","msg":"hello","ts":"2026-11-07T15:00:03Z","u":{"username":"tester"},"channels":[]},"success":true}"#;
+const UPDATE_BODY: &str = r#"{"message":{"_id":"m3","rid":"GENERAL","msg":"edited","ts":"2026-11-07T15:00:03Z","u":{"username":"tester"}},"success":true}"#;
+const REACT_BODY: &str = r#"{"success":true}"#;
+const NOT_ALLOWED_BODY: &str =
+    r#"{"success":false,"error":"Not allowed [error-action-not-allowed]"}"#;
 const UNAUTHORIZED_BODY: &str =
     r#"{"status":"error","error":"Unauthorized","message":"Unauthorized"}"#;
 
@@ -99,6 +103,9 @@ fn authenticated_routes() -> Vec<(&'static str, u16, &'static str)> {
         ("groups.history", 200, HISTORY_BODY),
         ("im.history", 200, HISTORY_BODY),
         ("chat.sendMessage", 200, SEND_BODY),
+        ("chat.update", 200, UPDATE_BODY),
+        ("chat.react", 200, REACT_BODY),
+        ("chat.delete", 400, NOT_ALLOWED_BODY),
     ]
 }
 
@@ -168,6 +175,42 @@ fn send_speaks_the_msg_field() {
     assert!(request.contains("POST /api/v1/chat.sendMessage"));
     assert!(request.contains(r#""rid":"GENERAL""#));
     assert!(request.contains(r#""msg":"hello""#));
+}
+
+#[test]
+fn update_edits_and_react_toggles_with_the_documented_bodies() {
+    let transport = FakeTransport::answering(&authenticated_routes());
+    let mut rc = client(transport.clone());
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+
+    let edited =
+        futures_lite::future::block_on(rc.update_message("GENERAL", "m3", "edited")).unwrap();
+    assert_eq!(edited.text, "edited");
+    assert_eq!(edited.id, "m3");
+    let request = transport.last_request();
+    assert!(request.contains("POST /api/v1/chat.update"));
+    assert!(request.contains(r#""roomId":"GENERAL""#));
+    assert!(request.contains(r#""msgId":"m3""#));
+    assert!(request.contains(r#""text":"edited""#));
+
+    futures_lite::future::block_on(rc.react("m3", "tada")).unwrap();
+    let request = transport.last_request();
+    // The reaction endpoint takes messageId (not msgId) and the bare
+    // emoji name — live-verified against RC 8.5.
+    assert!(request.contains(r#""messageId":"m3""#));
+    assert!(request.contains(r#""emoji":"tada""#));
+}
+
+#[test]
+fn delete_surfaces_the_server_refusal_as_an_http_error() {
+    // The school server denies deletions account-wide
+    // (error-action-not-allowed) even for the author's own messages.
+    let transport = FakeTransport::answering(&authenticated_routes());
+    let mut rc = client(transport.clone());
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+
+    let error = futures_lite::future::block_on(rc.delete_message("GENERAL", "m3")).unwrap_err();
+    assert!(matches!(error, RcError::Http { status: 400, .. }));
 }
 
 #[test]

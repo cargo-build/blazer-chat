@@ -52,6 +52,15 @@ pub struct SendMessageResponse {
     pub message: WireMessage,
 }
 
+/// `chat.update` answers with the refreshed message.
+pub type UpdateMessageResponse = SendMessageResponse;
+
+/// `chat.react` answers with only the success flag.
+#[derive(Deserialize)]
+pub struct SuccessResponse {
+    pub success: bool,
+}
+
 #[derive(Deserialize)]
 pub struct WireMessage {
     #[serde(rename = "_id")]
@@ -60,6 +69,15 @@ pub struct WireMessage {
     pub msg: Option<String>,
     pub ts: Option<String>,
     pub u: Option<WireUser>,
+    /// Reaction name (server sends it colon-wrapped) → participant list.
+    #[serde(default)]
+    pub reactions: Option<std::collections::BTreeMap<String, WireReaction>>,
+}
+
+#[derive(Deserialize)]
+pub struct WireReaction {
+    #[serde(default)]
+    pub usernames: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

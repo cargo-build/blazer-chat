@@ -95,6 +95,9 @@ pub struct Msg {
     pub sender: String,
     pub text: String,
     pub ts: String,
+    /// Reaction name (colons stripped) → user count; the live stream is
+    /// the authority and replaces this map on every redelivery.
+    pub reactions: std::collections::BTreeMap<String, u32>,
 }
 
 /// A server-defined custom emoji from `emoji-custom.list`.
@@ -115,8 +118,13 @@ pub struct CustomEmoji {
 pub enum RcError {
     Config(String),
     Io(std::io::Error),
-    Http { status: u16, body: String },
+    Http {
+        status: u16,
+        body: String,
+    },
     Parse(String),
+    /// The server answered 2xx but reported failure in the payload.
+    Refused(String),
     NoSession,
 }
 
@@ -127,6 +135,7 @@ impl fmt::Display for RcError {
             Self::Io(error) => write!(f, "connection: {error}"),
             Self::Http { status, body } => write!(f, "server {status}: {body}"),
             Self::Parse(message) => write!(f, "protocol: {message}"),
+            Self::Refused(reason) => write!(f, "refused: {reason}"),
             Self::NoSession => write!(f, "not logged in"),
         }
     }

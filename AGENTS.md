@@ -16,10 +16,17 @@ product surface targets XWayland.
 (> ~1–2 GiB) run in a task-owned transient systemd user unit and coordinate
 through the shared laptop queue.
 
-**Rust skills:** before writing or refactoring any Rust code, read the
-Rust authoring skills first — `~/.agents/skills/rust-best-practices/SKILL.md`
-(BeautifulRust) — and keep this repository's stack, lint and behavior
-contracts over generic style advice.
+**Rust skills are mandatory — read before the first edit, never after:
+`~/.agents/skills/rust-best-practices/SKILL.md` (BeautifulRust) and
+`~/.agents/skills/rust-operator-style/SKILL.md` (personal policy) always;
+the stack layer skill for the touched code (`gpui-apps` UI, `tako-apps`
+transport, the compio runtime reference, `toml-config` for configuration,
+`m04-zero-cost` for type/dispatch choices, `clippy-advanced` for lint
+profile work); `rust-api-design` when shaping the rc surface,
+`rust-code-quality-guide` for conversions and error boundaries,
+`rust-port` when porting protocol logic; `rust-review` /
+`rust-code-review` before reviewing a diff or module. This repository's
+stack, lint and behavior contracts override generic style advice.**
 
 **Required Rust skills — `~/.agents/skills/<name>/SKILL.md`, use by path:**
 
