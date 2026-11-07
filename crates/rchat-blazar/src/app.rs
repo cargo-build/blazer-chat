@@ -192,6 +192,13 @@ pub struct ChatState {
     pub avatars: std::collections::HashMap<String, String>,
     /// Rooms whose older history ran out (paging stops asking).
     pub older_exhausted: std::collections::HashSet<String>,
+    /// Bumped whenever cached messages change; the UI skips rebuilds
+    /// otherwise.
+    pub messages_version: u64,
+    /// Bumped when the avatar cache fills.
+    pub avatars_version: u64,
+    /// Bumped when custom emoji arrive.
+    pub emoji_version: u64,
 }
 
 /// One local-search hit.
@@ -227,6 +234,7 @@ impl ChatState {
                 None
             }
             ChatEvent::Messages { room_id, messages } => {
+                self.messages_version += 1;
                 self.messages.insert(room_id.clone(), messages);
                 // The room is on screen now; the server-side read receipt
                 // went out with the history call.
@@ -254,9 +262,11 @@ impl ChatState {
             }
             ChatEvent::Avatars { avatars } => {
                 self.avatars.extend(avatars.iter().cloned());
+                self.avatars_version += 1;
                 None
             }
             ChatEvent::Sent { message } => {
+                self.messages_version += 1;
                 self.bump_room_activity(&message.room_id, message.ts.clone());
                 match message.tmid.clone() {
                     // Thread replies surface in their thread view only.
@@ -271,6 +281,7 @@ impl ChatState {
                 None
             }
             ChatEvent::LiveMessage(message) => {
+                self.messages_version += 1;
                 self.bump_room_activity(&message.room_id, message.ts.clone());
                 // The stream redelivers what REST already folded in and
                 // re-sends edited messages under the same id: replace by
@@ -285,6 +296,7 @@ impl ChatState {
                 None
             }
             ChatEvent::MessageUpdated { message } => {
+                self.messages_version += 1;
                 let room_id = message.room_id.clone();
                 if let Some(room) = self.messages.get_mut(&room_id)
                     && let Some(known) = room.iter_mut().find(|known| known.id == message.id)
@@ -294,6 +306,7 @@ impl ChatState {
                 None
             }
             ChatEvent::MessageDeleted { room_id, msg_id } => {
+                self.messages_version += 1;
                 if let Some(room) = self.messages.get_mut(&room_id) {
                     room.retain(|known| known.id != msg_id);
                 }
@@ -304,6 +317,7 @@ impl ChatState {
                 msg_id,
                 emoji,
             } => {
+                self.messages_version += 1;
                 // Local toggle until the authoritative live redelivery;
                 // exact because the username is known here.
                 if let Some(me) = self.username.clone()
@@ -358,9 +372,11 @@ impl ChatState {
             }
             ChatEvent::Emoji { emojis } => {
                 self.emoji = emojis.iter().cloned().collect();
+                self.emoji_version += 1;
                 None
             }
             ChatEvent::CachedMessages { room_id, messages } => {
+                self.messages_version += 1;
                 self.messages.insert(room_id.clone(), messages);
                 if let Some(room) = self.rooms.iter_mut().find(|room| room.id == room_id) {
                     room.unread = 0;
@@ -371,6 +387,7 @@ impl ChatState {
                 Some(ChatCommand::RefreshRoom { room_id })
             }
             ChatEvent::OlderMessages { room_id, messages } => {
+                self.messages_version += 1;
                 if messages.is_empty() {
                     self.older_exhausted.insert(room_id);
                 } else {

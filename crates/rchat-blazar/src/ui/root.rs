@@ -40,6 +40,16 @@ pub(crate) struct ChatRoot {
     pick_tx: async_channel::Sender<Option<std::path::PathBuf>>,
     /// An older-slice fetch is in flight (one at a time per pane).
     loading_older: bool,
+    /// Parsed markdown per (message id, text): rebuilds reuse it instead
+    /// of re-parsing every message on every event.
+    parsed: std::collections::HashMap<(String, String), std::sync::Arc<Vec<Vec<markdown::Span>>>>,
+    /// The state versions the views were built from (skip no-op
+    /// rebuilds).
+    views_version: u64,
+    views_emoji_version: u64,
+    views_avatars_version: u64,
+    /// One older-slice fetch per visit to the pane's top edge.
+    paged_since_top: bool,
     /// Room whose messages the scroll handle last re-pinned.
     pinned_room: Option<String>,
 }
@@ -53,7 +63,7 @@ struct MessageView {
     sender: String,
     /// Raw text — the edit action puts it back into the composer.
     text: String,
-    lines: Vec<Vec<Span>>,
+    lines: std::sync::Arc<Vec<Vec<Span>>>,
     reactions: Vec<(String, crate::rc::Reaction)>,
     /// `(name, url, size)` when the message carries an uploaded file.
     file: Option<(String, String, u64)>,
@@ -131,6 +141,11 @@ impl ChatRoot {
             pinned_room: None,
             pick_tx,
             loading_older: false,
+            parsed: Default::default(),
+            views_version: u64::MAX,
+            views_emoji_version: u64::MAX,
+            views_avatars_version: u64::MAX,
+            paged_since_top: false,
         }
     }
 
@@ -166,7 +181,16 @@ impl ChatRoot {
     /// Re-parses the active room's messages into render views (markdown
     /// spans with emoji paths resolved).
     fn rebuild_views(&mut self) {
+        let started = std::time::Instant::now();
         let switched = self.pinned_room.as_deref() != self.state.active_room.as_deref();
+        // Nothing visible changed (badge/event churn): keep the views.
+        if !switched
+            && self.views_version == self.state.messages_version
+            && self.views_emoji_version == self.state.emoji_version
+            && self.views_avatars_version == self.state.avatars_version
+        {
+            return;
+        }
         let at_bottom = self.scroll.offset().y >= -self.scroll.max_offset().height;
         let emoji = &self.state.emoji;
         let chat_avatars = &self.state.avatars;
@@ -180,11 +204,28 @@ impl ChatRoot {
                 ts: pretty_time(&message.ts),
                 sender: message.sender.clone(),
                 text: message.text.clone(),
-                lines: message
-                    .text
-                    .lines()
-                    .map(|line| markdown::parse(line, &|name| emoji.get(name).cloned()))
-                    .collect(),
+                lines: {
+                    let key = (message.id.clone(), message.text.clone());
+                    match self.parsed.get(&key) {
+                        Some(lines) => lines.clone(),
+                        None => {
+                            if self.parsed.len() > 4000 {
+                                self.parsed.clear();
+                            }
+                            let parsed = std::sync::Arc::new(
+                                message
+                                    .text
+                                    .lines()
+                                    .map(|line| {
+                                        markdown::parse(line, &|name| emoji.get(name).cloned())
+                                    })
+                                    .collect::<Vec<_>>(),
+                            );
+                            self.parsed.insert(key, parsed.clone());
+                            parsed
+                        }
+                    }
+                },
                 reactions: message
                     .reactions
                     .iter()
@@ -208,6 +249,14 @@ impl ChatRoot {
             self.scroll.scroll_to_bottom();
             self.pinned_room = self.state.active_room.clone();
         }
+        self.views_version = self.state.messages_version;
+        self.views_emoji_version = self.state.emoji_version;
+        self.views_avatars_version = self.state.avatars_version;
+        eprintln!(
+            "PERF rebuild_views: {} msgs in {:?} (switched={switched})",
+            self.views.len(),
+            started.elapsed(),
+        );
     }
 
     /// Mirrors the entity into the control-socket snapshot. The UI thread
@@ -707,14 +756,22 @@ impl gpui::Render for ChatRoot {
                         }),
                 )
         };
-        // Scroll-to-top paging: one older slice at a time, until the
-        // room reports no more history.
+        // Scroll-to-top paging: one older slice per visit to the top
+        // edge (edge-triggered — a pinned top must not re-fire every
+        // frame), stopping at the pane cap or when history runs out.
         let at_top = self.scroll.offset().y >= px(-1.0);
+        if !at_top {
+            self.paged_since_top = false;
+        }
+        let filled = self.state.active_messages().len() >= 400;
         if at_top
+            && !self.paged_since_top
             && !self.loading_older
+            && !filled
             && let Some(room) = self.state.active_room.clone()
             && !self.state.older_exhausted.contains(&room)
         {
+            self.paged_since_top = true;
             self.loading_older = true;
             let _ = self
                 .commands
