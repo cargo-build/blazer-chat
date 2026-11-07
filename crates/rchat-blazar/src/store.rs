@@ -294,6 +294,7 @@ mod tests {
             unread: 0,
             lm: None,
             preview: None,
+            topic: None,
         }];
         store.save_rooms(&rooms).unwrap();
         assert_eq!(store.load_rooms().unwrap(), rooms);

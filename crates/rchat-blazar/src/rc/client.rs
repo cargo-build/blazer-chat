@@ -230,6 +230,7 @@ impl<T: Transport> RcClient<T> {
                     kind,
                     unread: 0,
                     lm: room.lm,
+                    topic: room.topic.or(room.description),
                     preview: room.last_message.and_then(|last| {
                         // Markdown markers are noise in a one-line
                         // preview; the symbols carry no formatting here.

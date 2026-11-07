@@ -48,6 +48,11 @@ pub struct WireRoom {
     #[serde(default)]
     #[serde(rename = "lastMessage")]
     pub last_message: Option<WireLastMessage>,
+    /// Header subtitle: the topic, or the description when no topic.
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// The sidebar preview source (wire `lastMessage`).

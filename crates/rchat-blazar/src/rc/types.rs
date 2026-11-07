@@ -90,6 +90,8 @@ pub struct Room {
     pub lm: Option<String>,
     /// The newest message's sender and text for the sidebar preview.
     pub preview: Option<(String, String)>,
+    /// Header subtitle: the topic, or the description when no topic.
+    pub topic: Option<String>,
 }
 
 /// One chat message, oldest position last.

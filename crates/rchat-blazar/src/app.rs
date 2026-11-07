@@ -932,6 +932,7 @@ mod tests {
             unread: 0,
             lm: None,
             preview: None,
+            topic: None,
         }
     }
 

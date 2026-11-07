@@ -3,8 +3,8 @@
 //! push commands back.
 
 use gpui::{
-    Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, Pixels, ScrollHandle, SharedString,
-    Window, div, hsla, img, prelude::*, px, rgb, uniform_list, white,
+    AnyElement, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, Pixels, ScrollHandle,
+    SharedString, Window, div, hsla, img, prelude::*, px, rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
@@ -38,6 +38,8 @@ pub(crate) struct ChatRoot {
     scroll: ScrollHandle,
     /// Picked file paths from the attach dialog's worker thread.
     pick_tx: async_channel::Sender<Option<std::path::PathBuf>>,
+    /// This entity's own handle for row-closure callbacks.
+    handle: Entity<ChatRoot>,
     /// An older-slice fetch is in flight (one at a time per pane).
     loading_older: bool,
     /// Parsed markdown per (message id, text): rebuilds reuse it instead
@@ -74,6 +76,11 @@ struct MessageView {
     /// `(reply count, formatted last reply)` when this message starts a
     /// thread.
     thread: Option<(u32, String)>,
+    /// UTC date (YYYY-MM-DD); the pane inserts day separators between
+    /// different dates.
+    day: String,
+    /// Raw server timestamp for the grouping window.
+    ts_raw: String,
 }
 
 impl ChatRoot {
@@ -128,7 +135,9 @@ impl ChatRoot {
         })
         .detach();
 
+        let handle = cx.entity();
         Self {
+            handle,
             state: ChatState::default(),
             commands,
             snapshot,
@@ -225,6 +234,8 @@ impl ChatRoot {
                         }
                     }
                 },
+                day: message.ts.split('T').next().unwrap_or_default().to_owned(),
+                ts_raw: message.ts.clone(),
                 reactions: message
                     .reactions
                     .iter()
@@ -356,7 +367,199 @@ impl Focusable for ChatRoot {
     }
 }
 
-fn panel(title: &str, content: impl IntoElement, width: Option<Pixels>) -> impl IntoElement {
+impl ChatRoot {
+    /// A centered day divider between messages of different dates.
+    fn day_separator(&self, day_ts: &str) -> AnyElement {
+        div()
+            .flex_none()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .child(div().flex_1().h(px(1.0)).bg(rgb(BORDER)))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(SharedString::from(pretty_day(day_ts))),
+            )
+            .child(div().flex_1().h(px(1.0)).bg(rgb(BORDER)))
+            .into_any_element()
+    }
+
+    /// One message row; consecutive same-sender rows within five
+    /// minutes group (avatar and header hidden), like the original.
+    fn message_row(&self, index: usize) -> AnyElement {
+        let view = &self.views[index];
+        let grouped = index > 0 && {
+            let previous = &self.views[index - 1];
+            previous.sender == view.sender
+                && previous.day == view.day
+                && within_five_minutes(&previous.ts_raw, &view.ts_raw)
+        };
+        let room_id = view.room_id.clone();
+        let msg_id = view.id.clone();
+        let edit_text = view.text.clone();
+        let editing_this = matches!(
+            self.editing.as_ref(),
+            Some((room, msg)) if *room == room_id && *msg == msg_id
+        );
+        let emoji = &self.state.emoji;
+        let me = self.state.username.clone();
+        let badges = div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .children(view.reactions.iter().map(|(name, reaction)| {
+                let mine = me.as_deref().is_some_and(|me| reaction.has(me));
+                let count = reaction.count();
+                let names = reaction.usernames.join(", ");
+                let pill = div()
+                    .id(SharedString::from(format!("react-{msg_id}-{name}")))
+                    .px_1p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(if mine { ACCENT } else { BORDER }))
+                    .bg(rgb(if mine { ROW_HOVER } else { PANEL }))
+                    .text_xs()
+                    .text_color(rgb(TEXT))
+                    .cursor_pointer()
+                    .tooltip(move |_, app| {
+                        app.new(|_| ReactionTooltip {
+                            text: SharedString::from(names.clone()),
+                        })
+                        .into()
+                    })
+                    .on_click({
+                        let this = self.handle.clone();
+                        let room_id = room_id.clone();
+                        let msg_id = msg_id.clone();
+                        let name = name.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |chat, cx| {
+                                chat.toggle_reaction(&room_id, &msg_id, &name, cx)
+                            });
+                        }
+                    });
+                match emoji.get(name) {
+                    Some(path) => pill
+                        .flex()
+                        .gap_1()
+                        .items_center()
+                        .child(img(std::path::PathBuf::from(path)).h(px(14.0)).w(px(14.0))),
+                    None => pill,
+                }
+                .child(SharedString::from(format!(
+                    "{} ×{count}",
+                    display_emoji(name)
+                )))
+            }));
+        let thread_pill = view.thread.as_ref().map(|(count, last)| {
+            let this = self.handle.clone();
+            let tmid = msg_id.clone();
+            div()
+                .id(SharedString::from(format!("thread-{msg_id}")))
+                .mt_0p5()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(rgb(PANEL))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(ROW_HOVER)))
+                .on_click(move |_, _, cx| {
+                    this.update(cx, |chat, cx| {
+                        let _ = chat
+                            .commands
+                            .try_send(ChatCommand::OpenThread { tmid: tmid.clone() });
+                        cx.notify();
+                    });
+                })
+                .child(SharedString::from(format!(
+                    "View thread · {count} {} · {last}",
+                    if *count == 1 { "reply" } else { "replies" }
+                )))
+        });
+        let lead = if grouped {
+            div().flex_none().w(px(32.0)).into_any_element()
+        } else {
+            match view.avatar.as_deref() {
+                Some(path) => img(std::path::PathBuf::from(path))
+                    .flex_none()
+                    .size(px(32.0))
+                    .rounded_full()
+                    .into_any_element(),
+                None => avatar(&view.sender).into_any_element(),
+            }
+        };
+        div()
+            .id(SharedString::from(format!("msg-{msg_id}")))
+            .group("msg")
+            .flex()
+            .gap_2()
+            .items_start()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .hover(|style| style.bg(rgb(ROW_HOVER)))
+            .child(lead)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .when(!grouped, |column| {
+                        column.child(
+                            div()
+                                .flex()
+                                .items_baseline()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(TEXT))
+                                        .child(SharedString::from(view.sender.clone())),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(SharedString::from(view.ts.clone())),
+                                ),
+                        )
+                    })
+                    .child(message_element(view))
+                    .children(thread_pill)
+                    .children(view.file.as_ref().map(|(name, url, size)| {
+                        attachment_card(&msg_id, name, url, *size, view.image_path.as_deref())
+                    }))
+                    .child(badges),
+            )
+            .child(action_strip(ActionContext {
+                this: self.handle.clone(),
+                room_id,
+                msg_id,
+                edit_text,
+                editing_this,
+            }))
+            .into_any_element()
+    }
+}
+
+fn panel(
+    title: &str,
+    subtitle: Option<&str>,
+    content: impl IntoElement,
+    width: Option<Pixels>,
+) -> impl IntoElement {
     // A fixed-width panel must not carry flex_1's zero basis: build the
     // sizing first, then the common chrome.
     let sized = match width {
@@ -374,9 +577,23 @@ fn panel(title: &str, content: impl IntoElement, width: Option<Pixels>) -> impl 
         .rounded_md()
         .child(
             div()
-                .text_xs()
-                .text_color(rgb(MUTED))
-                .child(title.to_owned()),
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(TEXT))
+                        .child(title.to_owned()),
+                )
+                .children(subtitle.map(|subtitle| {
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .truncate()
+                        .child(SharedString::from(subtitle.to_owned()))
+                })),
         )
         .child(content)
 }
@@ -481,166 +698,23 @@ impl gpui::Render for ChatRoot {
         .flex_1()
         .min_h_0();
 
-        // The pane virtualizes: `list` materializes only the visible
-        // rows, pins to the newest while the user is at the bottom
-        // (ListAlignment::Bottom), and resets when the count changes.
-        let this = cx.entity();
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(self.views.len() * 2);
+        let mut previous_day: Option<String> = None;
+        for index in 0..self.views.len() {
+            let view = &self.views[index];
+            if previous_day.as_deref() != Some(view.day.as_str()) {
+                rows.push(self.day_separator(&view.ts_raw));
+                previous_day = Some(view.day.clone());
+            }
+            rows.push(self.message_row(index));
+        }
         let messages = div()
             .id("messages")
             .flex()
             .flex_col()
             .track_scroll(&self.scroll)
             .overflow_y_scroll()
-            .children(self.views.iter().map(|view| {
-                let room_id = view.room_id.clone();
-                let msg_id = view.id.clone();
-                let edit_text = view.text.clone();
-                let editing_this = matches!(
-                    self.editing.as_ref(),
-                    Some((room, msg)) if *room == room_id && *msg == msg_id
-                );
-                let emoji = &self.state.emoji;
-                let me = self.state.username.clone();
-                let badges =
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_1()
-                        .children(view.reactions.iter().map(|(name, reaction)| {
-                            let mine = me.as_deref().is_some_and(|me| reaction.has(me));
-                            let count = reaction.count();
-                            let names = reaction.usernames.join(", ");
-                            let pill = div()
-                                .id(SharedString::from(format!("react-{msg_id}-{name}")))
-                                .px_1p5()
-                                .rounded_full()
-                                .border_1()
-                                .border_color(rgb(if mine { ACCENT } else { BORDER }))
-                                .bg(rgb(if mine { ROW_HOVER } else { PANEL }))
-                                .text_xs()
-                                .text_color(rgb(TEXT))
-                                .cursor_pointer()
-                                .tooltip(move |_, app| {
-                                    app.new(|_| ReactionTooltip {
-                                        text: SharedString::from(names.clone()),
-                                    })
-                                    .into()
-                                })
-                                .on_click({
-                                    let this = this.clone();
-                                    let room_id = room_id.clone();
-                                    let msg_id = msg_id.clone();
-                                    let name = name.clone();
-                                    move |_, _, cx| {
-                                        this.update(cx, |chat, cx| {
-                                            chat.toggle_reaction(&room_id, &msg_id, &name, cx)
-                                        });
-                                    }
-                                });
-                            match emoji.get(name) {
-                                Some(path) => pill.flex().gap_1().items_center().child(
-                                    img(std::path::PathBuf::from(path)).h(px(14.0)).w(px(14.0)),
-                                ),
-                                None => pill,
-                            }
-                            .child(SharedString::from(format!("{name} ×{count}")))
-                        }));
-                div()
-                    .id(SharedString::from(format!("msg-{msg_id}")))
-                    .group("msg")
-                    .flex()
-                    .gap_2()
-                    .items_start()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .hover(|style| style.bg(rgb(ROW_HOVER)))
-                    .child(match view.avatar.as_deref() {
-                        Some(path) => img(std::path::PathBuf::from(path))
-                            .flex_none()
-                            .size(px(32.0))
-                            .rounded_full()
-                            .into_any_element(),
-                        None => avatar(&view.sender).into_any_element(),
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_baseline()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(rgb(TEXT))
-                                            .child(SharedString::from(view.sender.clone())),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(MUTED))
-                                            .child(SharedString::from(view.ts.clone())),
-                                    ),
-                            )
-                            .child(message_element(view))
-                            .children(view.thread.as_ref().map(|(count, last)| {
-                                let pill = div()
-                                    .id(SharedString::from(format!("thread-{msg_id}")))
-                                    .mt_0p5()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_md()
-                                    .bg(rgb(PANEL))
-                                    .border_1()
-                                    .border_color(rgb(BORDER))
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(ROW_HOVER)))
-                                    .on_click({
-                                        let this = this.clone();
-                                        let tmid = msg_id.clone();
-                                        move |_, _, cx| {
-                                            this.update(cx, |chat, cx| {
-                                                let _ = chat.commands.try_send(
-                                                    ChatCommand::OpenThread { tmid: tmid.clone() },
-                                                );
-                                                cx.notify();
-                                            });
-                                        }
-                                    })
-                                    .child(SharedString::from(format!(
-                                        "View thread · {count} {} · {last}",
-                                        if *count == 1 { "reply" } else { "replies" }
-                                    )));
-                                div().flex().flex_col().items_start().child(pill)
-                            }))
-                            .children(view.file.as_ref().map(|(name, url, size)| {
-                                attachment_card(
-                                    &msg_id,
-                                    name,
-                                    url,
-                                    *size,
-                                    view.image_path.as_deref(),
-                                )
-                            }))
-                            .child(badges),
-                    )
-                    .child(action_strip(ActionContext {
-                        this: this.clone(),
-                        room_id,
-                        msg_id,
-                        edit_text,
-                        editing_this,
-                    }))
-            }));
+            .children(rows);
 
         // Popup toasts: the pending notification list, docked above the
         // pane (the original client's bottom-right toasts; in-window so
@@ -921,9 +995,16 @@ impl gpui::Render for ChatRoot {
                     .flex_1()
                     .min_h_0()
                     .gap_3()
-                    .child(panel("rooms", rooms, Some(px(240.0))))
+                    .child(panel("rooms", None, rooms, Some(px(240.0))))
                     .child(panel(
                         &pane_title,
+                        self.state
+                            .rooms
+                            .iter()
+                            .find(|room| {
+                                Some(room.id.as_str()) == self.state.active_room.as_deref()
+                            })
+                            .and_then(|room| room.topic.as_deref()),
                         div().flex().flex_col().min_h_0().child(toasts).child(pane),
                         None,
                     )),
@@ -1014,6 +1095,42 @@ fn user_color(sender: &str) -> Hsla {
         acc.wrapping_mul(33).wrapping_add(u32::from(byte))
     });
     hsla((hash % 360) as f32, 0.55, 0.62, 1.0)
+}
+
+/// The wire's emoji names (`+1`) render as their unicode glyphs
+/// (Rocket.Chat's canonical names); unknown names stay as-is.
+fn display_emoji(name: &str) -> String {
+    match name {
+        "+1" => "👍".to_owned(),
+        "-1" => "👎".to_owned(),
+        "smile" => "😄".to_owned(),
+        "tada" => "🎉".to_owned(),
+        "heart" => "❤️".to_owned(),
+        "eyes" => "👀".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+/// Consecutive-grouping window: same sender within five minutes.
+fn within_five_minutes(prev: &str, next: &str) -> bool {
+    match (
+        prev.parse::<jiff::Timestamp>(),
+        next.parse::<jiff::Timestamp>(),
+    ) {
+        (Ok(a), Ok(b)) => b < a + std::time::Duration::from_secs(5 * 60),
+        _ => false,
+    }
+}
+
+/// The human day for a separator: `November 7`.
+fn pretty_day(ts: &str) -> String {
+    match ts.parse::<jiff::Timestamp>() {
+        Ok(stamp) => stamp
+            .to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%B %-d")
+            .to_string(),
+        Err(_) => ts.split('T').next().unwrap_or(ts).to_owned(),
+    }
 }
 
 /// `2026-11-07T20:32:00.514Z` → `8:32 PM` in the machine's local zone;
