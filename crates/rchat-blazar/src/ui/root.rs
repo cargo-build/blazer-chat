@@ -36,6 +36,8 @@ pub(crate) struct ChatRoot {
     editing: Option<(String, String)>,
     /// The pane's scroll; pins to the newest message on room switches.
     scroll: ScrollHandle,
+    /// Picked file paths from the attach dialog's worker thread.
+    pick_tx: async_channel::Sender<Option<std::path::PathBuf>>,
     /// Room whose messages the scroll handle last re-pinned.
     pinned_room: Option<String>,
 }
@@ -85,6 +87,32 @@ impl ChatRoot {
         })
         .detach();
 
+        // The file dialog runs on its own thread (GTK wants its own
+        // iteration); a picked path returns over the channel and is
+        // uploaded into the room active at that moment.
+        let (pick_tx, pick_rx) = async_channel::unbounded::<Option<std::path::PathBuf>>();
+        cx.spawn(async move |root, cx| {
+            while let Ok(picked) = pick_rx.recv().await {
+                let Some(path) = picked else { continue };
+                if root
+                    .update(cx, |chat, cx| {
+                        if let Some(room_id) = chat.state.active_room.clone() {
+                            let _ = chat.commands.try_send(ChatCommand::UploadFile {
+                                room_id,
+                                path: path.display().to_string(),
+                                msg: String::new(),
+                            });
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         Self {
             state: ChatState::default(),
             commands,
@@ -96,6 +124,7 @@ impl ChatRoot {
             editing: None,
             scroll: ScrollHandle::new(),
             pinned_room: None,
+            pick_tx,
         }
     }
 
@@ -699,6 +728,30 @@ impl gpui::Render for ChatRoot {
                     .flex()
                     .flex_none()
                     .gap_2()
+                    .child(
+                        div()
+                            .id("attach")
+                            .flex_none()
+                            .px_2()
+                            .py_1()
+                            .bg(rgb(PANEL))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .rounded_md()
+                            .text_sm()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(ACCENT)))
+                            .child("📎")
+                            .on_click(cx.listener(|chat, _, _, _cx| {
+                                let tx = chat.pick_tx.clone();
+                                std::thread::spawn(move || {
+                                    let picked = rfd::FileDialog::new()
+                                        .set_title("Attach a file")
+                                        .pick_file();
+                                    let _ = tx.send_blocking(picked);
+                                });
+                            })),
+                    )
                     .child(div().flex_1().child(self.composer.clone()))
                     .child(
                         div()

@@ -22,6 +22,8 @@ compio-ws = { version = "0.4", features = ["native-tls"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Local-offset timestamps for the pane (system tz database).
 jiff = "0.2"
+# Attach button: native file dialog (GTK3 backend).
+rfd = "0.18"
 
 [dev-dependencies]
 futures-lite = "2"
