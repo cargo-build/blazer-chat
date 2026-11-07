@@ -3,8 +3,8 @@
 //! push commands back.
 
 use gpui::{
-    Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, ScrollHandle, SharedString, Window,
-    div, hsla, img, prelude::*, px, rgb, uniform_list, white,
+    Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, Pixels, ScrollHandle, SharedString,
+    Window, div, hsla, img, prelude::*, px, rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
@@ -250,11 +250,16 @@ impl Focusable for ChatRoot {
     }
 }
 
-fn panel(title: &str, content: impl IntoElement) -> impl IntoElement {
-    div()
+fn panel(title: &str, content: impl IntoElement, width: Option<Pixels>) -> impl IntoElement {
+    // A fixed-width panel must not carry flex_1's zero basis: build the
+    // sizing first, then the common chrome.
+    let sized = match width {
+        Some(width) => div().w(width).flex_none(),
+        None => div().flex_1().min_w_0(),
+    };
+    sized
         .flex()
         .flex_col()
-        .flex_1()
         .gap_2()
         .p_3()
         .bg(rgb(PANEL))
@@ -307,6 +312,7 @@ impl gpui::Render for ChatRoot {
                         .py_1()
                         .rounded_sm()
                         .text_sm()
+                        .overflow_hidden()
                         .cursor_pointer()
                         .when(selected, |row| row.bg(rgb(ACCENT)))
                         .hover(|style| style.bg(rgb(BORDER)))
@@ -681,10 +687,11 @@ impl gpui::Render for ChatRoot {
                     .flex_1()
                     .min_h_0()
                     .gap_3()
-                    .child(panel("rooms", rooms))
+                    .child(panel("rooms", rooms, Some(px(240.0))))
                     .child(panel(
                         "messages",
                         div().flex().flex_col().min_h_0().child(toasts).child(pane),
+                        None,
                     )),
             )
             .child(
@@ -751,26 +758,32 @@ fn user_color(sender: &str) -> Hsla {
     hsla((hash % 360) as f32, 0.55, 0.62, 1.0)
 }
 
-/// `2026-11-07T20:32:00.514Z` → `8:32 PM` (server stamps are UTC;
-/// local-offset rendering is a known gap).
+/// `2026-11-07T20:32:00.514Z` → `8:32 PM` in the machine's local zone;
+/// unparsable stamps degrade to the raw time part.
 fn pretty_time(ts: &str) -> String {
-    let Some((_, time)) = ts.split_once('T') else {
-        return ts.to_owned();
+    pretty_time_in(ts, &jiff::tz::TimeZone::system())
+}
+
+/// The same formatting against an explicit zone (tests pin offsets).
+fn pretty_time_in(ts: &str, tz: &jiff::tz::TimeZone) -> String {
+    let Ok(stamp) = ts.parse::<jiff::Timestamp>() else {
+        return raw_time(ts);
     };
-    let mut parts = time.split(':');
-    let (Some(hour), Some(minute)) = (parts.next(), parts.next()) else {
-        return ts.to_owned();
-    };
-    let Ok(hour) = hour.parse::<u32>() else {
-        return ts.to_owned();
-    };
-    let (hour, suffix) = match hour {
+    let local = stamp.to_zoned(tz.clone());
+    let (hour, suffix) = match local.hour() {
         0 => (12, "AM"),
-        1..=11 => (hour, "AM"),
+        hour @ 1..=11 => (hour, "AM"),
         12 => (12, "PM"),
-        _ => (hour - 12, "PM"),
+        hour => (hour - 12, "PM"),
     };
-    format!("{hour}:{minute} {suffix}")
+    format!("{hour}:{:02} {suffix}", local.minute())
+}
+
+/// The unparsable-stamp fallback: the raw time component.
+fn raw_time(ts: &str) -> String {
+    ts.split_once('T')
+        .map(|(_, time)| time.to_owned())
+        .unwrap_or_else(|| ts.to_owned())
 }
 
 /// One attachment as a card: type tile, name link, size — with the
@@ -1019,5 +1032,21 @@ fn human_bytes(size: u64) -> String {
         size if size < 1024 => format!("{size} B"),
         size if size < 1024 * 1024 => format!("{:.1} KB", size as f64 / 1024.0),
         size => format!("{:.1} MB", size as f64 / (1024.0 * 1024.0)),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)] // tests assert the expected path
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pretty_time_renders_zone_offsets_and_falls_back() {
+        let utc = jiff::tz::TimeZone::UTC;
+        assert_eq!(pretty_time_in("2026-11-07T20:32:00.514Z", &utc), "8:32 PM");
+        let msk = jiff::tz::TimeZone::fixed(jiff::tz::Offset::from_hours(3).unwrap());
+        assert_eq!(pretty_time_in("2026-11-07T20:32:00.514Z", &msk), "11:32 PM");
+        assert_eq!(pretty_time_in("2026-11-07T00:05:00Z", &utc), "12:05 AM");
+        assert_eq!(pretty_time_in("not-a-stamp", &utc), "not-a-stamp");
     }
 }

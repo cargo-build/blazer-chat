@@ -20,6 +20,8 @@ futures-lite = "2"
 compio-ws = { version = "0.4", features = ["native-tls"] }
 # File downloads arrive force-gzipped (server ignores Accept-Encoding).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Local-offset timestamps for the pane (system tz database).
+jiff = "0.2"
 
 [dev-dependencies]
 futures-lite = "2"
