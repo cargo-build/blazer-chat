@@ -56,18 +56,28 @@ mod tests {
     #[test]
     fn defaults_pass_through() {
         let settings = AppSettings::default();
-        assert_eq!(settings.server.server_url, "http://127.0.0.1:3000");
+        assert_eq!(settings.server.addr(), ("127.0.0.1".to_owned(), 3000));
     }
 
     #[test]
     fn parses_server_url() {
         let settings =
             AppSettings::load_from("[server]\nurl = \"http://192.168.1.10:3000\"\n").unwrap();
-        assert_eq!(settings.server.server_url, "http://192.168.1.10:3000");
+        assert_eq!(settings.server.addr(), ("192.168.1.10".to_owned(), 3000));
+        assert!(!settings.server.is_tls());
+    }
+
+    #[test]
+    fn parses_https_with_default_port() {
+        let settings =
+            AppSettings::load_from("[server]\nurl = \"https://rocketchat.example.com\"\n").unwrap();
+        assert!(settings.server.is_tls());
+        assert_eq!(settings.server.addr().1, 443);
     }
 
     #[test]
     fn rejects_malformed_url() {
-        assert!(AppSettings::load_from("[server]\nurl = \"https://x\"\n").is_err());
+        assert!(AppSettings::load_from("[server]\nurl = \"ftp://x\"\n").is_err());
+        assert!(AppSettings::load_from("[server]\nurl = \"http://\"\n").is_err());
     }
 }

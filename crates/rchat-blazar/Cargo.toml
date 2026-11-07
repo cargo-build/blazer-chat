@@ -8,7 +8,7 @@ license.workspace = true
 # Runtime-agnostic channels carry events and requests across the
 # compio/GPUI boundary (channels, not nested executors).
 async-channel = "2.5"
-compio = { version = "0.19", features = ["macros", "net", "time"] }
+compio = { version = "0.19", features = ["macros", "net", "time", "native-tls"] }
 gpui = "0.2.2"
 redb = "4.5"
 serde = { version = "1", features = ["derive"] }

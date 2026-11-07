@@ -3,4 +3,4 @@
 # variables or the control socket (POST /login {user, password}).
 
 [server]
-url = "http://127.0.0.1:3000"
+url = "https://rocketchat-student.21-school.ru"

@@ -15,8 +15,8 @@
 //!   `{message: IMessage, success}` (`rest-typings` schema: `msg` is the
 //!   text field).
 //!
-//! TLS is out of scope for this slice: the dev server is plain HTTP on
-//! localhost, and `server_url` in `public.toml` says where to connect.
+//! The transport speaks `http://` and `https://` (server URL in
+//! `public.toml` says where to connect).
 
 use serde::Deserialize;
 
@@ -34,7 +34,7 @@ pub struct RcClient<T: Transport = HttpTransport> {
 impl RcClient<HttpTransport> {
     pub fn new(settings: RcSettings) -> Self {
         Self {
-            transport: HttpTransport::new(settings.addr()),
+            transport: HttpTransport::new(settings.addr(), settings.is_tls()),
             settings,
             session: None,
         }

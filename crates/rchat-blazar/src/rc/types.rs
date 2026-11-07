@@ -5,60 +5,65 @@ use std::fmt;
 /// Where to find the server; module-owned settings with a public default.
 #[derive(Clone)]
 pub struct RcSettings {
-    /// `http://host:port` of the Rocket.Chat server.
-    pub server_url: String,
+    pub(crate) tls: bool,
+    pub(crate) addr: (String, u16),
+    pub(crate) host_header: String,
 }
 
 impl Default for RcSettings {
     fn default() -> Self {
         Self {
-            server_url: "http://127.0.0.1:3000".to_owned(),
+            tls: false,
+            addr: ("127.0.0.1".to_owned(), 3000),
+            host_header: "127.0.0.1:3000".to_owned(),
         }
     }
 }
 
 impl RcSettings {
-    /// Parses `http://host:port`; https is rejected until the TLS slice.
+    /// Parses `http://host[:port]` (default 80) and `https://host[:port]`
+    /// (default 443).
     pub fn parse(server_url: &str) -> Result<Self, RcError> {
-        let rest = server_url.strip_prefix("http://").ok_or_else(|| {
-            RcError::Config(format!(
-                "unsupported server_url {server_url:?}: use http://host:port"
-            ))
-        })?;
+        let (tls, rest) = if let Some(rest) = server_url.strip_prefix("https://") {
+            (true, rest)
+        } else if let Some(rest) = server_url.strip_prefix("http://") {
+            (false, rest)
+        } else {
+            return Err(RcError::Config(format!(
+                "unsupported server_url {server_url:?}: use http:// or https://"
+            )));
+        };
+        let default_port = if tls { 443 } else { 80 };
         let (host, port) = match rest.rsplit_once(':') {
             Some((host, port)) => (
                 host.to_owned(),
                 port.parse::<u16>()
                     .map_err(|_| RcError::Config(format!("bad port in {server_url:?}")))?,
             ),
-            None => (rest.to_owned(), 80),
+            None => (rest.to_owned(), default_port),
         };
-        let _ = port;
         if host.is_empty() {
             return Err(RcError::Config(format!("no host in {server_url:?}")));
         }
         Ok(Self {
-            server_url: server_url.to_owned(),
+            tls,
+            addr: (host.clone(), port),
+            host_header: rest.to_owned(),
         })
     }
 
     /// Socket address the transport connects to.
     pub(crate) fn addr(&self) -> (String, u16) {
-        let rest = self
-            .server_url
-            .strip_prefix("http://")
-            .expect("settings carry a parsed http url");
-        match rest.rsplit_once(':') {
-            Some((host, port)) => (host.to_owned(), port.parse().unwrap_or(80)),
-            None => (rest.to_owned(), 80),
-        }
+        self.addr.clone()
     }
 
     pub(crate) fn host_header(&self) -> String {
-        self.server_url
-            .strip_prefix("http://")
-            .expect("settings carry a parsed http url")
-            .to_owned()
+        self.host_header.clone()
+    }
+
+    /// Whether the transport must speak TLS (`https://`).
+    pub(crate) fn is_tls(&self) -> bool {
+        self.tls
     }
 }
 
