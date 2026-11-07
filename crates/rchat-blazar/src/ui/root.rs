@@ -3,8 +3,9 @@
 //! push commands back.
 
 use gpui::{
-    AnyElement, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, Pixels,
-    ScrollHandle, SharedString, Window, div, hsla, img, prelude::*, px, rgb, uniform_list, white,
+    AnyElement, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
+    ListAlignment, ListState, Pixels, SharedString, Window, div, hsla, img, list, prelude::*, px,
+    rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
@@ -37,8 +38,12 @@ pub(crate) struct ChatRoot {
     search: Entity<TextInput>,
     /// `(room_id, msg_id)` while the composer edits an existing message.
     editing: Option<(String, String)>,
-    /// The pane's scroll; pins to the newest message on room switches.
-    scroll: ScrollHandle,
+    /// The pane's virtualized rows: messages interleaved with day
+    /// separators, one list item each.
+    rows: Vec<PaneRow>,
+    /// The pane's virtualized list state (Bottom = chat log; the new
+    /// scroll-anchor list from the migrated stack).
+    messages_list: ListState,
     /// Picked file paths from the attach dialog's worker thread.
     pick_tx: async_channel::Sender<Option<std::path::PathBuf>>,
     /// This entity's own handle for row-closure callbacks.
@@ -165,7 +170,8 @@ impl ChatRoot {
             views: Vec::new(),
             search,
             editing: None,
-            scroll: ScrollHandle::new(),
+            rows: Vec::new(),
+            messages_list: ListState::new(0, ListAlignment::Bottom, px(500.0)),
             pinned_room: None,
             pick_tx,
             open_menu: None,
@@ -200,9 +206,14 @@ impl ChatRoot {
         // maps the precomputed spans to elements.
         self.rebuild_views();
         if let Some(anchor_id) = anchor
-            && let Some(index) = self.views.iter().position(|view| view.id == anchor_id)
+            && let Some(index) = self
+                .rows
+                .iter()
+                .position(|row| {
+                    matches!(row, PaneRow::Message { view_index } if self.views[*view_index].id == anchor_id)
+                })
         {
-            self.scroll.scroll_to_item(index);
+            self.messages_list.scroll_to_reveal_item(index);
         }
         self.mirror();
         cx.notify();
@@ -220,7 +231,7 @@ impl ChatRoot {
         {
             return;
         }
-        let at_bottom = self.scroll.offset().y >= -self.scroll.max_offset().y;
+        let at_bottom = self.messages_list.is_scrolled_to_end() != Some(false);
         let emoji = &self.state.emoji;
         let chat_avatars = &self.state.avatars;
         self.views = self
@@ -277,9 +288,33 @@ impl ChatRoot {
                     .map(|count| (count, pretty_time(message.tlm.as_deref().unwrap_or("")))),
             })
             .collect();
+        // Interleave day separators; the list materializes one row per
+        // item.
+        self.rows = Vec::with_capacity(self.views.len() + 8);
+        let mut previous_day: Option<String> = None;
+        for (view_index, view) in self.views.iter().enumerate() {
+            if previous_day.as_deref() != Some(view.day.as_str()) {
+                self.rows.push(PaneRow::Separator {
+                    day_ts: view.ts_raw.clone(),
+                });
+                previous_day = Some(view.day.clone());
+            }
+            self.rows.push(PaneRow::Message { view_index });
+        }
+        // Prepending an older slice keeps the scroll anchor on the same
+        // message (splice); everything else resets.
+        let count = self.rows.len();
         if switched || at_bottom {
-            self.scroll.scroll_to_bottom();
+            self.messages_list.reset(count);
+            self.messages_list.scroll_to_end();
             self.pinned_room = self.state.active_room.clone();
+        } else if count > self.messages_list.item_count() {
+            let added = count - self.messages_list.item_count();
+            // Older history prepends rows, so the delta lands at the top.
+            self.messages_list.splice(0..0, added);
+        } else {
+            self.messages_list.reset(count);
+            self.messages_list.remeasure();
         }
         self.views_version = self.state.messages_version;
         self.views_emoji_version = self.state.emoji_version;
@@ -781,23 +816,20 @@ impl gpui::Render for ChatRoot {
         .flex_1()
         .min_h_0();
 
-        let mut rows: Vec<AnyElement> = Vec::with_capacity(self.views.len() * 2);
-        let mut previous_day: Option<String> = None;
-        for index in 0..self.views.len() {
-            let view = &self.views[index];
-            if previous_day.as_deref() != Some(view.day.as_str()) {
-                rows.push(self.day_separator(&view.ts_raw));
-                previous_day = Some(view.day.clone());
+        // The pane virtualizes: the list materializes only the visible
+        // rows (plus overdraw) instead of every row each frame — the
+        // smooth scrolling the old stack could not deliver.
+        let this_pane = self.handle.clone();
+        let messages = list(self.messages_list.clone(), move |index, _, cx| {
+            let chat = this_pane.read(cx);
+            match chat.rows.get(index) {
+                Some(PaneRow::Separator { day_ts }) => chat.day_separator(day_ts),
+                Some(PaneRow::Message { view_index }) => chat.message_row(*view_index),
+                None => div().into_any_element(),
             }
-            rows.push(self.message_row(index));
-        }
-        let messages = div()
-            .id("messages")
-            .flex()
-            .flex_col()
-            .track_scroll(&self.scroll)
-            .overflow_y_scroll()
-            .children(rows);
+        })
+        .flex_1()
+        .min_h_0();
 
         // Popup toasts: the pending notification list, docked above the
         // pane (the original client's bottom-right toasts; in-window so
@@ -910,7 +942,8 @@ impl gpui::Render for ChatRoot {
         // Scroll-to-top paging: one older slice per visit to the top
         // edge (edge-triggered — a pinned top must not re-fire every
         // frame), stopping at the pane cap or when history runs out.
-        let at_top = self.scroll.offset().y >= px(-1.0);
+        let logical_top = self.messages_list.logical_scroll_top();
+        let at_top = logical_top.item_ix == 0 && logical_top.offset_in_item <= px(1.0);
         if !at_top {
             self.paged_since_top = false;
         }
@@ -1555,6 +1588,12 @@ fn span_element(span: Span) -> gpui::Div {
 }
 
 /// What a message row's action buttons need at click time.
+/// One virtualized pane row: a message or a day divider.
+enum PaneRow {
+    Separator { day_ts: String },
+    Message { view_index: usize },
+}
+
 struct ActionContext {
     this: Entity<ChatRoot>,
     room_id: String,
