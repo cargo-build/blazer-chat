@@ -2,9 +2,10 @@
 //! `_italic_`, `` `code` ``, `~strike~`, links, `@mentions`) plus
 //! `:custom_emoji:` tokens resolved through the caller's emoji cache.
 //!
-//! Single-level by design (no nested formatting): the original client's
-//! messages are overwhelmingly single-token runs, and a flat scan keeps the
-//! parser testable and free of edge-case drift.
+//! Nesting combines style flags on flat spans (`_курсив~страйк~_` yields
+//! italic and italic+strike runs): the parser keeps a style stack with
+//! look-ahead closers, and the renderer stays flat. Code spans win over
+//! markers inside them; unclosed markers stay literal.
 
 /// One renderable piece of a message line.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,14 +26,90 @@ pub enum Span {
     Emoji { path: String },
 }
 
+/// One open emphasis: the marker that opened it and its contribution.
+#[derive(Clone, Copy)]
+struct OpenMarker {
+    marker: char,
+    bold: bool,
+    italic: bool,
+    code: bool,
+    strike: bool,
+}
+
+impl OpenMarker {
+    fn style(&self) -> Style {
+        Style {
+            bold: self.bold,
+            italic: self.italic,
+            code: self.code,
+            strike: self.strike,
+        }
+    }
+}
+
+/// The emphasis flags in effect at the current position.
+#[derive(Clone, Copy, Default)]
+struct Style {
+    bold: bool,
+    italic: bool,
+    code: bool,
+    strike: bool,
+}
+
+impl Style {
+    fn merge(self, marker: &OpenMarker) -> Style {
+        Style {
+            bold: self.bold || marker.bold,
+            italic: self.italic || marker.italic,
+            code: self.code || marker.code,
+            strike: self.strike || marker.strike,
+        }
+    }
+}
+
+/// The emphasis markers, closest first.
+const MARKERS: [OpenMarker; 4] = [
+    OpenMarker {
+        marker: '*',
+        bold: true,
+        italic: false,
+        code: false,
+        strike: false,
+    },
+    OpenMarker {
+        marker: '_',
+        bold: false,
+        italic: true,
+        code: false,
+        strike: false,
+    },
+    OpenMarker {
+        marker: '`',
+        bold: false,
+        italic: false,
+        code: true,
+        strike: false,
+    },
+    OpenMarker {
+        marker: '~',
+        bold: false,
+        italic: false,
+        code: false,
+        strike: true,
+    },
+];
+
 /// Parses one line of message text into spans. `emoji_path` resolves a
 /// custom-emoji name to its cached image path; unknown names stay literal.
 pub fn parse(text: &str, emoji_path: &dyn Fn(&str) -> Option<String>) -> Vec<Span> {
     let mut spans = Vec::new();
     let mut plain = String::new();
     let mut rest = text;
+    // Open emphasis, outermost first; the effective style is the merge.
+    let mut stack: Vec<OpenMarker> = Vec::new();
 
     'scan: while !rest.is_empty() {
+        let effective = style_of(&stack);
         // Custom emoji: :name: with a cache hit wins over everything else.
         if let Some(after) = rest.strip_prefix(':')
             && let Some(end) = after.find(':')
@@ -41,7 +118,7 @@ pub fn parse(text: &str, emoji_path: &dyn Fn(&str) -> Option<String>) -> Vec<Spa
             if is_emoji_name(name)
                 && let Some(path) = emoji_path(name)
             {
-                flush_plain(&mut plain, &mut spans);
+                flush_plain(&mut plain, &mut spans, Some(effective));
                 spans.push(Span::Emoji { path });
                 rest = &after[end + 1..];
                 continue 'scan;
@@ -50,7 +127,7 @@ pub fn parse(text: &str, emoji_path: &dyn Fn(&str) -> Option<String>) -> Vec<Spa
 
         // Links: bare urls and [label](url).
         if let Some(url) = prefix_url(rest) {
-            flush_plain(&mut plain, &mut spans);
+            flush_plain(&mut plain, &mut spans, Some(effective));
             let length = url.len();
             spans.push(Span::Link {
                 label: url.to_owned(),
@@ -62,7 +139,7 @@ pub fn parse(text: &str, emoji_path: &dyn Fn(&str) -> Option<String>) -> Vec<Spa
         if let Some(rest_after) = rest.strip_prefix('[')
             && let Some((label, url, tail)) = labeled_link(rest_after)
         {
-            flush_plain(&mut plain, &mut spans);
+            flush_plain(&mut plain, &mut spans, Some(effective));
             spans.push(Span::Link { label, url });
             rest = tail;
             continue 'scan;
@@ -72,32 +149,45 @@ pub fn parse(text: &str, emoji_path: &dyn Fn(&str) -> Option<String>) -> Vec<Spa
         if let Some(after) = rest.strip_prefix('@')
             && let Some(name) = prefix_token(after)
         {
-            flush_plain(&mut plain, &mut spans);
+            flush_plain(&mut plain, &mut spans, Some(effective));
             spans.push(Span::Mention(format!("@{name}")));
             rest = &after[name.len()..];
             continue 'scan;
         }
 
-        // Emphasis: *bold*, _italic_, `code`, ~strike~ (single level).
-        for (marker, bold, italic, code, strike) in [
-            ('*', true, false, false, false),
-            ('_', false, true, false, false),
-            ('`', false, false, true, false),
-            ('~', false, false, false, true),
-        ] {
-            if let Some(after) = rest.strip_prefix(marker)
-                && let Some(end) = after.find(marker)
-                && end > 0
-            {
-                flush_plain(&mut plain, &mut spans);
-                spans.push(Span::Text {
-                    text: after[..end].to_owned(),
-                    bold,
-                    italic,
-                    code,
-                    strike,
-                });
-                rest = &after[end + 1..];
+        // Emphasis: *bold*, _italic_, `code`, ~strike~ — nestable. A
+        // marker already on the stack closes the innermost run of its
+        // kind; otherwise it opens when a closer exists ahead (unclosed
+        // markers stay literal). Inside code, only the closing backtick
+        // acts.
+        for open in MARKERS {
+            if !rest.starts_with(open.marker) {
+                continue;
+            }
+            let after = &rest[open.marker.len_utf8()..];
+            let closes = stack
+                .iter()
+                .any(|open_on_stack| open_on_stack.marker == open.marker);
+            let has_closer =
+                !open.code && after.contains(open.marker) || open.code && after.contains('`');
+            // Inside code, only the closing backtick acts.
+            if closes && (!effective.code || open.code) {
+                // The text before this closer sits at the merged style of
+                // everything open, including the marker being closed.
+                flush_plain(&mut plain, &mut spans, Some(effective));
+                // Pop inner levels up to and including this marker.
+                while let Some(open_on_stack) = stack.pop() {
+                    if open_on_stack.marker == open.marker {
+                        break;
+                    }
+                }
+                rest = after;
+                continue 'scan;
+            }
+            if has_closer && (!effective.code || open.code) {
+                flush_plain(&mut plain, &mut spans, Some(style_of(&stack)));
+                stack.push(open);
+                rest = after;
                 continue 'scan;
             }
         }
@@ -111,18 +201,26 @@ pub fn parse(text: &str, emoji_path: &dyn Fn(&str) -> Option<String>) -> Vec<Spa
         plain.push_str(&rest[..boundary]);
         rest = &rest[boundary..];
     }
-    flush_plain(&mut plain, &mut spans);
+    flush_plain(&mut plain, &mut spans, stack.last().map(OpenMarker::style));
     spans
 }
 
-fn flush_plain(plain: &mut String, spans: &mut Vec<Span>) {
+/// The merged style of the open markers.
+fn style_of(stack: &[OpenMarker]) -> Style {
+    stack
+        .iter()
+        .fold(Style::default(), |style, open| style.merge(open))
+}
+
+fn flush_plain(plain: &mut String, spans: &mut Vec<Span>, style: Option<Style>) {
     if !plain.is_empty() {
+        let style = style.unwrap_or_default();
         spans.push(Span::Text {
             text: std::mem::take(plain),
-            bold: false,
-            italic: false,
-            code: false,
-            strike: false,
+            bold: style.bold,
+            italic: style.italic,
+            code: style.code,
+            strike: style.strike,
         });
     }
 }
@@ -241,6 +339,38 @@ mod tests {
         let spans = parse(":не-эмодзи:", &cached);
         assert_eq!(spans.len(), 1);
         assert!(matches!(&spans[0], Span::Text { text, .. } if text == ":не-эмодзи:"));
+    }
+
+    #[test]
+    fn nested_emphasis_combines_flags() {
+        // Inner strike inside outer italic: two runs, flags combined.
+        let spans = parse("_курсив~страйк~_", &no_emoji);
+        assert_eq!(spans.len(), 2);
+        assert!(
+            matches!(&spans[0], Span::Text { italic: true, strike: false, text, .. } if text == "курсив")
+        );
+        assert!(
+            matches!(&spans[1], Span::Text { italic: true, strike: true, text, .. } if text == "страйк")
+        );
+
+        // Bold+italic on one run.
+        let spans = parse("*_обе_*", &no_emoji);
+        assert_eq!(spans.len(), 1);
+        assert!(matches!(
+            &spans[0],
+            Span::Text { bold: true, italic: true, text, .. } if text == "обе"
+        ));
+    }
+
+    #[test]
+    fn code_swallows_markers_inside_it() {
+        // Inside code, markers stay literal: the `*` in the caption does
+        // not open bold, and the backtick run holds until its closer.
+        let spans = parse("*`код * не жирный`*", &no_emoji);
+        assert_eq!(spans.len(), 1);
+        assert!(
+            matches!(&spans[0], Span::Text { code: true, text, .. } if text == "код * не жирный")
+        );
     }
 
     #[test]
