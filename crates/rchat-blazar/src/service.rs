@@ -8,8 +8,9 @@
 //! `Listening` event carries the address to the UI.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_channel::{Receiver, Sender, unbounded};
@@ -19,7 +20,7 @@ use tako::body::TakoBody;
 use tako::responder::Responder;
 use tako::router::Router;
 use tako::types::Response;
-use tako::{CompioServer, header};
+use tako::{CompioServer, StatusCode, header};
 
 /// What the UI keeps on screen about the compio side.
 pub enum ServiceEvent {
@@ -33,11 +34,25 @@ pub enum ServiceEvent {
     },
     /// One loopback fetch failed; the endpoint may still recover.
     Failed { seq: u64, message: String },
+    /// The control socket asks the application to quit.
+    Quit,
 }
 
 /// A UI request for one more fetch of the endpoint.
 #[derive(Clone, Copy)]
 pub struct Fetch;
+
+/// Mirror of the window state, written by the UI entity and served by the
+/// control socket so background tooling can verify without the compositor.
+#[derive(Clone)]
+pub struct UiSnapshot {
+    pub status: String,
+    pub endpoint: Option<String>,
+    pub body: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub fetches: u64,
+    pub error: Option<String>,
+}
 
 /// The UI-facing half of the service boundary.
 pub struct Service {
@@ -45,31 +60,48 @@ pub struct Service {
     pub events: Receiver<ServiceEvent>,
     /// UI asks the compio thread for work.
     pub requests: Sender<Fetch>,
+    /// Latest UI state, read by the control socket.
+    pub snapshot: Arc<Mutex<Option<UiSnapshot>>>,
 }
 
-/// Spawns the compio thread and returns its UI-facing channels.
+/// Spawns the compio thread and returns its UI-facing handles.
 pub fn spawn() -> Service {
     let (events, event_rx) = unbounded();
     let (request_tx, requests) = unbounded();
+    let snapshot = Arc::new(Mutex::new(None));
+    let thread_snapshot = Arc::clone(&snapshot);
+    let thread_fetches = request_tx.clone();
     std::thread::Builder::new()
         .name("compio".into())
-        .spawn(move || run(events, requests))
+        .spawn(move || run(events, requests, thread_fetches, thread_snapshot))
         .expect("spawn the compio service thread");
     Service {
         events: event_rx,
         requests: request_tx,
+        snapshot,
     }
 }
 
-fn run(events: Sender<ServiceEvent>, requests: Receiver<Fetch>) {
+fn run(
+    events: Sender<ServiceEvent>,
+    requests: Receiver<Fetch>,
+    control_fetches: Sender<Fetch>,
+    snapshot: Arc<Mutex<Option<UiSnapshot>>>,
+) {
     let runtime = compio::runtime::Runtime::new().expect("start the compio runtime");
-    runtime.block_on(drive(events, requests));
+    runtime.block_on(drive(events, requests, control_fetches, snapshot));
 }
 
-/// Serves the endpoint and answers UI fetch requests until the boundary
-/// closes (UI dropped). tako spawns accept work on the ambient runtime, so
-/// this must run inside `block_on` for the whole process lifetime.
-async fn drive(events: Sender<ServiceEvent>, requests: Receiver<Fetch>) {
+/// Serves the endpoint and the control socket, and answers fetch requests
+/// until the boundary closes (UI dropped). tako spawns accept work on the
+/// ambient runtime, so this must run inside `block_on` for the process
+/// lifetime.
+async fn drive(
+    events: Sender<ServiceEvent>,
+    requests: Receiver<Fetch>,
+    control_fetches: Sender<Fetch>,
+    snapshot: Arc<Mutex<Option<UiSnapshot>>>,
+) {
     let listener = compio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("bind the tako endpoint");
@@ -88,7 +120,56 @@ async fn drive(events: Sender<ServiceEvent>, requests: Receiver<Fetch>) {
     });
 
     let server = CompioServer::builder().build();
-    let _server = server.spawn_http(listener, router);
+    let _endpoint = server.spawn_http(listener, router);
+
+    let mut control = Router::new();
+    control.get("/m0/state", {
+        let snapshot = Arc::clone(&snapshot);
+        move || {
+            let snapshot = Arc::clone(&snapshot);
+            async move { Json(state_json(&snapshot)) }
+        }
+    });
+    control.post("/m0/fetch", {
+        let control_fetches = control_fetches.clone();
+        move || {
+            let control_fetches = control_fetches.clone();
+            async move {
+                if control_fetches.try_send(Fetch).is_ok() {
+                    (StatusCode::OK, Json(r#"{"queued":true}"#.to_owned()))
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(r#"{"queued":false}"#.to_owned()),
+                    )
+                }
+            }
+        }
+    });
+    control.post("/m0/quit", {
+        let events = events.clone();
+        move || {
+            let events = events.clone();
+            async move {
+                if events.try_send(ServiceEvent::Quit).is_ok() {
+                    (StatusCode::OK, Json(r#"{"quitting":true}"#.to_owned()))
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(r#"{"quitting":false}"#.to_owned()),
+                    )
+                }
+            }
+        }
+    });
+
+    if let Err(error) = server
+        .try_spawn_unix_http(control_socket_path(), control)
+        .await
+    {
+        // The endpoint still serves; background tooling just has no handle.
+        eprintln!("rchat-blazar: control socket unavailable: {error}");
+    }
     let _ = events.send(ServiceEvent::Listening { addr }).await;
 
     let mut seq = 0u64;
@@ -114,6 +195,35 @@ async fn drive(events: Sender<ServiceEvent>, requests: Receiver<Fetch>) {
                     .await;
             }
         }
+    }
+}
+
+/// Control socket under the runtime dir; one process owns the fixed name per
+/// user, so a second instance fails to bind instead of shadowing the first.
+fn control_socket_path() -> PathBuf {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    base.join("rchat-blazar-m0.sock")
+}
+
+/// JSON view of the mirrored UI state; poisoned locks mean a UI-thread panic,
+/// and stale data is still the best available answer.
+fn state_json(snapshot: &Mutex<Option<UiSnapshot>>) -> String {
+    let state = snapshot
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match state.as_ref() {
+        Some(state) => serde_json::json!({
+            "status": state.status,
+            "endpoint": state.endpoint,
+            "body": state.body,
+            "latency_ms": state.latency_ms,
+            "fetches": state.fetches,
+            "error": state.error,
+        })
+        .to_string(),
+        None => r#"{"status":"no window reported yet"}"#.to_owned(),
     }
 }
 

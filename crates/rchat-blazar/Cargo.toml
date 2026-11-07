@@ -5,10 +5,11 @@ edition.workspace = true
 
 [dependencies]
 # Runtime-agnostic channels carry events and requests across the
-# compio/GPUI boundary (DECL0001: channels, not nested executors).
+# compio/GPUI boundary (channels, not nested executors).
 async-channel = "2.5"
 compio = { version = "0.19", features = ["macros", "net", "time"] }
 gpui = "0.2.2"
+serde_json = "1"
 tako-rs = { version = "2.6", default-features = false, features = ["compio"] }
 
 [lints]

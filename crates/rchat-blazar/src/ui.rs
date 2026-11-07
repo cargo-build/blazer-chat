@@ -5,12 +5,14 @@
 //! arrive on the foreground executor through a `WeakEntity` pump, and clicks
 //! push [`Fetch`] requests back. The channel never blocks the frame.
 
+use std::sync::{Arc, Mutex};
+
 use gpui::{
     App, Application, Bounds, Context, SharedString, Window, WindowBounds, WindowOptions, div,
     prelude::*, px, rgb, size,
 };
 
-use crate::service::{self, Fetch, Service, ServiceEvent};
+use crate::service::{self, Fetch, Service, ServiceEvent, UiSnapshot};
 
 /// Wayland app-id of the M0 surface.
 const APP_ID: &str = "rchat-blazar";
@@ -32,6 +34,7 @@ struct M0Root {
     fetches: u64,
     error: Option<SharedString>,
     requests: async_channel::Sender<Fetch>,
+    snapshot: Arc<Mutex<Option<UiSnapshot>>>,
 }
 
 pub fn run() {
@@ -71,6 +74,10 @@ impl M0Root {
         // the window lives; a failed upgrade means the window closed.
         cx.spawn(async move |root, cx| {
             while let Ok(event) = service.events.recv().await {
+                if let ServiceEvent::Quit = event {
+                    let _ = cx.update(|app| app.quit());
+                    break;
+                }
                 if root.update(cx, |state, cx| state.apply(event, cx)).is_err() {
                     break;
                 }
@@ -86,7 +93,25 @@ impl M0Root {
             fetches: 0,
             error: None,
             requests: service.requests,
+            snapshot: service.snapshot,
         }
+    }
+
+    /// Mirrors the entity into the control-socket snapshot. The UI thread
+    /// holds the lock only for the store, never across a frame.
+    fn mirror(&self) {
+        let state = UiSnapshot {
+            status: self.status.to_string(),
+            endpoint: self.endpoint.as_ref().map(ToString::to_string),
+            body: self.body.clone(),
+            latency_ms: self.latency_ms,
+            fetches: self.fetches,
+            error: self.error.as_ref().map(ToString::to_string),
+        };
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(state);
     }
 
     fn apply(&mut self, event: ServiceEvent, cx: &mut Context<Self>) {
@@ -111,7 +136,9 @@ impl M0Root {
                 self.error = Some(message.into());
                 self.status = "fetch failed".into();
             }
+            ServiceEvent::Quit => return, // the pump quits before apply
         }
+        self.mirror();
         cx.notify();
     }
 
@@ -121,40 +148,40 @@ impl M0Root {
             cx.notify();
         }
     }
+}
 
-    fn stat(label: &str, value: impl IntoElement) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_0p5()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child(label.to_owned()),
-            )
-            .child(div().text_sm().child(value))
-    }
+fn stat(label: &str, value: impl IntoElement) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child(label.to_owned()),
+        )
+        .child(div().text_sm().child(value))
+}
 
-    fn panel(title: &str, content: impl IntoElement) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .gap_2()
-            .p_3()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .rounded_md()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child(title.to_owned()),
-            )
-            .child(content)
-    }
+fn panel(title: &str, content: impl IntoElement) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .gap_2()
+        .p_3()
+        .bg(rgb(PANEL))
+        .border_1()
+        .border_color(rgb(BORDER))
+        .rounded_md()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child(title.to_owned()),
+        )
+        .child(content)
 }
 
 impl gpui::Render for M0Root {
@@ -190,18 +217,9 @@ impl gpui::Render for M0Root {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(
-                        div()
-                            .text_xl()
-                            .child("rchat-blazar — M0 wire-up"),
-                    )
+                    .child(div().text_xl().child("rchat-blazar — M0 wire-up"))
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .child(endpoint),
-                    ),
+                    .child(div().text_sm().text_color(rgb(MUTED)).child(endpoint)),
             )
             .child(
                 div()
