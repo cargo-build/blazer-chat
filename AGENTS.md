@@ -21,13 +21,23 @@ Rust authoring skills first — `~/.agents/skills/rust-best-practices/SKILL.md`
 (BeautifulRust) — and keep this repository's stack, lint and behavior
 contracts over generic style advice.
 
-**Required skills — use with these exact paths:**
+**Required Rust skills — `~/.agents/skills/<name>/SKILL.md`, use by path:**
 
-- Rust authoring: `~/.agents/skills/rust-best-practices/SKILL.md`
-- Operator Rust policy: `~/.agents/skills/rust-operator-style/SKILL.md`
-- Rust review: `~/.agents/skills/rust-review/SKILL.md`
-- Porting protocol logic from other languages:
-  `~/.agents/skills/rust-port/SKILL.md`
+| Skill | When |
+|---|---|
+| `rust-best-practices` | always, before writing or refactoring any Rust code |
+| `rust-operator-style` | operator policy: configuration contracts, style precedence |
+| `rust-api-design` | designing public APIs, crates, traits |
+| `rust-code-quality-guide` | conversions, required values, error boundaries, lint exceptions |
+| `rust-code-review` | reviewing diffs and PRs |
+| `rust-review` | whole-crate or module review |
+| `rust-ffi` | C/C++ interop, bindgen, JNI, memory conversion |
+| `rust-port` | porting protocol logic from other languages |
+| `rust-unsafe` | unsafe code, raw pointers, FFI soundness |
+| `rust-skills` | legacy 265-rule bundle — explicit request only |
+
+**Required non-Rust skills — use with these exact paths:**
+
 - Protocol reverse engineering (Rocket.Chat facts):
   `~/.config/opencode/skills/reverse-engineer-anything/SKILL.md`
 
