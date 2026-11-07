@@ -51,6 +51,12 @@ stack, lint and behavior contracts override generic style advice.**
 - Protocol reverse engineering (Rocket.Chat facts):
   `~/.config/opencode/skills/reverse-engineer-anything/SKILL.md`
 
-**GPUI pin:** the published `gpui` crate starts with `Application::new()`;
-Zed `main` splits `gpui`/`gpui_platform` and starts differently. Never mix
-the two.
+**GPUI stack (bezel-gpui, zed snapshot f16f96):** gpui and its platform
+backend are two crates — `bezel-gpui` (lib name `gpui`) plus
+`bezel-gpui-platform` with the `wayland` feature (DECL0002). Bootstrap
+ONLY through `Application::with_platform(gpui_platform::current_platform(
+false))` — never `gpui_platform::application()`, which attaches a
+Reqwest HTTP client that spawns a hidden Tokio runtime (DECL0001: one
+owner per layer; all app I/O belongs to compio, and the UI loads no
+network images through gpui). Keep `bezel-gpui` and
+`bezel-gpui-platform` on the same `+zed.<rev>` version.

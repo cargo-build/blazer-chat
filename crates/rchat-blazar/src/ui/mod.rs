@@ -6,8 +6,10 @@ mod input;
 mod markdown;
 mod root;
 
-use gpui::{App, Bounds, Focusable, WindowBounds, WindowOptions, actions, prelude::*, px, size};
-use gpui_platform::application;
+use gpui::{
+    App, Application, Bounds, Focusable, WindowBounds, WindowOptions, actions, prelude::*, px, size,
+};
+use gpui_platform::current_platform;
 
 use crate::rc::RcSettings;
 use input::{
@@ -21,7 +23,13 @@ actions!(zoom, [ZoomIn, ZoomOut, ZoomReset]);
 const APP_ID: &str = "rchat-blazar";
 
 pub fn run(settings: RcSettings) {
-    application().run(|cx: &mut App| {
+    // Bootstrap without the platform crate's HTTP client: its
+    // `application()` attaches a Reqwest client whose constructor
+    // spawns a hidden Tokio runtime — a third executor, against
+    // DECL0001 (one owner per layer; all app I/O belongs to compio).
+    // The UI never loads network images through gpui: emoji, avatars
+    // and attachments land on disk via the compio client first.
+    Application::with_platform(current_platform(false)).run(|cx: &mut App| {
         let service = crate::app::spawn(settings);
 
         cx.bind_keys([
