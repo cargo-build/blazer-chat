@@ -3,8 +3,8 @@
 //! push commands back.
 
 use gpui::{
-    Context, Entity, FocusHandle, Focusable, FontWeight, SharedString, Window, div, img,
-    prelude::*, px, rgb, uniform_list,
+    Context, Entity, FocusHandle, Focusable, FontWeight, ListAlignment, ListState, SharedString,
+    Window, div, img, list, prelude::*, px, rgb, uniform_list,
 };
 use std::sync::{Arc, Mutex};
 
@@ -28,6 +28,8 @@ pub(crate) struct ChatRoot {
     focus: FocusHandle,
     /// Render views of the active room's messages, rebuilt on events.
     views: Vec<MessageView>,
+    /// Virtualized pane state: only visible rows materialize.
+    messages_list: ListState,
     /// `(room_id, msg_id)` while the composer edits an existing message.
     editing: Option<(String, String)>,
 }
@@ -78,6 +80,7 @@ impl ChatRoot {
             composer: cx.new(|cx| TextInput::new("Message…", cx)),
             focus: cx.focus_handle(),
             views: Vec::new(),
+            messages_list: ListState::new(0, ListAlignment::Bottom, px(64.)),
             editing: None,
         }
     }
@@ -120,6 +123,7 @@ impl ChatRoot {
                     .collect(),
             })
             .collect();
+        self.messages_list.reset(self.views.len());
     }
 
     /// Mirrors the entity into the control-socket snapshot. The UI thread
@@ -289,80 +293,73 @@ impl gpui::Render for ChatRoot {
                 .collect::<Vec<_>>()
         });
 
-        // Actions live in a strip revealed on row hover; each row is a
-        // named group so the strip can react to it.
+        // The pane virtualizes: `list` materializes only the visible
+        // rows, pins to the newest while the user is at the bottom
+        // (ListAlignment::Bottom), and resets when the count changes.
         let this = cx.entity();
-        let rows = self
-            .views
-            .iter()
-            .map(|view| {
-                let this = this.clone();
-                let room_id = view.room_id.clone();
-                let msg_id = view.id.clone();
-                let edit_text = view.text.clone();
-                let editing_this = matches!(
-                    self.editing.as_ref(),
-                    Some((room, msg)) if *room == room_id && *msg == msg_id
-                );
-                let badges = div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(view.reactions.iter().map(|(name, count)| {
-                        div()
-                            .px_1()
-                            .rounded_xs()
-                            .bg(rgb(PANEL))
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(SharedString::from(format!("{name} ×{count}")))
-                    }));
-                div()
-                    .id(SharedString::from(format!("msg-{msg_id}")))
-                    .group("msg")
-                    .flex()
-                    .gap_2()
-                    .items_start()
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .child(SharedString::from(view.ts.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_sm()
-                            .text_color(rgb(MUTED))
-                            .child(SharedString::from(view.sender.clone())),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(message_element(view))
-                            .child(badges),
-                    )
-                    .child(action_strip(ActionContext {
-                        this,
-                        room_id,
-                        msg_id,
-                        edit_text,
-                        editing_this,
-                    }))
-            })
-            .collect::<Vec<_>>();
-        let messages = div()
-            .id("messages")
-            .flex()
-            .flex_col()
-            .gap_1()
-            .overflow_y_scroll()
-            .children(rows);
+        let state = self.messages_list.clone();
+        let messages = list(state, move |index, _window, cx| {
+            let root = this.read(cx);
+            let view = &root.views[index];
+            let room_id = view.room_id.clone();
+            let msg_id = view.id.clone();
+            let edit_text = view.text.clone();
+            let editing_this = matches!(
+                root.editing.as_ref(),
+                Some((room, msg)) if *room == room_id && *msg == msg_id
+            );
+            let badges = div()
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .children(view.reactions.iter().map(|(name, count)| {
+                    div()
+                        .px_1()
+                        .rounded_xs()
+                        .bg(rgb(PANEL))
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(SharedString::from(format!("{name} ×{count}")))
+                }));
+            div()
+                .id(SharedString::from(format!("msg-{msg_id}")))
+                .group("msg")
+                .flex()
+                .gap_2()
+                .items_start()
+                .child(
+                    div()
+                        .flex_none()
+                        .text_sm()
+                        .text_color(rgb(MUTED))
+                        .child(SharedString::from(view.ts.clone())),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_sm()
+                        .text_color(rgb(MUTED))
+                        .child(SharedString::from(view.sender.clone())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(message_element(view))
+                        .child(badges),
+                )
+                .child(action_strip(ActionContext {
+                    this: this.clone(),
+                    room_id,
+                    msg_id,
+                    edit_text,
+                    editing_this,
+                }))
+                .into_any_element()
+        });
 
         div()
             .flex()
