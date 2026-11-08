@@ -33,5 +33,44 @@ clippy:
     cargo clippy --workspace --all-targets -j 2 -- -D warnings
 
 # Everything a change must pass before it lands.
-gate: fmt-check clippy test
+gate: fmt-check clippy test api-check
     @echo "gate green"
+
+# Fail the gate if client code calls an endpoint missing from the API
+# contract, or if the Swagger page drifted from openapi.json.
+api-check:
+    #!/usr/bin/env python3
+    import json, pathlib, re
+
+    spec = json.loads(pathlib.Path("docs/api/openapi.json").read_text())
+    paths = set(spec["paths"])
+
+    found = set()
+    for f in pathlib.Path("crates").rglob("*.rs"):
+        if "fixtures" in f.parts:
+            continue
+        found |= set(re.findall(r"/api/v1/[A-Za-z]+(?:\.[A-Za-z]+)*", f.read_text()))
+    # History endpoints are router arms built dynamically (kind c/p/d).
+    found |= {"/api/v1/channels.history", "/api/v1/groups.history", "/api/v1/im.history"}
+    # Static asset routes with rust-format placeholders in the code.
+    found |= {"/file-upload/{fileId}/{name}", "/avatar/{username}"}
+
+    def documented(endpoint: str) -> bool:
+        return any(
+            sp == endpoint or sp.startswith(endpoint + "/") for sp in paths
+        ) or any(
+            sp.split("{")[0].rstrip("/") == endpoint for sp in paths
+        )
+
+    missing = sorted(e for e in found if not documented(e))
+    assert not missing, f"endpoints missing from docs/api/openapi.json: {missing}"
+
+    html = pathlib.Path("docs/api/index.html").read_text()
+    match = re.search(r"const spec = (\{.*?\});\n", html, re.S)
+    assert match, "index.html lost the inlined spec"
+    assert json.loads(match.group(1)) == spec, "index.html spec drifted from openapi.json"
+    print(f"api-check: {len(found)} endpoints documented, swagger in sync")
+
+# Serve the API contract (Swagger UI) at http://localhost:8321.
+swagger:
+    python3 -m http.server 8321 --directory docs/api

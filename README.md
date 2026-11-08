@@ -39,3 +39,16 @@ toolchain.
 A local server for live testing: `docker compose -f dev/docker-compose.yml up
 -d`, then `export RCHAT_USER=... RCHAT_PASSWORD=...` and point `public.toml`
 at `http://127.0.0.1:3000`.
+
+## API contract
+
+The Rocket.Chat REST subset this client consumes is pinned as an
+OpenAPI 3.0 document: [`docs/api/openapi.json`](docs/api/openapi.json).
+Open the Swagger UI by double-clicking
+[`docs/api/index.html`](docs/api/index.html) (the spec is inlined; the
+page needs network access only for the swagger-ui CDN assets), or serve
+it with `just swagger` at http://localhost:8321.
+
+`just api-check` (part of `just gate`) fails when client code calls an
+endpoint missing from the spec, or when the Swagger page drifts from
+`openapi.json`.
