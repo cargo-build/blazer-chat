@@ -302,10 +302,14 @@ impl ChatRoot {
             self.rows.push(PaneRow::Message { view_index });
         }
         // Prepending an older slice keeps the scroll anchor on the same
-        // message (splice); everything else resets.
+        // message (splice); everything else resets. The uniform height
+        // hint matters: with all-unknown heights the content height is
+        // 0 at reset, so scroll_to_end anchors to nothing and the
+        // viewport lands in blank space (observed on a real room).
         let count = self.rows.len();
         if switched || at_bottom {
-            self.messages_list.reset(count);
+            self.messages_list
+                .reset_with_uniform_height(count, px(64.0));
             self.messages_list.scroll_to_end();
             self.pinned_room = self.state.active_room.clone();
         } else if count > self.messages_list.item_count() {
@@ -313,8 +317,8 @@ impl ChatRoot {
             // Older history prepends rows, so the delta lands at the top.
             self.messages_list.splice(0..0, added);
         } else {
-            self.messages_list.reset(count);
-            self.messages_list.remeasure();
+            self.messages_list
+                .reset_with_uniform_height(count, px(64.0));
         }
         self.views_version = self.state.messages_version;
         self.views_emoji_version = self.state.emoji_version;
