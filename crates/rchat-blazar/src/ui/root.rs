@@ -326,6 +326,9 @@ impl ChatRoot {
     }
 
     fn open_room(&mut self, room_id: String, cx: &mut Context<Self>) {
+        // Clicking a room is a navigation out of any open thread —
+        // clear immediately (the folds clear again authoritatively).
+        self.state.open_thread = None;
         let _ = self.commands.try_send(ChatCommand::OpenRoom { room_id });
         cx.notify();
     }
