@@ -276,13 +276,23 @@ impl<T: Transport> RcClient<T> {
         let body = self
             .call("GET", "/api/v1/subscriptions.get", None, true)
             .await?;
-        if let Ok(parsed) = Self::parse::<SubscriptionsGetResponse>(&body, "subscriptions.get") {
-            for room in &mut rooms {
-                if let Some(sub) = parsed.update.iter().find(|sub| sub.room_id == room.id)
-                    && let Some(unread) = sub.unread
-                {
-                    room.unread = unread;
+        match Self::parse::<SubscriptionsGetResponse>(&body, "subscriptions.get") {
+            Ok(parsed) => {
+                let mut seeded = 0usize;
+                for room in &mut rooms {
+                    if let Some(sub) = parsed.update.iter().find(|sub| sub.room_id == room.id)
+                        && let Some(unread) = sub.unread
+                    {
+                        room.unread = unread;
+                        seeded += 1;
+                    }
                 }
+                eprintln!("blazer-chat: unread seeded for {seeded} rooms");
+            }
+            // A shape change here silently zeroes every badge (the
+            // response is large and the failure was invisible before).
+            Err(error) => {
+                eprintln!("blazer-chat: subscriptions.get did not parse: {error}");
             }
         }
         Ok(rooms)

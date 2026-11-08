@@ -820,6 +820,7 @@ impl gpui::Render for ChatRoot {
                         .overflow_hidden()
                         .cursor_pointer()
                         .when(selected, |row| row.bg(rgb(ACCENT)))
+                        .when(selected, |row| row.aria_selected(true))
                         .hover(|style| style.bg(rgb(BORDER)))
                         .on_click(move |_, _, cx| {
                             this.update(cx, |chat, cx| chat.open_room(room_id.clone(), cx));
@@ -849,7 +850,18 @@ impl gpui::Render for ChatRoot {
                                                 .text_xs()
                                                 .text_color(rgb(MUTED))
                                                 .child(SharedString::from(pretty_time(ts)))
-                                        })),
+                                        }))
+                                        .when(unread > 0, |line| {
+                                            line.child(
+                                                div()
+                                                    .flex_none()
+                                                    .px_1()
+                                                    .rounded_xs()
+                                                    .bg(rgb(ACCENT))
+                                                    .text_xs()
+                                                    .child(SharedString::from(unread.to_string())),
+                                            )
+                                        }),
                                 )
                                 .children(room.preview.as_ref().map(|(sender, text)| {
                                     div()
@@ -860,19 +872,6 @@ impl gpui::Render for ChatRoot {
                                         .child(SharedString::from(format!("{sender}: {text}")))
                                 })),
                         )
-                        // Unread badge: count from the subscriptions stream.
-                        .when(unread > 0, |row| {
-                            row.child(
-                                div().flex_none().items_start().child(
-                                    div()
-                                        .px_1()
-                                        .rounded_xs()
-                                        .bg(rgb(ACCENT))
-                                        .text_xs()
-                                        .child(SharedString::from(unread.to_string())),
-                                ),
-                            )
-                        })
                 })
                 .collect::<Vec<_>>()
         })
