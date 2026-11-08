@@ -18,7 +18,7 @@ test:
 
 # Run the application.
 run *args:
-    cargo run -p rchat-blazar -j 2 -- {{args}}
+    cargo run -p blazer-chat -j 2 -- {{args}}
 
 # Format the tree.
 fmt:

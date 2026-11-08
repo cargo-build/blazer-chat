@@ -6,7 +6,7 @@
 //! its `compio::runtime::Runtime`; GPUI never blocks on it. Both directions
 //! cross through `async-channel`, which is executor-agnostic — channels, not
 //! nested executors. tako serves the control socket
-//! (`$XDG_RUNTIME_DIR/rchat-blazar.sock`) so background tooling can drive and
+//! (`$XDG_RUNTIME_DIR/blazer-chat.sock`) so background tooling can drive and
 //! verify the app without the compositor.
 
 use std::sync::{Arc, Mutex};
@@ -697,7 +697,7 @@ async fn drive(
     let store = match Store::open() {
         Ok(store) => Some(std::sync::Arc::new(store)),
         Err(error) => {
-            eprintln!("rchat-blazar: local store unavailable: {error}");
+            eprintln!("blazer-chat: local store unavailable: {error}");
             None
         }
     };
@@ -756,7 +756,7 @@ async fn drive(
                         events.clone(),
                     );
                 } else {
-                    eprintln!("rchat-blazar: live layer disabled: no stored session");
+                    eprintln!("blazer-chat: live layer disabled: no stored session");
                 }
             }
             ChatEvent::Messages { room_id, .. } => {
@@ -796,7 +796,7 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                 if let Some(store) = store
                     && let Err(error) = store.save_session(&session)
                 {
-                    eprintln!("rchat-blazar: session not stored: {error}");
+                    eprintln!("blazer-chat: session not stored: {error}");
                 }
                 ChatEvent::LoggedIn {
                     username: session.username,
@@ -810,7 +810,7 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                 if let Some(store) = store
                     && let Err(error) = store.save_rooms(&rooms)
                 {
-                    eprintln!("rchat-blazar: rooms not cached: {error}");
+                    eprintln!("blazer-chat: rooms not cached: {error}");
                 }
                 ChatEvent::Rooms { rooms }
             }
@@ -838,12 +838,12 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                 // counting this room. Cosmetic — a refusal is logged, not
                 // banner-worthy.
                 if let Err(error) = client.mark_read(&room_id).await {
-                    eprintln!("rchat-blazar: mark read: {error}");
+                    eprintln!("blazer-chat: mark read: {error}");
                 }
                 if let Some(store) = store
                     && let Err(error) = store.save_messages(&room_id, &messages)
                 {
-                    eprintln!("rchat-blazar: messages not cached: {error}");
+                    eprintln!("blazer-chat: messages not cached: {error}");
                 }
                 // Inline image previews: fetch into the cache; a chip
                 // remains the fallback for anything that fails.
@@ -859,7 +859,7 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                                     }
                                 }
                                 Err(error) => {
-                                    eprintln!("rchat-blazar: preview {}: {error}", file.name)
+                                    eprintln!("blazer-chat: preview {}: {error}", file.name)
                                 }
                             }
                         }
@@ -932,7 +932,7 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             if let Some(store) = store
                 && let Err(error) = store.clear_session()
             {
-                eprintln!("rchat-blazar: stored session not cleared: {error}");
+                eprintln!("blazer-chat: stored session not cleared: {error}");
             }
             ChatEvent::LoggedOut
         }
@@ -965,7 +965,7 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                                         }
                                     }
                                     Err(error) => {
-                                        eprintln!("rchat-blazar: preview {}: {error}", file.name)
+                                        eprintln!("blazer-chat: preview {}: {error}", file.name)
                                     }
                                 }
                             }
@@ -999,7 +999,7 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                 if let Some(path) = store
                     .avatar_path(&username)
                     .map_err(|error| {
-                        eprintln!("rchat-blazar: avatar cache: {error}");
+                        eprintln!("blazer-chat: avatar cache: {error}");
                     })
                     .ok()
                     .flatten()

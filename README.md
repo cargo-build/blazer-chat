@@ -1,4 +1,4 @@
-# rchat-blazar
+# blazer-chat
 
 A Rocket.Chat-compatible desktop client: native Wayland interface, io_uring
 networking. License: Apache-2.0.
@@ -12,7 +12,7 @@ executors. The GUI is a native Wayland surface, never XWayland.
 ## Layout
 
 ```
-crates/rchat-blazar/
+crates/blazer-chat/
   src/main.rs          entry point: compio thread + GPUI loop, channels across
   src/settings.rs      AppSettings <- public.toml (server url; no secrets)
   src/http.rs          transport layer: HTTP/1.1 on compio behind `Transport`

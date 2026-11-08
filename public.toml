@@ -1,4 +1,4 @@
-# Public, non-secret settings of rchat-blazar.
+# Public, non-secret settings of blazer-chat.
 # Credentials never go here: use the RCHAT_USER / RCHAT_PASSWORD environment
 # variables or the control socket (POST /login {user, password}).
 # Point [server].url at your Rocket.Chat instance; the RCHAT_URL environment

@@ -1275,7 +1275,7 @@ impl gpui::Render for ChatRoot {
                             .text_lg()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(TEXT))
-                            .child("rchat-blazar"),
+                            .child("blazer-chat"),
                     )
                     .child(div().flex_1())
                     .child(div().flex_none().flex().w(px(480.0)).child(search_strip))

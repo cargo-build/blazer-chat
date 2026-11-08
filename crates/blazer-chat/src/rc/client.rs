@@ -441,7 +441,7 @@ impl<T: Transport> RcClient<T> {
             .unwrap_or("file")
             .to_owned();
         let boundary = format!(
-            "rchat-blazar-{}",
+            "blazer-chat-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|since| since.subsec_nanos())

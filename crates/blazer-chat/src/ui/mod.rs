@@ -20,7 +20,7 @@ use input::{
 actions!(zoom, [ZoomIn, ZoomOut, ZoomReset]);
 
 /// Wayland app-id of the surface.
-const APP_ID: &str = "rchat-blazar";
+const APP_ID: &str = "blazer-chat";
 
 pub fn run(settings: RcSettings) {
     // Bootstrap without the platform crate's HTTP client: its
@@ -62,7 +62,7 @@ pub fn run(settings: RcSettings) {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(gpui::TitlebarOptions {
-                        title: Some("rchat-blazar".into()),
+                        title: Some("blazer-chat".into()),
                         ..Default::default()
                     }),
                     app_id: Some(APP_ID.to_owned()),

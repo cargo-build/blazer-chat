@@ -1,4 +1,4 @@
-# AGENTS.md — rchat-blazar
+# AGENTS.md — blazer-chat
 
 Nested repository of the wrapper layout: this repo owns its own code and
 history; the wrapper around it owns coordination (issues, journals, rules,

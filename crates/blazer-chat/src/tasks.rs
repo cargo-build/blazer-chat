@@ -70,7 +70,7 @@ pub fn spawn_live(
             match attempt.await {
                 Err(_elapsed) => {
                     eprintln!(
-                        "rchat-blazar: live connect timed out, retrying in {}s",
+                        "blazer-chat: live connect timed out, retrying in {}s",
                         backoff.as_secs()
                     );
                     compio::runtime::time::sleep(backoff).await;
@@ -82,7 +82,7 @@ pub fn spawn_live(
                         if let Some(room) = watched.clone()
                             && let Err(error) = live.watch(&room).await
                         {
-                            eprintln!("rchat-blazar: resubscribe failed: {error}");
+                            eprintln!("blazer-chat: resubscribe failed: {error}");
                         }
                         let _ = events.send(ChatEvent::LiveStatus(true)).await;
                         let result = live
@@ -95,7 +95,7 @@ pub fn spawn_live(
                             backoff = Duration::from_secs(1);
                         }
                         eprintln!(
-                            "rchat-blazar: live connection lost ({result:?}), retrying in {}s",
+                            "blazer-chat: live connection lost ({result:?}), retrying in {}s",
                             backoff.as_secs()
                         );
                         let _ = events.send(ChatEvent::LiveStatus(false)).await;
@@ -104,7 +104,7 @@ pub fn spawn_live(
                     }
                     Err(error) => {
                         eprintln!(
-                            "rchat-blazar: live connect failed ({error}), retrying in {}s",
+                            "blazer-chat: live connect failed ({error}), retrying in {}s",
                             backoff.as_secs()
                         );
                         compio::runtime::time::sleep(backoff).await;
@@ -137,7 +137,7 @@ pub fn spawn_emoji(
         let fresh = match client.emoji_custom_list().await {
             Ok(fresh) => fresh,
             Err(error) => {
-                eprintln!("rchat-blazar: emoji list unavailable: {error}");
+                eprintln!("blazer-chat: emoji list unavailable: {error}");
                 return;
             }
         };
@@ -156,7 +156,7 @@ pub fn spawn_emoji(
         let dir = match Store::emoji_dir() {
             Ok(dir) => dir,
             Err(error) => {
-                eprintln!("rchat-blazar: {error}");
+                eprintln!("blazer-chat: {error}");
                 return;
             }
         };
@@ -168,14 +168,14 @@ pub fn spawn_emoji(
             match client.emoji_image(&emoji.name, &emoji.extension).await {
                 Ok(bytes) => {
                     if let Err(error) = std::fs::write(&path, bytes) {
-                        eprintln!("rchat-blazar: emoji image {}: {error}", path.display());
+                        eprintln!("blazer-chat: emoji image {}: {error}", path.display());
                     }
                 }
-                Err(error) => eprintln!("rchat-blazar: emoji {}: {error}", emoji.name),
+                Err(error) => eprintln!("blazer-chat: emoji {}: {error}", emoji.name),
             }
         }
         if let Err(error) = store.save_emoji(&merged) {
-            eprintln!("rchat-blazar: emoji cache not stored: {error}");
+            eprintln!("blazer-chat: emoji cache not stored: {error}");
         }
 
         let emojis: Vec<(String, String)> = merged

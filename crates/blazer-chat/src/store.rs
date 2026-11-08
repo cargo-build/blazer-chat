@@ -228,7 +228,7 @@ fn store_path() -> Result<PathBuf, String> {
             PathBuf::from(home).join(".local/share")
         }
     };
-    Ok(base.join("rchat-blazar/store.redb"))
+    Ok(base.join("blazer-chat/store.redb"))
 }
 
 #[cfg(test)]
@@ -239,7 +239,7 @@ mod tests {
     fn temp_store() -> Store {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "rchat-blazar-test-{}-{}",
+            "blazer-chat-test-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));

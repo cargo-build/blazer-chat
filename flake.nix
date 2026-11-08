@@ -1,5 +1,5 @@
 {
-  description = "rchat-blazar — build environment for the Rocket.Chat-compatible client";
+  description = "blazer-chat — build environment for the Rocket.Chat-compatible client";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -38,7 +38,7 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          name = "rchat-blazar";
+          name = "blazer-chat";
 
           # The Rust toolchain is the operator's rustup install, never a nixpkgs
           # substitute: `cargo`/`rustc` must be the same build as `clippy`.
@@ -50,7 +50,7 @@
           PKG_CONFIG_PATH = pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" libraries;
 
           shellHook = ''
-            echo "[rchat-blazar] devShell ready - rustup toolchain, GUI libraries, just"
+            echo "[blazer-chat] devShell ready - rustup toolchain, GUI libraries, just"
           '';
         };
 

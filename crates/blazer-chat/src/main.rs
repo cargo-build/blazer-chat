@@ -1,4 +1,4 @@
-//! rchat-blazar — application entry point.
+//! blazer-chat — application entry point.
 //!
 //! Layers, one owner each: [`http`] carries bytes, [`rc`] speaks the
 //! Rocket.Chat REST protocol, [`app`] owns the command/event boundary and
@@ -18,7 +18,7 @@ fn main() {
     let settings = match settings::AppSettings::load() {
         Ok(settings) => settings.server,
         Err(error) => {
-            eprintln!("rchat-blazar: {error}");
+            eprintln!("blazer-chat: {error}");
             std::process::exit(1);
         }
     };

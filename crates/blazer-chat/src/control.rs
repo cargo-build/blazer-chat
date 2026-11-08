@@ -1,4 +1,4 @@
-//! The tako control socket (`$XDG_RUNTIME_DIR/rchat-blazar.sock`): a unix
+//! The tako control socket (`$XDG_RUNTIME_DIR/blazer-chat.sock`): a unix
 //! HTTP surface that lets background tooling drive and verify the app
 //! without the compositor. Every route is a thin enqueue onto the same
 //! command/event channels the UI uses — one boundary, two doors.
@@ -179,7 +179,7 @@ pub async fn serve(
         .try_spawn_unix_http(control_socket_path(), control)
         .await
     {
-        eprintln!("rchat-blazar: control socket unavailable: {error}");
+        eprintln!("blazer-chat: control socket unavailable: {error}");
     }
 }
 
@@ -199,7 +199,7 @@ fn enqueue<T>(queue: &Sender<T>, item: T) -> bool {
 
 fn control_socket_path() -> PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_owned());
-    PathBuf::from(runtime_dir).join("rchat-blazar.sock")
+    PathBuf::from(runtime_dir).join("blazer-chat.sock")
 }
 
 /// JSON view of the snapshot; a poisoned lock degrades to stale data.

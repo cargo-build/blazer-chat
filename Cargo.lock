@@ -1047,6 +1047,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "blazer-chat"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "bezel-gpui",
+ "bezel-gpui-platform",
+ "compio",
+ "compio-ws",
+ "flate2",
+ "futures-lite",
+ "jiff",
+ "redb",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tako-rs",
+ "toml 0.9.12+spec-1.1.0",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "block"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5148,27 +5169,6 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
-]
-
-[[package]]
-name = "rchat-blazar"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "bezel-gpui",
- "bezel-gpui-platform",
- "compio",
- "compio-ws",
- "flate2",
- "futures-lite",
- "jiff",
- "redb",
- "rfd",
- "serde",
- "serde_json",
- "tako-rs",
- "toml 0.9.12+spec-1.1.0",
- "unicode-segmentation",
 ]
 
 [[package]]

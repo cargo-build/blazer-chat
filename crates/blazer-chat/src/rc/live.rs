@@ -851,7 +851,7 @@ mod tests {
             // REST; the live stream must deliver what REST already returned.
             sleep(std::time::Duration::from_secs(1)).await;
             let sent = rc
-                .send(&self_dm, "rchat-blazar live probe")
+                .send(&self_dm, "blazer-chat live probe")
                 .await
                 .expect("rest send");
 
