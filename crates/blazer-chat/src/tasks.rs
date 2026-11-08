@@ -59,6 +59,13 @@ pub fn spawn_live(
         let mut watched: Option<String> = None;
         let _ = events.send(ChatEvent::LiveStatus(false)).await;
         loop {
+            // Logout or a 401 drops the sender: the channel closes and
+            // this task must stop instead of reconnecting with a dead or
+            // foreign session.
+            if receiver.is_closed() {
+                updates.close();
+                break;
+            }
             let started = std::time::Instant::now();
             // The DDP handshake has no built-in deadline; without this
             // wrap a silent server parks the live layer forever (observed

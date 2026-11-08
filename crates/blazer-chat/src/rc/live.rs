@@ -258,11 +258,16 @@ impl DdpLive {
         keepalive: std::time::Duration,
         commands: &Receiver<LiveCommand>,
     ) -> Result<Frame, RcError> {
-        if let Ok(LiveCommand::Watch(room)) = commands.try_recv() {
-            return Ok(Frame::Watch(room));
+        match commands.try_recv() {
+            Ok(LiveCommand::Watch(room)) => return Ok(Frame::Watch(room)),
+            // All senders dropped — logout or a 401 invalidated the
+            // session: stop the connection instead of reading a wire
+            // that nothing consumes anymore.
+            Err(async_channel::TryRecvError::Closed) => {
+                return Err(RcError::Io(std::io::Error::other("live layer closed")));
+            }
+            Err(async_channel::TryRecvError::Empty) => {}
         }
-        // A closed control channel surfaces as a wire closure instead: the
-        // application is gone, the read notices the dropped sender side.
         self.next_wire_frame(keepalive).await
     }
 

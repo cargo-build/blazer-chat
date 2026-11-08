@@ -288,7 +288,11 @@ fn decode_chunked(body: &[u8]) -> Option<Vec<u8>> {
             return Some(out);
         }
         let chunk_start = line_end + 2;
-        if rest.len() < chunk_start + size {
+        // `size` is server-controlled: bound it by the remaining bytes
+        // instead of letting `chunk_start + size` overflow (a huge hex
+        // chunk line used to wrap the arithmetic into a panicking slice).
+        let available = rest.len().checked_sub(chunk_start)?;
+        if size > available {
             return None;
         }
         out.extend_from_slice(&rest[chunk_start..chunk_start + size]);
@@ -336,6 +340,17 @@ mod tests {
     fn rejects_truncated_body() {
         let raw = b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nshort";
         assert!(parse_response(raw).is_err());
+    }
+
+    #[test]
+    fn decode_chunked_rejects_an_overflowing_chunk_size() {
+        // A server-controlled `FFFFFFFFFFFFFFFF` chunk line must be
+        // rejected, not wrap the arithmetic into a panicking slice.
+        assert_eq!(decode_chunked(b"FFFFFFFFFFFFFFFF\r\nx"), None);
+        assert_eq!(
+            decode_chunked(b"5\r\nhello\r\n0\r\n\r\n"),
+            Some(b"hello".to_vec())
+        );
     }
 
     #[test]

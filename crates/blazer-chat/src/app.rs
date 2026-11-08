@@ -157,6 +157,11 @@ pub enum ChatEvent {
     },
     /// The session ended (logout): the UI returns to the logged-out view.
     LoggedOut,
+    /// A 401 invalidated the stored session mid-run: the shell stays up
+    /// and shows the reason; the live layer drops its token.
+    SessionExpired {
+        reason: String,
+    },
     /// The server accepted the presence change.
     PresenceSet {
         status: String,
@@ -263,6 +268,12 @@ impl ChatState {
                 self.messages.clear();
                 self.active_room = None;
                 self.error = None;
+                None
+            }
+            ChatEvent::SessionExpired { reason } => {
+                // The shell stays up (there is no login view yet); the
+                // reason surfaces in the error banner.
+                self.error = Some(reason.clone());
                 None
             }
             ChatEvent::Rooms { rooms } => {
@@ -652,6 +663,21 @@ pub struct ChatService {
     pub snapshot: Arc<Mutex<Option<UiSnapshot>>>,
 }
 
+/// Spawns the live WebSocket and the emoji cache for the stored session.
+/// Used by fresh logins (the loop arm) and by the startup resume, whose
+/// `LoggedIn` event bypasses the loop.
+fn ensure_live(
+    settings: &RcSettings,
+    store: Option<&std::sync::Arc<Store>>,
+    events: &Sender<ChatEvent>,
+) -> Option<Sender<LiveCommand>> {
+    let store = store?;
+    let session = store.load_session()?;
+    let live = spawn_live(settings.clone(), session.clone(), events.clone());
+    spawn_emoji(settings.clone(), session, store.clone(), events.clone());
+    Some(live)
+}
+
 /// Spawns the compio thread and returns its UI-facing handles.
 pub fn spawn(settings: RcSettings) -> ChatService {
     let (events, event_rx) = unbounded();
@@ -720,7 +746,9 @@ async fn drive(
                     origin,
                 })
                 .await;
-            let _ = self_commands.try_send(ChatCommand::RefreshRooms);
+            // The resume path sends its LoggedIn event directly, so the
+            // loop's spawn arm never sees it: start the live layer here.
+            live = ensure_live(&settings_for_live, Some(store), &events);
         }
         if let Some(rooms) = store.load_rooms() {
             let _ = events.send(ChatEvent::Rooms { rooms }).await;
@@ -741,23 +769,15 @@ async fn drive(
         match &event {
             ChatEvent::LoggedOut => live = None,
             ChatEvent::LoggedIn { .. } if live.is_none() => {
-                if let Some(store) = store.as_ref()
-                    && let Some(session) = store.load_session()
-                {
-                    live = Some(spawn_live(
-                        settings_for_live.clone(),
-                        session.clone(),
-                        events.clone(),
-                    ));
-                    spawn_emoji(
-                        settings_for_live.clone(),
-                        session,
-                        store.clone(),
-                        events.clone(),
-                    );
-                } else {
-                    eprintln!("blazer-chat: live layer disabled: no stored session");
+                match ensure_live(&settings_for_live, store.as_ref(), &events) {
+                    Some(live_layer) => live = Some(live_layer),
+                    None => eprintln!("blazer-chat: live layer disabled: no stored session"),
                 }
+            }
+            ChatEvent::SessionExpired { .. } => {
+                // Dropping the sender closes the channel: the live task
+                // observes the closure and stops reconnecting.
+                live = None;
             }
             ChatEvent::Messages { room_id, .. } => {
                 if let Some(live) = live.as_ref() {
@@ -787,6 +807,26 @@ async fn fetch_image_preview(
         .map_err(RcError::Config)
 }
 
+/// Maps a 401 from any client call to a session-invalidating event:
+/// the token is dead, so the process must stop using it (the loop drops
+/// the live layer on [`ChatEvent::SessionExpired`]).
+fn session_expired(
+    store: Option<&Store>,
+    client: &mut RcClient,
+    error: &RcError,
+) -> Option<ChatEvent> {
+    if let RcError::Http { status: 401, body } = error {
+        client.clear_session();
+        if let Some(store) = store {
+            let _ = store.clear_session();
+        }
+        return Some(ChatEvent::SessionExpired {
+            reason: format!("session rejected (401): {body} — log in again"),
+        });
+    }
+    None
+}
+
 /// One command → one event; failures always surface as `Failed`. `store`
 /// persists the session and room cache; a 401 clears the stored session.
 async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatCommand) -> ChatEvent {
@@ -803,7 +843,8 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                     origin: client.origin().to_owned(),
                 }
             }
-            Err(error) => ChatEvent::Failed(error.to_string()),
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
         ChatCommand::RefreshRooms => match client.rooms().await {
             Ok(rooms) => {
@@ -814,15 +855,8 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                 }
                 ChatEvent::Rooms { rooms }
             }
-            Err(RcError::Http { status: 401, body }) => {
-                // The stored token stopped working: forget it and ask for a
-                // fresh login instead of retrying forever.
-                if let Some(store) = store {
-                    let _ = store.clear_session();
-                }
-                ChatEvent::Failed(format!("session rejected (401): {body} — log in again"))
-            }
-            Err(error) => ChatEvent::Failed(error.to_string()),
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
         ChatCommand::OpenRoom { room_id } => {
             // Instant open: the cached slice paints now; the network
@@ -867,7 +901,8 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                 }
                 ChatEvent::Messages { room_id, messages }
             }
-            Err(error) => ChatEvent::Failed(error.to_string()),
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
         ChatCommand::FetchOlder { room_id } => {
             let cursor = store
@@ -876,7 +911,8 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             match cursor {
                 Some(ts) => match client.history_page(&room_id, Some(&ts)).await {
                     Ok(messages) => ChatEvent::OlderMessages { room_id, messages },
-                    Err(error) => ChatEvent::Failed(error.to_string()),
+                    Err(error) => session_expired(store, client, &error)
+                        .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
                 },
                 // Nothing cached: the refresh already covers the slice.
                 None => ChatEvent::OlderMessages {
@@ -887,7 +923,8 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
         }
         ChatCommand::Send { room_id, text } => match client.send(&room_id, &text).await {
             Ok(message) => ChatEvent::Sent { message },
-            Err(error) => ChatEvent::Failed(error.to_string()),
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
         ChatCommand::EditMessage {
             room_id,
@@ -895,12 +932,14 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             text,
         } => match client.update_message(&room_id, &msg_id, &text).await {
             Ok(message) => ChatEvent::MessageUpdated { message },
-            Err(error) => ChatEvent::Failed(error.to_string()),
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
         ChatCommand::DeleteMessage { room_id, msg_id } => {
             match client.delete_message(&room_id, &msg_id).await {
                 Ok(()) => ChatEvent::MessageDeleted { room_id, msg_id },
-                Err(error) => ChatEvent::Failed(error.to_string()),
+                Err(error) => session_expired(store, client, &error)
+                    .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
             }
         }
         ChatCommand::React {
@@ -913,17 +952,20 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                 msg_id,
                 emoji,
             },
-            Err(error) => ChatEvent::Failed(error.to_string()),
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
         ChatCommand::StarMessage { msg_id, star } => {
             match client.star_message(&msg_id, star).await {
                 Ok(()) => ChatEvent::Starred { msg_id, star },
-                Err(error) => ChatEvent::Failed(error.to_string()),
+                Err(error) => session_expired(store, client, &error)
+                    .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
             }
         }
         ChatCommand::SetStatus { status } => match client.set_status(&status).await {
             Ok(()) => ChatEvent::PresenceSet { status },
-            Err(error) => ChatEvent::Failed(error.to_string()),
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
         ChatCommand::Logout => {
             // The session is dead either way: local reset never waits
@@ -939,7 +981,8 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
         ChatCommand::UploadFile { room_id, path, msg } => {
             match client.upload_file(&room_id, &path, &msg).await {
                 Ok(message) => ChatEvent::Sent { message },
-                Err(error) => ChatEvent::Failed(error.to_string()),
+                Err(error) => session_expired(store, client, &error)
+                    .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
             }
         }
         // Local search needs no I/O: the state owns the cache.
@@ -982,7 +1025,8 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                         )),
                     }
                 }
-                Err(error) => ChatEvent::Failed(error.to_string()),
+                Err(error) => session_expired(store, client, &error)
+                    .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
             }
         }
         ChatCommand::CloseThread => ChatEvent::ThreadClosed,
@@ -1021,7 +1065,8 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
             text,
         } => match client.send_thread(&room_id, &tmid, &text).await {
             Ok(message) => ChatEvent::Sent { message },
-            Err(error) => ChatEvent::Failed(error.to_string()),
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
     }
 }
@@ -1068,6 +1113,27 @@ mod tests {
         });
         assert_eq!(state.username.as_deref(), Some("tester"));
         assert!(matches!(follow_up, Some(ChatCommand::RefreshRooms)));
+    }
+
+    #[test]
+    fn session_expired_surfaces_the_reason_but_keeps_the_shell() {
+        let mut state = ChatState::default();
+        state.apply(ChatEvent::LoggedIn {
+            username: "tester".to_owned(),
+            origin: "https://chat.example".to_owned(),
+        });
+        state.apply(ChatEvent::SessionExpired {
+            reason: "session rejected (401): stale — log in again".to_owned(),
+        });
+        assert_eq!(
+            state.error.as_deref(),
+            Some("session rejected (401): stale — log in again")
+        );
+        assert_eq!(
+            state.username.as_deref(),
+            Some("tester"),
+            "the shell stays up"
+        );
     }
 
     #[test]

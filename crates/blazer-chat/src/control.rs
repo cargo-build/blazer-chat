@@ -174,12 +174,26 @@ pub async fn serve(
         }
     });
 
+    // The socket is an unauthenticated local RPC: without
+    // XDG_RUNTIME_DIR there is no private directory to hold it, so the
+    // surface stays off instead of dropping a world-connectable socket
+    // into /tmp.
+    let Some(socket_path) = control_socket_path() else {
+        eprintln!("blazer-chat: control socket disabled: XDG_RUNTIME_DIR is not set");
+        return;
+    };
     let server = CompioServer::builder().build();
     if let Err(error) = server
-        .try_spawn_unix_http(control_socket_path(), control)
+        .try_spawn_unix_http(socket_path.clone(), control)
         .await
     {
         eprintln!("blazer-chat: control socket unavailable: {error}");
+        return;
+    }
+    // The default socket mode is umask-derived and world-connectable on
+    // a shared machine; owner-only keeps the RPC private.
+    if let Err(error) = restrict_socket_permissions(&socket_path) {
+        eprintln!("blazer-chat: control socket permissions: {error}");
     }
 }
 
@@ -197,9 +211,18 @@ fn enqueue<T>(queue: &Sender<T>, item: T) -> bool {
     queue.try_send(item).is_ok()
 }
 
-fn control_socket_path() -> PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_owned());
-    PathBuf::from(runtime_dir).join("blazer-chat.sock")
+/// `None` without `XDG_RUNTIME_DIR`: the surface refuses a world-readable
+/// location such as `/tmp`.
+fn control_socket_path() -> Option<PathBuf> {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    Some(PathBuf::from(runtime_dir).join("blazer-chat.sock"))
+}
+
+/// `0600`: the surface is an unauthenticated RPC, so only the owner may
+/// connect.
+fn restrict_socket_permissions(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 /// JSON view of the snapshot; a poisoned lock degrades to stale data.

@@ -122,6 +122,12 @@ impl<T: Transport> RcClient<T> {
         self.session.as_ref()
     }
 
+    /// Forgets the session without a server roundtrip — the token was
+    /// rejected (401) and must not be reused.
+    pub fn clear_session(&mut self) {
+        self.session = None;
+    }
+
     /// Installs a previously stored session (startup resume).
     pub fn set_session(&mut self, session: Session) {
         self.session = Some(session);
