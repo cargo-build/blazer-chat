@@ -15,6 +15,7 @@ use async_channel::{Receiver, Sender, unbounded};
 use serde::Serialize;
 
 use crate::control;
+use crate::http::Transport;
 use crate::rc::{AttachedFile, LiveCommand, Msg, RcClient, RcError, RcSettings, Room};
 use crate::store::Store;
 use crate::tasks::{spawn_emoji, spawn_live};
@@ -854,8 +855,8 @@ async fn drive(
 
 /// Fetches one image attachment into the cache, returning the path for
 /// the UI. The chip is the fallback when this fails.
-async fn fetch_image_preview(
-    client: &mut RcClient,
+async fn fetch_image_preview<T: Transport>(
+    client: &mut RcClient<T>,
     store: &Store,
     room_id: &str,
     file: &AttachedFile,
@@ -869,12 +870,23 @@ async fn fetch_image_preview(
         .map_err(RcError::Config)
 }
 
+/// The command name when `text` is a slash command (`/cmd params`),
+/// without the leading slash. A bare `/`, a `//`-escaped literal or
+/// plain text is not a command.
+fn slash_command_name(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('/')?;
+    if rest.is_empty() || rest.starts_with('/') {
+        return None;
+    }
+    rest.split_whitespace().next()
+}
+
 /// Maps a 401 from any client call to a session-invalidating event:
 /// the token is dead, so the process must stop using it (the loop drops
 /// the live layer on [`ChatEvent::SessionExpired`]).
-fn session_expired(
+fn session_expired<T: Transport>(
     store: Option<&Store>,
-    client: &mut RcClient,
+    client: &mut RcClient<T>,
     error: &RcError,
 ) -> Option<ChatEvent> {
     if let RcError::Http { status: 401, body } = error {
@@ -891,8 +903,8 @@ fn session_expired(
 
 /// One command → one event; failures always surface as `Failed`. `store`
 /// persists the session and room cache; a 401 clears the stored session.
-async fn execute(
-    client: &mut RcClient,
+async fn execute<T: Transport>(
+    client: &mut RcClient<T>,
     store: Option<&Store>,
     oldest: &mut std::collections::HashMap<String, String>,
     command: ChatCommand,
@@ -994,20 +1006,40 @@ async fn execute(
                 }
             }
         }
-        ChatCommand::Send { room_id, text } => match client.send(&room_id, &text).await {
-            Ok(message) => ChatEvent::Sent { message },
-            Err(error) => session_expired(store, client, &error)
-                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
-        },
+        ChatCommand::Send { room_id, text } => {
+            // Slash commands are server-side methods, never chat text:
+            // posting one raw would drop `/msg bob look here` into the
+            // channel (m12 D1). No command registry exists yet, so
+            // every command is refused locally — nothing hits the wire.
+            if let Some(name) = slash_command_name(&text) {
+                return ChatEvent::Failed(format!(
+                    "slash command /{name} is not supported here yet — nothing was sent"
+                ));
+            }
+            match client.send(&room_id, &text).await {
+                Ok(message) => ChatEvent::Sent { message },
+                Err(error) => session_expired(store, client, &error)
+                    .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
+            }
+        }
         ChatCommand::EditMessage {
             room_id,
             msg_id,
             text,
-        } => match client.update_message(&room_id, &msg_id, &text).await {
-            Ok(message) => ChatEvent::MessageUpdated { message },
-            Err(error) => session_expired(store, client, &error)
-                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
-        },
+        } => {
+            // An edited body starting with `/` is the same defect: it
+            // would land as a slash command on the server (m12 D1).
+            if let Some(name) = slash_command_name(&text) {
+                return ChatEvent::Failed(format!(
+                    "slash command /{name} is not supported here yet — nothing was sent"
+                ));
+            }
+            match client.update_message(&room_id, &msg_id, &text).await {
+                Ok(message) => ChatEvent::MessageUpdated { message },
+                Err(error) => session_expired(store, client, &error)
+                    .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
+            }
+        }
         ChatCommand::DeleteMessage { room_id, msg_id } => {
             match client.delete_message(&room_id, &msg_id).await {
                 Ok(()) => ChatEvent::MessageDeleted { room_id, msg_id },
@@ -1148,6 +1180,7 @@ async fn execute(
 #[allow(clippy::unwrap_used)] // tests assert the expected path
 mod tests {
     use super::*;
+    use crate::rc::client_tests::{FakeTransport, client};
 
     fn room(id: &str, name: &str) -> Room {
         Room {
@@ -1596,5 +1629,45 @@ mod tests {
         assert_eq!(snapshot.rooms, vec!["general".to_owned()]);
         assert_eq!(snapshot.messages, vec!["tester: hello".to_owned()]);
         assert!(snapshot.status.contains("tester"));
+    }
+
+    #[test]
+    fn slash_command_name_ignores_literals() {
+        assert_eq!(slash_command_name("/leave now"), Some("leave"));
+        assert_eq!(slash_command_name("/"), None);
+        assert_eq!(slash_command_name("//not-a-command"), None);
+        assert_eq!(slash_command_name("plain text"), None);
+    }
+
+    #[test]
+    fn slash_commands_are_refused_and_never_reach_the_wire() {
+        let transport = FakeTransport::answering(&[("sendMessage", 200, "{}")]);
+        let probe = transport.clone();
+        let mut rc = client(transport);
+        let mut oldest = std::collections::HashMap::new();
+        let event = futures_lite::future::block_on(execute(
+            &mut rc,
+            None,
+            &mut oldest,
+            ChatCommand::Send {
+                room_id: "GENERAL".to_owned(),
+                text: "/leave now".to_owned(),
+            },
+        ));
+        match &event {
+            ChatEvent::Failed(message) => {
+                assert!(
+                    message.contains("/leave"),
+                    "the reason names the command: {message}"
+                );
+                assert!(message.contains("nothing was sent"));
+            }
+            ChatEvent::Sent { .. } => panic!("a slash command was posted as chat text"),
+            _ => panic!("expected a local refusal, got a different event"),
+        }
+        assert!(
+            !probe.made_request(),
+            "a slash command must never hit the wire as chat text"
+        );
     }
 }

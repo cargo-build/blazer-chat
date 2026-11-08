@@ -13,4 +13,4 @@ pub use types::{
 };
 
 #[cfg(test)]
-mod client_tests;
+pub(crate) mod client_tests;

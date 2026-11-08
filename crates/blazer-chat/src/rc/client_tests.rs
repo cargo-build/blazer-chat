@@ -12,7 +12,7 @@ use std::cell::RefCell;
 /// records the last request for assertions. Clones share the record, so a
 /// test can keep a handle while the client owns another clone.
 #[derive(Clone)]
-struct FakeTransport {
+pub(crate) struct FakeTransport {
     routes: std::rc::Rc<Vec<(String, u16, String)>>,
     last_request: std::rc::Rc<RefCell<Option<String>>>,
 }
@@ -20,7 +20,7 @@ struct FakeTransport {
 impl FakeTransport {
     /// One route per needle: every request whose path contains the needle
     /// gets this status/body.
-    fn answering(routes: &[(&str, u16, &str)]) -> Self {
+    pub(crate) fn answering(routes: &[(&str, u16, &str)]) -> Self {
         Self {
             routes: std::rc::Rc::new(
                 routes
@@ -42,15 +42,33 @@ impl FakeTransport {
             .unwrap_or_else(|| panic!("no route matched the request path: {path}"))
     }
 
-    fn last_request(&self) -> String {
+    pub(crate) fn last_request(&self) -> String {
         self.last_request
             .borrow()
             .clone()
             .expect("a request was made")
     }
+
+    /// Whether any request reached the transport (the no-wire proof for
+    /// refusal paths).
+    pub(crate) fn made_request(&self) -> bool {
+        self.last_request.borrow().is_some()
+    }
 }
 
 impl Transport for FakeTransport {
+    async fn get_bytes(&self, _path: &str) -> std::io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    async fn get_bytes_with_headers(
+        &self,
+        _path: &str,
+        _headers: &[(String, String)],
+    ) -> std::io::Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
     async fn call(&self, request: Request<'_>) -> std::io::Result<Response> {
         let body = request
             .body
@@ -107,7 +125,7 @@ const NOT_ALLOWED_BODY: &str =
 const UNAUTHORIZED_BODY: &str =
     r#"{"status":"error","error":"Unauthorized","message":"Unauthorized"}"#;
 
-fn client(transport: FakeTransport) -> RcClient<FakeTransport> {
+pub(crate) fn client(transport: FakeTransport) -> RcClient<FakeTransport> {
     RcClient::with_transport(RcSettings::default(), transport)
 }
 

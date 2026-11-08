@@ -281,6 +281,11 @@ impl TextInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        // Mouse and IME offsets are derived from the painted text, which
+        // is the placeholder while the content is empty; an unclamped
+        // offset here made the next replace slice out of bounds (the
+        // crash on first click into an empty field).
+        let offset = offset.min(self.content.len());
         self.selected_range = offset..offset;
         cx.notify()
     }
@@ -294,6 +299,12 @@ impl TextInput {
     }
 
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
+        // The painted entry shapes the PLACEHOLDER while the content is
+        // empty — offsets derived from it are indices into a string the
+        // content does not have. No content, no caret offset.
+        if self.content.is_empty() {
+            return 0;
+        }
         let Some(shape) = self.last_shape.as_ref() else {
             return 0;
         };
@@ -323,15 +334,16 @@ impl TextInput {
                         line_height,
                     )
                     .unwrap_or_else(|closest| closest);
-                return (bytes_before + local).min(shape.key.text.len());
+                return (bytes_before + local).min(self.content.len());
             }
             row_top += height;
             bytes_before += shape.line_lens[index] + 1;
         }
-        shape.key.text.len()
+        self.content.len()
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = offset.min(self.content.len());
         if self.selection_reversed {
             self.selected_range.start = offset
         } else {
@@ -464,11 +476,14 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+        let range = safe_range(
+            range_utf16
+                .as_ref()
+                .map(|range_utf16| self.range_from_utf16(range_utf16))
+                .or(self.marked_range.clone())
+                .unwrap_or(self.selected_range.clone()),
+            self.content.len(),
+        );
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -486,11 +501,14 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .or(self.marked_range.clone())
-            .unwrap_or(self.selected_range.clone());
+        let range = safe_range(
+            range_utf16
+                .as_ref()
+                .map(|range_utf16| self.range_from_utf16(range_utf16))
+                .or(self.marked_range.clone())
+                .unwrap_or(self.selected_range.clone()),
+            self.content.len(),
+        );
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -554,6 +572,16 @@ impl TextInput {
             position.y + self.last_line_height * rows_before(&shape.lines, line_index),
         ))
     }
+}
+
+/// A selection range clamped into `len`: mouse and IME offsets are
+/// derived from the painted text (the placeholder while empty), so a
+/// stale or hostile range must degrade to a valid one instead of
+/// panicking the string slice (crash on first click, m12-era).
+fn safe_range(range: Range<usize>, len: usize) -> Range<usize> {
+    let start = range.start.min(len);
+    let end = range.end.min(len);
+    start.min(end)..start.max(end)
 }
 
 /// Wrapped rows a shaped source line occupies.
@@ -1115,5 +1143,20 @@ mod tests {
         assert_eq!(one_line.len(), 1);
         assert_eq!(two_lines.len(), 2);
         assert_eq!(visible_rows(two_lines.len()), 2);
+    }
+
+    #[test]
+    fn safe_range_degrades_stale_caret_offsets() {
+        // The crash: content empty, a caret offset from the 9-byte
+        // placeholder.
+        assert_eq!(safe_range(9..9, 0), 0..0);
+        assert_eq!(safe_range(3..9, 0), 0..0);
+        // Normal selections survive untouched.
+        assert_eq!(safe_range(2..7, 10), 2..7);
+        // An end past the content clamps to it; start wins the order.
+        assert_eq!(safe_range(4..99, 6), 4..6);
+        // A reversed (malformed) range still degrades to a valid span.
+        assert_eq!(safe_range(Range { start: 99, end: 4 }, 6), 4..6);
+        assert_eq!(safe_range(99..99, 6), 6..6);
     }
 }

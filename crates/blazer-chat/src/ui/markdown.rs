@@ -24,6 +24,9 @@ pub enum Span {
     Mention(String),
     /// A custom emoji resolved from the cache: the image path.
     Emoji { path: String },
+    /// A fenced code block: the verbatim body, rendered as its own
+    /// monospace block — markers inside are never styled.
+    CodeBlock { body: String },
 }
 
 /// One open emphasis: the marker that opened it and its contribution.
@@ -101,6 +104,54 @@ const MARKERS: [OpenMarker; 4] = [
 
 /// Parses one line of message text into spans. `emoji_path` resolves a
 /// custom-emoji name to its cached image path; unknown names stay literal.
+/// A message split by [`split_fences`]: prose goes through the inline
+/// parser line by line; fence bodies never do.
+pub enum Segment<'a> {
+    Prose(&'a str),
+    Fence { body: String },
+}
+
+/// Splits a message into prose lines and fenced code blocks. A fence
+/// opens on a line whose trimmed form starts with ``` and runs to the
+/// next such line — or to the end of the text, so an unterminated fence
+/// keeps its body verbatim instead of swallowing nothing. A line that
+/// both opens and closes with ``` on the same line stays prose (inline
+/// code). The fence language tag after the backticks is ignored for
+/// now.
+pub fn split_fences(text: &str) -> Vec<Segment<'_>> {
+    let mut segments: Vec<Segment<'_>> = Vec::new();
+    let mut fence: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let opens = trimmed.starts_with("```");
+        let closes_same_line = opens && trimmed[3..].trim_end().ends_with("```");
+        match fence.as_mut() {
+            None => {
+                if opens && !closes_same_line {
+                    fence = Some(String::new());
+                } else {
+                    segments.push(Segment::Prose(line));
+                }
+            }
+            Some(body) => {
+                if opens {
+                    segments.push(Segment::Fence {
+                        body: std::mem::take(body),
+                    });
+                    fence = None;
+                } else {
+                    body.push_str(line);
+                    body.push('\n');
+                }
+            }
+        }
+    }
+    if let Some(body) = fence {
+        segments.push(Segment::Fence { body });
+    }
+    segments
+}
+
 pub fn parse(text: &str, emoji_path: &dyn Fn(&str) -> Option<String>) -> Vec<Span> {
     let mut spans = Vec::new();
     let mut plain = String::new();
@@ -378,5 +429,34 @@ mod tests {
         let spans = parse("2 * 3 = 6 и _незакрыт", &no_emoji);
         // "2 " plain; "* 3 = 6 и _незакрыт" — no closing '*' → literal.
         assert!(spans.iter().all(|span| matches!(span, Span::Text { .. })));
+    }
+
+    #[test]
+    fn fences_split_verbatim_bodies() {
+        let text = "before\n```rust\nlet x = *bold*;\n```\nafter";
+        let segments = split_fences(text);
+        assert_eq!(segments.len(), 3);
+        assert!(matches!(segments[0], Segment::Prose("before")));
+        assert!(
+            matches!(&segments[1], Segment::Fence { body } if body == "let x = *bold*;\n"),
+            "the fence body is verbatim — markers inside never reach the inline parser"
+        );
+        assert!(matches!(segments[2], Segment::Prose("after")));
+    }
+
+    #[test]
+    fn unterminated_fence_keeps_the_rest_verbatim() {
+        let segments = split_fences("```py\nprint(1)\nprint(2)");
+        assert_eq!(segments.len(), 1);
+        assert!(matches!(&segments[0], Segment::Fence { body } if body == "print(1)\nprint(2)\n"));
+    }
+
+    #[test]
+    fn single_line_triple_backticks_stay_prose() {
+        // A line that opens AND closes on the same line never opens a
+        // fence — only a fence-opening line does.
+        let segments = split_fences("```code```");
+        assert_eq!(segments.len(), 1);
+        assert!(matches!(segments[0], Segment::Prose("```code```")));
     }
 }

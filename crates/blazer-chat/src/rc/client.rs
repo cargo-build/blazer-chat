@@ -75,10 +75,10 @@ impl RcClient<HttpTransport> {
             })
             .collect())
     }
+}
 
+impl<T: Transport> RcClient<T> {
     /// The image bytes of a custom emoji (`/emoji-custom/{name}.{ext}`).
-    /// Inherent to the real transport: `get_bytes` is not on the [`Transport`]
-    /// seam (test doubles have no binary bodies).
     pub async fn emoji_image(&self, name: &str, extension: &str) -> Result<Vec<u8>, RcError> {
         let path = format!("/emoji-custom/{name}.{extension}");
         self.transport.get_bytes(&path).await.map_err(RcError::Io)
@@ -103,9 +103,7 @@ impl RcClient<HttpTransport> {
             .await
             .map_err(RcError::Io)
     }
-}
 
-impl<T: Transport> RcClient<T> {
     /// Attachment paths arrive from server-controlled message fields:
     /// anything outside the upload endpoint would turn rendering a
     /// message into an authenticated GET against an arbitrary API

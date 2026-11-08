@@ -286,13 +286,17 @@ impl ChatRoot {
                             self.parsed.clear();
                         }
                         let parsed = std::sync::Arc::new(
-                            message
-                                .text
-                                .lines()
-                                .map(|line| {
-                                    markdown::parse(line, &|name| {
-                                        self.state.emoji.get(name).cloned()
-                                    })
+                            markdown::split_fences(&message.text)
+                                .iter()
+                                .flat_map(|segment| match segment {
+                                    markdown::Segment::Prose(line) => {
+                                        vec![markdown::parse(line, &|name| {
+                                            self.state.emoji.get(name).cloned()
+                                        })]
+                                    }
+                                    markdown::Segment::Fence { body } => {
+                                        vec![vec![markdown::Span::CodeBlock { body: body.clone() }]]
+                                    }
                                 })
                                 .collect::<Vec<_>>(),
                         );
@@ -1696,6 +1700,17 @@ fn span_element(span: Span) -> gpui::Div {
                 .h(rems(1.125))
                 .w(rems(1.125)),
         ),
+        Span::CodeBlock { body } => div()
+            .font_family("monospace")
+            .text_sm()
+            .bg(rgb(0x121820))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .rounded_sm()
+            .px_2()
+            .py_1()
+            .min_w_0()
+            .child(SharedString::from(body.clone())),
     }
 }
 

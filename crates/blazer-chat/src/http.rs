@@ -33,6 +33,19 @@ pub struct Response {
 /// design (DECL0001: the driver is thread-local).
 pub trait Transport {
     async fn call(&self, request: Request<'_>) -> std::io::Result<Response>;
+
+    /// Binary GET for non-JSON resources (emoji images, avatars,
+    /// attachments): status must be 2xx, raw bytes out, gzip decoded.
+    async fn get_bytes(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        self.get_bytes_with_headers(path, &[]).await
+    }
+
+    /// Binary GET with explicit headers (auth for file downloads).
+    async fn get_bytes_with_headers(
+        &self,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> std::io::Result<Vec<u8>>;
 }
 
 /// The compio implementation: one connection per call, plain TCP or TLS.
@@ -135,6 +148,19 @@ fn request_head(
 }
 
 impl Transport for HttpTransport {
+    async fn get_bytes(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        self.get_bytes_with_headers(path, &[]).await
+    }
+
+    async fn get_bytes_with_headers(
+        &self,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> std::io::Result<Vec<u8>> {
+        // The inherent impl carries the exchange/gzip logic.
+        HttpTransport::get_bytes_with_headers(self, path, headers).await
+    }
+
     async fn call(&self, req: Request<'_>) -> std::io::Result<Response> {
         // The caller-owned content-type wins (multipart uploads); JSON is
         // the default.
@@ -158,12 +184,6 @@ impl Transport for HttpTransport {
 }
 
 impl HttpTransport {
-    /// Binary GET for non-JSON resources (emoji images): status must be
-    /// 2xx, the body returns as raw bytes.
-    pub async fn get_bytes(&self, path: &str) -> std::io::Result<Vec<u8>> {
-        self.get_bytes_with_headers(path, &[]).await
-    }
-
     /// Binary GET with explicit headers (auth for file downloads). The
     /// server force-gzips file responses (ignoring `Accept-Encoding`),
     /// so a `content-encoding: gzip` body is decoded here.
