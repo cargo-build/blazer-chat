@@ -17,6 +17,7 @@ use super::{
     input::{MUTED, PANEL, TextInput, TextInputEvent},
 };
 use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
+use crate::rc::Msg;
 
 const BG: u32 = 0x11151c;
 const BORDER: u32 = 0x394354;
@@ -231,64 +232,13 @@ impl ChatRoot {
             return;
         }
         let at_bottom = self.scroll.offset().y >= -self.scroll.max_offset().y;
-        let emoji = &self.state.emoji;
-        let chat_avatars = &self.state.avatars;
-        self.views = self
-            .state
-            .active_messages()
+        let messages = self.state.active_messages().to_vec();
+        self.views = messages
             .iter()
-            .map(|message| MessageView {
-                id: message.id.clone(),
-                room_id: message.room_id.clone(),
-                starred: message.starred_by_me,
-                ts: pretty_time(&message.ts),
-                sender: message.sender.clone(),
-                text: message.text.clone(),
-                lines: {
-                    let key = (message.id.clone(), message.text.clone());
-                    match self.parsed.get(&key) {
-                        Some(lines) => lines.clone(),
-                        None => {
-                            if self.parsed.len() > 4000 {
-                                self.parsed.clear();
-                            }
-                            let parsed = std::sync::Arc::new(
-                                message
-                                    .text
-                                    .lines()
-                                    .map(|line| {
-                                        markdown::parse(line, &|name| emoji.get(name).cloned())
-                                    })
-                                    .collect::<Vec<_>>(),
-                            );
-                            self.parsed.insert(key, parsed.clone());
-                            parsed
-                        }
-                    }
-                },
-                day: message.ts.split('T').next().unwrap_or_default().to_owned(),
-                ts_raw: message.ts.clone(),
-                reactions: message
-                    .reactions
-                    .iter()
-                    .map(|(name, reaction)| (name.clone(), reaction.clone()))
-                    .collect(),
-                file: message
-                    .file
-                    .as_ref()
-                    .map(|file| (file.name.clone(), file.url.clone(), file.size)),
-                image_path: message
-                    .file
-                    .as_ref()
-                    .and_then(|file| file.image_path.clone()),
-                avatar: chat_avatars.get(&message.sender).cloned(),
-                thread: message
-                    .tcount
-                    .map(|count| (count, pretty_time(message.tlm.as_deref().unwrap_or("")))),
-            })
+            .map(|message| self.message_view(message))
             .collect();
-        // Interleave day separators; the list materializes one row per
-        // item.
+        // Interleave day separators; the pane renders them between
+        // messages.
         self.rows = Vec::with_capacity(self.views.len() + 8);
         let mut previous_day: Option<String> = None;
         for (view_index, view) in self.views.iter().enumerate() {
@@ -300,11 +250,6 @@ impl ChatRoot {
             }
             self.rows.push(PaneRow::Message { view_index });
         }
-        // Prepending an older slice keeps the scroll anchor on the same
-        // message (splice); everything else resets. The uniform height
-        // hint matters: with all-unknown heights the content height is
-        // 0 at reset, so scroll_to_end anchors to nothing and the
-        // viewport lands in blank space (observed on a real room).
         if switched || at_bottom {
             self.scroll.scroll_to_bottom();
             self.pinned_room = self.state.active_room.clone();
@@ -312,6 +257,62 @@ impl ChatRoot {
         self.views_version = self.state.messages_version;
         self.views_emoji_version = self.state.emoji_version;
         self.views_avatars_version = self.state.avatars_version;
+    }
+
+    /// Builds the render view for one message: markdown parsed through
+    /// the shared cache, emoji/avatars resolved, attachments carried.
+    fn message_view(&mut self, message: &Msg) -> MessageView {
+        MessageView {
+            id: message.id.clone(),
+            room_id: message.room_id.clone(),
+            starred: message.starred_by_me,
+            ts: pretty_time(&message.ts),
+            sender: message.sender.clone(),
+            text: message.text.clone(),
+            lines: {
+                let key = (message.id.clone(), message.text.clone());
+                match self.parsed.get(&key) {
+                    Some(lines) => lines.clone(),
+                    None => {
+                        if self.parsed.len() > 4000 {
+                            self.parsed.clear();
+                        }
+                        let parsed = std::sync::Arc::new(
+                            message
+                                .text
+                                .lines()
+                                .map(|line| {
+                                    markdown::parse(line, &|name| {
+                                        self.state.emoji.get(name).cloned()
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                        self.parsed.insert(key, parsed.clone());
+                        parsed
+                    }
+                }
+            },
+            day: message.ts.split('T').next().unwrap_or_default().to_owned(),
+            ts_raw: message.ts.clone(),
+            reactions: message
+                .reactions
+                .iter()
+                .map(|(name, reaction)| (name.clone(), reaction.clone()))
+                .collect(),
+            file: message
+                .file
+                .as_ref()
+                .map(|file| (file.name.clone(), file.url.clone(), file.size)),
+            image_path: message
+                .file
+                .as_ref()
+                .and_then(|file| file.image_path.clone()),
+            avatar: self.state.avatars.get(&message.sender).cloned(),
+            thread: message
+                .tcount
+                .map(|count| (count, pretty_time(message.tlm.as_deref().unwrap_or("")))),
+        }
     }
 
     /// Mirrors the entity into the control-socket snapshot. The UI thread
@@ -503,7 +504,17 @@ impl ChatRoot {
     /// One message row; consecutive same-sender rows within five
     /// minutes group (avatar and header hidden), like the original.
     fn message_row(&self, index: usize) -> AnyElement {
-        let view = &self.views[index];
+        self.message_row_view(&self.views[index])
+    }
+
+    /// The full row builder for any message view (main pane and
+    /// threads render the same way).
+    fn message_row_view(&self, view: &MessageView) -> AnyElement {
+        let index = self
+            .views
+            .iter()
+            .position(|known| known.id == view.id)
+            .unwrap_or(0);
         let grouped = index > 0 && {
             let previous = &self.views[index - 1];
             previous.sender == view.sender
@@ -997,30 +1008,16 @@ impl gpui::Render for ChatRoot {
             .map(|room| room.name.clone())
             .unwrap_or_else(|| "messages".to_owned());
         let pane = if let Some((room_id, tmid)) = self.state.open_thread.clone() {
-            // Thread view: back button, then the thread's messages.
+            // Thread view: back button, then the thread's messages —
+            // the same full rows as the main pane (avatars, times,
+            // attachments with image previews, reaction pills).
             let this = search_this.clone();
-            let rows = self
-                .state
-                .thread(&tmid)
+            let thread_messages: Vec<Msg> = self.state.thread(&tmid).to_vec();
+            let rows = thread_messages
                 .iter()
                 .map(|message| {
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(TEXT))
-                                .child(SharedString::from(message.sender.clone())),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_sm()
-                                .child(SharedString::from(message.text.clone())),
-                        )
+                    let view = self.message_view(message);
+                    self.message_row_view(&view)
                 })
                 .collect::<Vec<_>>();
             div()
@@ -1159,6 +1156,7 @@ impl gpui::Render for ChatRoot {
                     .snap_to_window_with_margin(px(8.0))
                     .child(
                         div()
+                            .occlude()
                             .flex()
                             .flex_col()
                             .min_w(px(220.0))
@@ -1780,6 +1778,7 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
                 .snap_to_window_with_margin(px(8.0))
                 .child(
                     div()
+                        .occlude()
                         .flex()
                         .flex_col()
                         .min_w(px(150.0))

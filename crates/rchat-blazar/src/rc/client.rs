@@ -506,20 +506,41 @@ impl<T: Transport> RcClient<T> {
                 })
             })
             .collect();
-        let file = message.file.map(|file| {
-            let name = file.name.unwrap_or_else(|| "file".to_owned());
-            let path = format!("/file-upload/{}/{}", file.id, name.replace(' ', "%20"));
-            AttachedFile {
-                url: format!("{}{}", self.origin.clone(), path),
-                path,
-                mime: file
-                    .mime
-                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
-                name,
-                size: file.size.unwrap_or_default(),
-                image_path: None,
-            }
-        });
+        // Own uploads carry `file`; original-client images (paste,
+        // drag-and-drop, web) arrive as image attachments instead —
+        // either renders through the same card and preview pipeline.
+        let file = message
+            .file
+            .map(|file| {
+                let name = file.name.unwrap_or_else(|| "file".to_owned());
+                let path = format!("/file-upload/{}/{}", file.id, name.replace(' ', "%20"));
+                AttachedFile {
+                    url: format!("{}{}", self.origin.clone(), path),
+                    path,
+                    mime: file
+                        .mime
+                        .unwrap_or_else(|| "application/octet-stream".to_owned()),
+                    name,
+                    size: file.size.unwrap_or_default(),
+                    image_path: None,
+                }
+            })
+            .or_else(|| {
+                message.attachments.iter().flatten().find_map(|image| {
+                    let path = image.image_url.clone()?;
+                    Some(AttachedFile {
+                        url: format!("{}{}", self.origin.clone(), path),
+                        path,
+                        mime: image
+                            .image_type
+                            .clone()
+                            .unwrap_or_else(|| "image/png".to_owned()),
+                        name: image.title.clone().unwrap_or_else(|| "image".to_owned()),
+                        size: image.image_size.unwrap_or_default(),
+                        image_path: None,
+                    })
+                })
+            });
         let me = self
             .session
             .as_ref()

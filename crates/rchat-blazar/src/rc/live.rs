@@ -503,7 +503,36 @@ fn message_from_event(event: &Value) -> Option<Msg> {
             .and_then(Value::as_u64)
             .map(|n| n as u32),
         tlm: ejson_date(message.get("tlm")),
-        file: None,
+        file: message
+            .get("attachments")
+            .and_then(Value::as_array)
+            .and_then(|attachments| {
+                attachments.iter().find_map(|attachment| {
+                    let path = attachment
+                        .get("image_url")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)?;
+                    Some(crate::rc::types::AttachedFile {
+                        url: String::new(),
+                        path: path.clone(),
+                        mime: attachment
+                            .get("image_type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image/png")
+                            .to_owned(),
+                        name: attachment
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image")
+                            .to_owned(),
+                        size: attachment
+                            .get("image_size")
+                            .and_then(Value::as_u64)
+                            .unwrap_or_default(),
+                        image_path: None,
+                    })
+                })
+            }),
         reactions,
         // Live updates don't carry the starred set in this build; the
         // REST refetch restores it.

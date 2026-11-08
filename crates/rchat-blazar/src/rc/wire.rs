@@ -123,6 +123,9 @@ pub struct WireMessage {
     /// versions) — leniently kept as JSON values.
     #[serde(default)]
     pub starred: Option<Vec<serde_json::Value>>,
+    /// Image attachments posted by the original clients.
+    #[serde(default)]
+    pub attachments: Option<Vec<WireImageAttachment>>,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +137,20 @@ pub struct WireFile {
     pub size: Option<u64>,
     #[serde(rename = "type")]
     pub mime: Option<String>,
+}
+
+/// One entry of a message's `attachments` array — how images arrive
+/// when posted from the original clients (paste, drag-and-drop, web
+/// upload): server-relative `image_url` plus metadata.
+#[derive(Deserialize)]
+pub struct WireImageAttachment {
+    #[serde(rename = "image_url")]
+    pub image_url: Option<String>,
+    #[serde(rename = "image_type")]
+    pub image_type: Option<String>,
+    #[serde(rename = "image_size")]
+    pub image_size: Option<u64>,
+    pub title: Option<String>,
 }
 
 #[derive(Deserialize)]

@@ -299,6 +299,8 @@ impl ChatState {
                     })
                     .unwrap_or_default();
                 self.active_room = Some(room_id);
+                // Opening a room navigates out of any open thread.
+                self.open_thread = None;
                 self.error = None;
                 (!missing.is_empty()).then_some(ChatCommand::FetchAvatars { usernames: missing })
             }
@@ -435,6 +437,8 @@ impl ChatState {
                     room.unread = 0;
                 }
                 self.active_room = Some(room_id.clone());
+                // Opening a room navigates out of any open thread.
+                self.open_thread = None;
                 self.error = None;
                 // The network refresh replaces this slice right away.
                 Some(ChatCommand::RefreshRoom { room_id })
@@ -943,16 +947,41 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
         ChatCommand::OpenThread { tmid } => {
             let tmid_owned = tmid.clone();
             match client.thread_messages(&tmid).await {
-                Ok(messages) => match messages.first().map(|message| message.room_id.clone()) {
-                    Some(room_id) => ChatEvent::ThreadMessages {
-                        room_id,
-                        tmid,
-                        messages,
-                    },
-                    None => ChatEvent::Failed(format!(
-                        "thread {tmid_owned}: no messages (root not visible)"
-                    )),
-                },
+                Ok(mut messages) => {
+                    // Inline image previews, same as room history: the
+                    // chip remains the fallback for anything that fails.
+                    if let Some(store) = store
+                        && let Some(room_id) =
+                            messages.first().map(|message| message.room_id.clone())
+                    {
+                        for message in &mut messages {
+                            if let Some(file) = &message.file
+                                && file.is_image()
+                            {
+                                match fetch_image_preview(client, store, &room_id, file).await {
+                                    Ok(path) => {
+                                        if let Some(fresh) = message.file.as_mut() {
+                                            fresh.image_path = Some(path.display().to_string());
+                                        }
+                                    }
+                                    Err(error) => {
+                                        eprintln!("rchat-blazar: preview {}: {error}", file.name)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    match messages.first().map(|message| message.room_id.clone()) {
+                        Some(room_id) => ChatEvent::ThreadMessages {
+                            room_id,
+                            tmid,
+                            messages,
+                        },
+                        None => ChatEvent::Failed(format!(
+                            "thread {tmid_owned}: no messages (root not visible)"
+                        )),
+                    }
+                }
                 Err(error) => ChatEvent::Failed(error.to_string()),
             }
         }
