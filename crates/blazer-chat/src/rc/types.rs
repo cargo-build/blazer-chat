@@ -94,6 +94,9 @@ pub struct Room {
     pub topic: Option<String>,
 }
 
+/// Wire `t` values that mark service notices rather than chat text.
+pub const SYSTEM_MESSAGE_TYPES: [&str; 4] = ["uj", "ul", "ru", "au"];
+
 /// One chat message, oldest position last.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Msg {
@@ -119,6 +122,10 @@ pub struct Msg {
     /// Whether the logged-in user starred this message (wire `starred`).
     #[serde(default)]
     pub starred_by_me: bool,
+    /// Service notice (wire `t` in `uj`/`ul`/`ru`/`au`): rendered
+    /// compact and never grouped into a sender run (m12 F2).
+    #[serde(default)]
+    pub system: bool,
 }
 
 /// One reaction's participants (wire `usernames`).

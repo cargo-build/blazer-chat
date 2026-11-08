@@ -18,6 +18,8 @@ use input::{
 };
 
 actions!(zoom, [ZoomIn, ZoomOut, ZoomReset]);
+// Focuses the search strip for a room jump (m12 F3: the Ctrl+K path).
+actions!(roomnav, [FocusSearch]);
 
 /// Wayland app-id of the surface.
 const APP_ID: &str = "blazer-chat";
@@ -46,6 +48,10 @@ pub fn run(settings: RcSettings) {
             gpui::KeyBinding::new("home", Home, None),
             gpui::KeyBinding::new("end", End, None),
             gpui::KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, None),
+            // The original's most-used shortcut: jump to a room by name
+            // (m12 F3). Matches every context; the root handler focuses
+            // the search strip.
+            gpui::KeyBinding::new("ctrl-k", FocusSearch, None),
             // Browser-style zoom: rem scaling, works anywhere in the UI.
             gpui::KeyBinding::new("ctrl-=", ZoomIn, None),
             gpui::KeyBinding::new("ctrl-+", ZoomIn, None),

@@ -229,6 +229,10 @@ pub struct ChatState {
     /// Bumped whenever cached messages change; the UI skips rebuilds
     /// otherwise.
     pub messages_version: u64,
+    /// Room → the id of its first unread message, pinned when history
+    /// lands with a positive unread count and cleared once a live
+    /// message folds in for the open room (the user read past it).
+    pub first_unread: std::collections::HashMap<String, String>,
     /// Bumped when the avatar cache fills.
     pub avatars_version: u64,
     /// Bumped when custom emoji arrive.
@@ -296,6 +300,15 @@ impl ChatState {
             }
             ChatEvent::Messages { room_id, messages } => {
                 self.messages_version += 1;
+                // The subscription count says how many of the newest
+                // messages were unread when the room opened: pin the
+                // boundary message before the count clears (m12 F1).
+                let unread_before = self
+                    .rooms
+                    .iter()
+                    .find(|room| room.id == room_id)
+                    .map(|room| room.unread)
+                    .unwrap_or_default();
                 // Merge instead of replacing: live or paged messages that
                 // arrived while the request was in flight must not vanish
                 // with the refreshed slice.
@@ -309,6 +322,15 @@ impl ChatState {
                 // went out with the history call.
                 if let Some(room) = self.rooms.iter_mut().find(|room| room.id == room_id) {
                     room.unread = 0;
+                }
+                if unread_before > 0
+                    && let Some(entry) = self.messages.get(&room_id)
+                    && let Some(first) = entry
+                        .len()
+                        .checked_sub(unread_before as usize)
+                        .and_then(|index| entry.get(index))
+                {
+                    self.first_unread.insert(room_id.clone(), first.id.clone());
                 }
                 // Senders without a cached avatar fetch one now; the
                 // event follows the history into the pane.
@@ -362,6 +384,11 @@ impl ChatState {
             }
             ChatEvent::LiveMessage(mut message) => {
                 self.messages_version += 1;
+                // A live message for the open room means the user read
+                // past the boundary: the divider's job is done (m12 F1).
+                if self.active_room.as_deref() == Some(message.room_id.as_str()) {
+                    self.first_unread.remove(&message.room_id);
+                }
                 self.bump_room_activity(&message.room_id, message.ts.clone());
                 // The stream redelivers what REST already folded in and
                 // re-sends edited messages under the same id: replace by
@@ -1207,6 +1234,7 @@ mod tests {
             file: None,
             reactions: Default::default(),
             starred_by_me: false,
+            system: false,
         }
     }
 
@@ -1629,6 +1657,61 @@ mod tests {
         assert_eq!(snapshot.rooms, vec!["general".to_owned()]);
         assert_eq!(snapshot.messages, vec!["tester: hello".to_owned()]);
         assert!(snapshot.status.contains("tester"));
+    }
+
+    #[test]
+    fn first_unread_marks_the_boundary_and_live_clears_it() {
+        let mut state = ChatState::default();
+        state.apply(ChatEvent::Rooms {
+            rooms: vec![room("GENERAL", "general")],
+        });
+        if let Some(room) = state.rooms.iter_mut().find(|room| room.id == "GENERAL") {
+            room.unread = 2;
+        }
+        let messages: Vec<Msg> = (0..5)
+            .map(|index| Msg {
+                id: format!("m{index}"),
+                room_id: "GENERAL".to_owned(),
+                sender: format!("u{index}"),
+                text: format!("text {index}"),
+                ts: format!("2026-11-08T0{index}:00:00Z"),
+                tmid: None,
+                tcount: None,
+                tlm: None,
+                file: None,
+                reactions: Default::default(),
+                starred_by_me: false,
+                system: false,
+            })
+            .collect();
+        state.apply(ChatEvent::Messages {
+            room_id: "GENERAL".to_owned(),
+            messages,
+        });
+        assert_eq!(
+            state.first_unread.get("GENERAL").map(String::as_str),
+            Some("m3"),
+            "the newest two messages were unread — the boundary is m3"
+        );
+        state.active_room = Some("GENERAL".to_owned());
+        state.apply(ChatEvent::LiveMessage(Msg {
+            id: "m5".to_owned(),
+            room_id: "GENERAL".to_owned(),
+            sender: "u9".to_owned(),
+            text: "live".to_owned(),
+            ts: "2026-11-08T05:00:00Z".to_owned(),
+            tmid: None,
+            tcount: None,
+            tlm: None,
+            file: None,
+            reactions: Default::default(),
+            starred_by_me: false,
+            system: false,
+        }));
+        assert!(
+            !state.first_unread.contains_key("GENERAL"),
+            "reading past the boundary clears the divider"
+        );
     }
 
     #[test]

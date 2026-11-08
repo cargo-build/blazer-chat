@@ -102,6 +102,9 @@ pub struct WireMessage {
     pub id: String,
     pub rid: String,
     pub msg: Option<String>,
+    /// Service-notice type (`uj`/`ul`/`ru`/`au`) — absent on chat text.
+    #[serde(default)]
+    pub t: Option<String>,
     pub ts: Option<String>,
     pub u: Option<WireUser>,
     /// Thread parent id when the message is a thread reply.

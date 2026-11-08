@@ -23,7 +23,9 @@
 use serde::Deserialize;
 
 use crate::http::{HttpTransport, Request, Transport};
-use crate::rc::types::{AttachedFile, CustomEmoji, Msg, RcError, RcSettings, Room, Session};
+use crate::rc::types::{
+    AttachedFile, CustomEmoji, Msg, RcError, RcSettings, Room, SYSTEM_MESSAGE_TYPES, Session,
+};
 use crate::rc::wire::{
     EmojiListResponse, HistoryResponse, LoginResponse, MediaUploadResponse, RoomsGetResponse,
     SendMessageResponse, SubscriptionsGetResponse, SuccessResponse, UpdateMessageResponse,
@@ -602,6 +604,11 @@ impl<T: Transport> RcClient<T> {
             file,
             reactions,
             starred_by_me,
+            system: message
+                .t
+                .as_deref()
+                .map(|t| SYSTEM_MESSAGE_TYPES.contains(&t))
+                .unwrap_or_default(),
         }
     }
 

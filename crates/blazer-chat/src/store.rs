@@ -338,6 +338,7 @@ mod tests {
             file: None,
             reactions: Default::default(),
             starred_by_me: false,
+            system: false,
         }];
         store.save_messages("GENERAL", &messages).unwrap();
         assert_eq!(

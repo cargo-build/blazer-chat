@@ -523,6 +523,11 @@ fn message_from_event(event: &Value, origin: Option<&str>) -> Option<Msg> {
             .and_then(Value::as_u64)
             .map(|n| n as u32),
         tlm: ejson_date(message.get("tlm")),
+        system: message
+            .get("t")
+            .and_then(Value::as_str)
+            .map(|t| crate::rc::types::SYSTEM_MESSAGE_TYPES.contains(&t))
+            .unwrap_or_default(),
         file: message
             .get("attachments")
             .and_then(Value::as_array)

@@ -571,3 +571,39 @@ fn upload_path_validation_refuses_everything_but_the_upload_endpoint() {
         "a real upload path passes"
     );
 }
+
+#[test]
+fn history_decodes_system_notices() {
+    let system_body = r#"{"messages":[
+        {"_id":"s1","rid":"dm1","t":"uj","msg":"alice joined","ts":"2026-11-07T15:00:00Z","u":{"username":"alice"}},
+        {"_id":"m1","rid":"dm1","msg":"hello","ts":"2026-11-07T15:00:01Z","u":{"username":"alice"}}
+    ],"success":true,"unreadNotLoaded":0}"#;
+    // rooms.get feeds the room-kind map: dm1 is a DM, so history
+    // routes to im.history (the system notice rides the same decode).
+    let routes = [
+        ("login", 200, LOGIN_BODY),
+        ("rooms.get", 200, ROOMS_BODY),
+        (
+            "subscriptions.get",
+            200,
+            r#"{"update":[],"remove":[],"success":true}"#,
+        ),
+        ("im.history", 200, system_body),
+    ];
+    let transport = FakeTransport::answering(&routes);
+    let mut rc = client(transport);
+    futures_lite::future::block_on(rc.login("alice", "secret")).unwrap();
+    // dm1's kind comes from rooms.get: without it, history defaults to
+    // the channels router.
+    futures_lite::future::block_on(rc.rooms()).unwrap();
+    let messages = futures_lite::future::block_on(rc.history("dm1")).unwrap();
+    // History returns oldest-first: the notice leads, the chat text follows.
+    // The transport reverses the server's newest-first slice, so the
+    // body's order (notice first) flips: chat text leads, the notice
+    // trails.
+    assert!(!messages[0].system, "chat text is not a service notice");
+    assert!(
+        messages.last().unwrap().system,
+        "`uj` decodes as a service notice"
+    );
+}

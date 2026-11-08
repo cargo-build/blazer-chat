@@ -17,7 +17,7 @@ use super::{
     input::{MUTED, PANEL, TextInput, TextInputEvent},
 };
 use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
-use crate::rc::Msg;
+use crate::rc::{Msg, Room};
 
 const BG: u32 = 0x11151c;
 const BORDER: u32 = 0x394354;
@@ -32,6 +32,9 @@ pub(crate) struct ChatRoot {
     commands: Sender<ChatCommand>,
     snapshot: Arc<Mutex<Option<UiSnapshot>>>,
     pub(crate) composer: Entity<TextInput>,
+    /// Room matches for the current search query: id + display name,
+    /// rendered above the message hits (m12 F3 room jump).
+    search_rooms: Vec<(String, String)>,
     focus: FocusHandle,
     /// Render views of the active room's messages, rebuilt on events.
     views: Vec<MessageView>,
@@ -77,6 +80,7 @@ pub(crate) struct ChatRoot {
 /// these without re-parsing markdown per frame.
 struct MessageView {
     id: String,
+    system: bool,
     room_id: String,
     ts: String,
     sender: String,
@@ -156,6 +160,7 @@ impl ChatRoot {
 
         let handle = cx.entity();
         let composer = cx.new(|cx| TextInput::new("Message…", cx));
+        let search_rooms = Vec::new();
         cx.subscribe(&composer, |chat, _, event, cx| match event {
             TextInputEvent::Submitted => chat.send_message(cx),
         })
@@ -171,6 +176,7 @@ impl ChatRoot {
             commands,
             snapshot,
             composer,
+            search_rooms,
             focus: cx.focus_handle(),
             views: Vec::new(),
             search,
@@ -246,7 +252,13 @@ impl ChatRoot {
             .map(|message| self.message_view(message))
             .collect();
         // Interleave day separators; the pane renders them between
-        // messages.
+        // messages. The first-unread boundary draws a divider before
+        // its message (m12 F1).
+        let boundary = self
+            .state
+            .first_unread
+            .get(self.state.active_room.as_deref().unwrap_or_default())
+            .cloned();
         self.rows = Vec::with_capacity(self.views.len() + 8);
         let mut previous_day: Option<String> = None;
         for (view_index, view) in self.views.iter().enumerate() {
@@ -256,10 +268,22 @@ impl ChatRoot {
                 });
                 previous_day = Some(view.day.clone());
             }
+            if boundary.as_deref() == Some(view.id.as_str()) {
+                self.rows.push(PaneRow::UnreadMarker { view_index });
+            }
             self.rows.push(PaneRow::Message { view_index });
         }
         if switched || at_bottom {
-            self.scroll.scroll_to_bottom();
+            // Jump to the unread divider when the room opened with
+            // unreads; otherwise land at the newest message.
+            match self
+                .rows
+                .iter()
+                .position(|row| matches!(row, PaneRow::UnreadMarker { .. }))
+            {
+                Some(index) if switched => self.scroll.scroll_to_item(index),
+                _ => self.scroll.scroll_to_bottom(),
+            }
             self.pinned_room = self.state.active_room.clone();
         }
         self.views_version = self.state.messages_version;
@@ -272,6 +296,7 @@ impl ChatRoot {
     fn message_view(&mut self, message: &Msg) -> MessageView {
         MessageView {
             id: message.id.clone(),
+            system: message.system,
             room_id: message.room_id.clone(),
             starred: message.starred_by_me,
             ts: pretty_time(&message.ts),
@@ -491,7 +516,20 @@ impl ChatRoot {
     /// clears the results.
     fn run_search(&mut self, cx: &mut Context<Self>) {
         let query = self.search.read(cx).content().trim().to_owned();
-        let _ = self.commands.try_send(ChatCommand::Search(query));
+        self.search_rooms = room_hits(&query, &self.state.rooms);
+        let _ = self.commands.try_send(ChatCommand::Search(query.clone()));
+        cx.notify();
+    }
+
+    /// Focuses the search strip: the Ctrl+K room-jump path (m12 F3).
+    fn focus_room_jump(
+        &mut self,
+        _: &super::FocusSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let handle = self.search.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
         cx.notify();
     }
 
@@ -504,6 +542,20 @@ impl ChatRoot {
     }
 }
 
+/// Rooms whose names contain the query (case-insensitive). An empty
+/// query matches nothing — the results pane stays a search surface.
+fn room_hits(query: &str, rooms: &[Room]) -> Vec<(String, String)> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    rooms
+        .iter()
+        .filter(|room| room.name.to_lowercase().contains(&query))
+        .map(|room| (room.id.clone(), room.name.clone()))
+        .collect()
+}
+
 impl Focusable for ChatRoot {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
@@ -511,6 +563,29 @@ impl Focusable for ChatRoot {
 }
 
 impl ChatRoot {
+    /// The accent divider marking the first unread message (m12 F1).
+    fn unread_marker(&self, _view_index: usize) -> AnyElement {
+        let label = "Unread messages";
+        div()
+            .id("unread-divider")
+            .aria_label(label)
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .child(div().flex_1().h(px(1.0)).bg(rgb(ACCENT)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(rgb(ACCENT))
+                    .child(label),
+            )
+            .child(div().flex_1().h(px(1.0)).bg(rgb(ACCENT)))
+            .into_any_element()
+    }
+
     /// A centered day divider between messages of different dates.
     fn day_separator(&self, day_ts: &str) -> AnyElement {
         div()
@@ -549,9 +624,10 @@ impl ChatRoot {
             .iter()
             .position(|known| known.id == view.id)
             .unwrap_or(0);
-        let grouped = index > 0 && {
+        let grouped = index > 0 && !view.system && {
             let previous = &self.views[index - 1];
-            previous.sender == view.sender
+            !previous.system
+                && previous.sender == view.sender
                 && previous.day == view.day
                 && within_five_minutes(&previous.ts_raw, &view.ts_raw)
         };
@@ -651,6 +727,24 @@ impl ChatRoot {
                     if *count == 1 { "reply" } else { "replies" }
                 )))
         });
+        if view.system {
+            // Service notice (join/leave): compact muted line, not a
+            // chat row — no avatar, no toolbar, no grouping (m12 F2).
+            return div()
+                .id(SharedString::from(format!("sys-{msg_id}")))
+                .role(Role::ListItem)
+                .aria_label(SharedString::from(view.text.clone()))
+                .flex()
+                .justify_center()
+                .py_0p5()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(SharedString::from(view.text.clone())),
+                )
+                .into_any_element();
+        }
         let lead = if grouped {
             div().flex_none().w(px(32.0)).into_any_element()
         } else {
@@ -890,6 +984,7 @@ impl gpui::Render for ChatRoot {
         for row in &self.rows {
             match row {
                 PaneRow::Separator { day_ts } => rows.push(self.day_separator(day_ts)),
+                PaneRow::UnreadMarker { view_index } => rows.push(self.unread_marker(*view_index)),
                 PaneRow::Message { view_index } => rows.push(self.message_row(*view_index)),
             }
         }
@@ -1104,7 +1199,48 @@ impl gpui::Render for ChatRoot {
             && !query.trim().is_empty()
         {
             let hits = self.state.search(query);
-            let results = hits
+            let mut results: Vec<gpui::AnyElement> = self
+                .search_rooms
+                .iter()
+                .map(|(room_id, name)| {
+                    let this = search_this.clone();
+                    let room_id = room_id.clone();
+                    div()
+                        .id(SharedString::from(format!("jump-{room_id}")))
+                        .role(Role::Button)
+                        .aria_label(format!("Jump to room {name}"))
+                        .flex()
+                        .gap_2()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(ACCENT)))
+                        .on_click(move |_, _, cx| {
+                            this.update(cx, |chat, cx| {
+                                chat.open_room(room_id.clone(), cx);
+                                chat.search.update(cx, |box_, cx| {
+                                    box_.set_content("", cx);
+                                });
+                                let _ = chat.commands.try_send(ChatCommand::Search(String::new()));
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(TEXT))
+                                .child(SharedString::from(format!("# {name}"))),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child("Jump to room"),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            let message_hits = hits
                 .iter()
                 .map(|hit| {
                     let this = search_this.clone();
@@ -1149,7 +1285,9 @@ impl gpui::Render for ChatRoot {
                                 .child(SharedString::from(hit.text.clone())),
                         )
                 })
+                .map(|element| element.into_any_element())
                 .collect::<Vec<_>>();
+            results.extend(message_hits);
             div()
                 .id("results-scroll")
                 .flex()
@@ -1362,6 +1500,7 @@ impl gpui::Render for ChatRoot {
         div()
             .flex()
             .flex_col()
+            .on_action(cx.listener(Self::focus_room_jump))
             .size_full()
             .p_4()
             .gap_3()
@@ -1718,6 +1857,7 @@ fn span_element(span: Span) -> gpui::Div {
 /// One virtualized pane row: a message or a day divider.
 enum PaneRow {
     Separator { day_ts: String },
+    UnreadMarker { view_index: usize },
     Message { view_index: usize },
 }
 
@@ -2012,5 +2152,48 @@ mod tests {
         assert_eq!(pretty_time_in("2026-11-07T20:32:00.514Z", &msk), "11:32 PM");
         assert_eq!(pretty_time_in("2026-11-07T00:05:00Z", &utc), "12:05 AM");
         assert_eq!(pretty_time_in("not-a-stamp", &utc), "not-a-stamp");
+    }
+
+    #[test]
+    fn room_hits_match_names_case_insensitively() {
+        let rooms = vec![
+            Room {
+                id: "g1".to_owned(),
+                name: "general".to_owned(),
+                kind: 'c',
+                unread: 0,
+                lm: None,
+                preview: None,
+                topic: None,
+            },
+            Room {
+                id: "d1".to_owned(),
+                name: "Dev Talk".to_owned(),
+                kind: 'c',
+                unread: 0,
+                lm: None,
+                preview: None,
+                topic: None,
+            },
+        ];
+        assert!(
+            room_hits("", &rooms).is_empty(),
+            "empty query matches nothing"
+        );
+        assert_eq!(
+            room_hits("gen", &rooms)
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["g1"]
+        );
+        assert_eq!(
+            room_hits("DEV", &rooms)
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["d1"],
+            "matching is case-insensitive"
+        );
     }
 }
