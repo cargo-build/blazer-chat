@@ -271,8 +271,15 @@ impl ChatState {
                 None
             }
             ChatEvent::SessionExpired { reason } => {
-                // The shell stays up (there is no login view yet); the
-                // reason surfaces in the error banner.
+                // Same reset as LoggedOut: the dead session's rooms,
+                // messages, threads and drafts must not leak into
+                // whatever account logs in next (cross-account leak,
+                // audit sec-flow #5). The shell stays up — there is no
+                // login view yet — and the reason surfaces in the
+                // error banner.
+                let version = self.messages_version + 1;
+                *self = ChatState::default();
+                self.messages_version = version;
                 self.error = Some(reason.clone());
                 None
             }
@@ -1182,12 +1189,16 @@ mod tests {
     }
 
     #[test]
-    fn session_expired_surfaces_the_reason_but_keeps_the_shell() {
+    fn session_expired_resets_state_and_surfaces_the_reason() {
         let mut state = ChatState::default();
         state.apply(ChatEvent::LoggedIn {
             username: "tester".to_owned(),
             origin: "https://chat.example".to_owned(),
         });
+        state.apply(ChatEvent::Rooms {
+            rooms: vec![room("GENERAL", "general")],
+        });
+        state.active_room = Some("GENERAL".to_owned());
         state.apply(ChatEvent::SessionExpired {
             reason: "session rejected (401): stale — log in again".to_owned(),
         });
@@ -1197,8 +1208,15 @@ mod tests {
         );
         assert_eq!(
             state.username.as_deref(),
-            Some("tester"),
-            "the shell stays up"
+            None,
+            "the dead account must not leak into the next session"
+        );
+        assert!(state.rooms.is_empty(), "rooms reset");
+        assert!(state.messages.is_empty(), "messages reset");
+        assert_eq!(state.active_room, None, "active room reset");
+        assert_eq!(
+            state.messages_version, 1,
+            "the version bump survives so views repaint once"
         );
     }
 

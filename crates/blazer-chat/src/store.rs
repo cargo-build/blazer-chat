@@ -40,7 +40,12 @@ struct StoredRoomsRef<'a> {
 impl Store {
     /// Opens (creating if needed) the store file.
     pub fn open() -> Result<Self, String> {
-        let path = store_path()?;
+        Self::open_at(store_path()?)
+    }
+
+    /// Opens the store at an explicit path — the seam the permission
+    /// regression test uses.
+    fn open_at(path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
@@ -51,6 +56,16 @@ impl Store {
             let setup = db.begin_write().map_err(|error| error.to_string())?;
             setup.open_table(TABLE).map_err(|error| error.to_string())?;
             setup.commit().map_err(|error| error.to_string())?;
+        }
+        // The store keeps the session token in plaintext: owner-only on
+        // the file and the directory, every open, so a store created by
+        // an older build is tightened too (audit sec-local F2).
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("cannot chmod 600 {}: {error}", path.display()))?;
+        if let Some(dir) = path.parent() {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("cannot chmod 700 {}: {error}", dir.display()))?;
         }
         Ok(Self { db })
     }
@@ -206,8 +221,10 @@ impl Store {
 }
 
 /// Filesystem-safe component (one owner; room ids and file names).
+/// Never empty and never a dot segment: `dir.join("..")` would escape
+/// the directory (audit sec-flow #6).
 fn sanitize(value: &str) -> String {
-    value
+    let mapped: String = value
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
@@ -216,7 +233,11 @@ fn sanitize(value: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    match mapped.as_str() {
+        "" | "." | ".." => "default".to_owned(),
+        _ => mapped,
+    }
 }
 
 fn store_path() -> Result<PathBuf, String> {
@@ -322,5 +343,41 @@ mod tests {
             store.load_messages("GENERAL").as_deref(),
             Some(&messages[..])
         );
+    }
+    #[test]
+    fn sanitize_never_yields_dot_segments() {
+        assert_eq!(sanitize(".."), "default");
+        assert_eq!(sanitize("."), "default");
+        assert_eq!(sanitize(""), "default");
+        assert_eq!(sanitize("a/b"), "a_b");
+        // Dots inside a longer name are a plain filename, not a segment.
+        assert_eq!(sanitize("../../etc/passwd"), ".._.._etc_passwd");
+        assert!(!sanitize("../../etc/passwd").contains('/'));
+    }
+
+    #[test]
+    fn store_file_and_directory_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "blazer-chat-perms-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock is past the epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir creates");
+        let path = dir.join("store.redb");
+        Store::open_at(path.clone()).expect("store opens at the temp path");
+        let mode = std::fs::metadata(&path)
+            .expect("store file exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "store.redb is owner-only");
+        let dir_mode = std::fs::metadata(&dir)
+            .expect("store dir exists")
+            .permissions()
+            .mode();
+        assert_eq!(dir_mode & 0o777, 0o700, "the store directory is owner-only");
     }
 }
