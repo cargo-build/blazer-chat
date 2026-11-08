@@ -5,7 +5,7 @@
 use gpui::{
     Anchor, AnyElement, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
     Pixels, Role, ScrollHandle, SharedString, Window, anchored, deferred, div, hsla, img,
-    prelude::*, px, rgb, uniform_list, white,
+    prelude::*, px, rems, rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
@@ -574,11 +574,11 @@ impl ChatRoot {
                         }
                     });
                 match emoji.get(name) {
-                    Some(path) => pill
-                        .flex()
-                        .gap_1()
-                        .items_center()
-                        .child(img(std::path::PathBuf::from(path)).h(px(14.0)).w(px(14.0))),
+                    Some(path) => pill.flex().gap_1().items_center().child(
+                        img(std::path::PathBuf::from(path))
+                            .h(rems(0.875))
+                            .w(rems(0.875)),
+                    ),
                     None => pill,
                 }
                 .child(SharedString::from(format!(
@@ -626,7 +626,7 @@ impl ChatRoot {
             match view.avatar.as_deref() {
                 Some(path) => img(std::path::PathBuf::from(path))
                     .flex_none()
-                    .size(px(32.0))
+                    .size(rems(2.0))
                     .rounded_full()
                     .into_any_element(),
                 None => avatar(&view.sender).into_any_element(),
@@ -1119,7 +1119,7 @@ impl gpui::Render for ChatRoot {
             .get(self.state.username.as_deref().unwrap_or_default())
         {
             Some(path) => img(std::path::PathBuf::from(path))
-                .size(px(32.0))
+                .size(rems(2.0))
                 .rounded_full()
                 .into_any_element(),
             None => avatar(&me).into_any_element(),
@@ -1178,11 +1178,11 @@ impl gpui::Render for ChatRoot {
                                     .p_2()
                                     .child(match self.state.avatars.get(me.as_str()) {
                                         Some(path) => img(std::path::PathBuf::from(path))
-                                            .size(px(40.0))
+                                            .size(rems(2.5))
                                             .rounded_full()
                                             .into_any_element(),
                                         None => div()
-                                            .size(px(40.0))
+                                            .size(rems(2.5))
                                             .child(avatar(&me))
                                             .into_any_element(),
                                     })
@@ -1413,7 +1413,7 @@ fn avatar(sender: &str) -> gpui::Div {
         .unwrap_or('?');
     div()
         .flex_none()
-        .size(px(32.0))
+        .size(rems(2.0))
         .rounded_full()
         .bg(user_color(sender))
         .flex()
@@ -1514,7 +1514,7 @@ fn attachment_card(
     let url = url.to_owned();
     div()
         .mt_0p5()
-        .max_w(px(420.0))
+        .max_w(rems(26.25))
         .flex()
         .flex_col()
         .gap_1()
@@ -1531,7 +1531,7 @@ fn attachment_card(
                 .child(
                     div()
                         .flex_none()
-                        .size(px(40.0))
+                        .size(rems(2.5))
                         .rounded_sm()
                         .bg(rgb(BORDER))
                         .flex()
@@ -1568,7 +1568,7 @@ fn attachment_card(
         )
         .children(image_path.map(|path| {
             img(std::path::PathBuf::from(path))
-                .max_w(px(400.0))
+                .max_w(rems(25.0))
                 .rounded_sm()
         }))
 }
@@ -1627,9 +1627,11 @@ fn span_element(span: Span) -> gpui::Div {
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(ACCENT))
             .child(SharedString::from(name)),
-        Span::Emoji { path } => {
-            div().child(img(std::path::PathBuf::from(&path)).h(px(18.0)).w(px(18.0)))
-        }
+        Span::Emoji { path } => div().child(
+            img(std::path::PathBuf::from(&path))
+                .h(rems(1.125))
+                .w(rems(1.125)),
+        ),
     }
 }
 
