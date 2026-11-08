@@ -694,10 +694,18 @@ impl Element for TextElement {
                 } else {
                     input.content.clone()
                 };
-                let wrap_width = known.width.or(match available.width {
-                    AvailableSpace::Definite(width) => Some(width),
-                    _ => None,
-                });
+                // Taffy's flex-basis pass hands us degenerate widths (Some(0)
+                // while the box is still basis-sized); wrapping at one would
+                // blow the measured height up per character and collapse the
+                // row. Below a floor, measure the single unwrapped row and let
+                // the style width fill the parent instead.
+                let wrap_width = known
+                    .width
+                    .or(match available.width {
+                        AvailableSpace::Definite(width) => Some(width),
+                        _ => None,
+                    })
+                    .filter(|width| *width >= px(120.));
                 let font_size = window.text_style().font_size.to_pixels(window.rem_size());
                 let key = ShapeKey {
                     text: display,
@@ -729,8 +737,10 @@ impl Element for TextElement {
         let marked_range = input.marked_range.clone();
         let style = window.text_style();
 
+        // Placeholder at full opacity but muted: the vendored example's
+        // 20%-black is unreadable on the dark panel (contrast finding).
         let (display_text, text_color) = if input.content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0., 0.2))
+            (input.placeholder.clone(), rgb(MUTED).into())
         } else {
             (input.content.clone(), style.color)
         };
@@ -990,6 +1000,7 @@ impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
+            .w_full()
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)

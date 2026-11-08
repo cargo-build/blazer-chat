@@ -985,9 +985,17 @@ impl gpui::Render for ChatRoot {
             let search_this = search_this.clone();
             div()
                 .flex()
-                .flex_none()
+                .flex_1()
                 .gap_2()
-                .child(div().flex_1().child(self.search.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .rounded_md()
+                        .child(self.search.clone()),
+                )
                 .child(
                     div()
                         .id("search")
