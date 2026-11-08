@@ -1216,6 +1216,42 @@ mod tests {
     }
 
     #[test]
+    fn room_open_clears_the_open_thread() {
+        let mut state = ChatState::default();
+
+        state.apply(ChatEvent::ThreadMessages {
+            room_id: "dm1".to_owned(),
+            tmid: "t1".to_owned(),
+            messages: vec![message("m1", "alice", "reply")],
+        });
+        assert!(state.open_thread.is_some(), "thread opened");
+
+        // Both room-open paths navigate out of the thread view: the
+        // network refresh fold and the cached fold (instant open). The
+        // Rooms event is a background list refresh and must NOT close
+        // an open thread.
+        state.apply(ChatEvent::Messages {
+            room_id: "dm1".to_owned(),
+            messages: vec![message("m0", "alice", "history")],
+        });
+        assert!(
+            state.open_thread.is_none(),
+            "messages fold clears the thread"
+        );
+
+        state.apply(ChatEvent::ThreadMessages {
+            room_id: "dm1".to_owned(),
+            tmid: "t1".to_owned(),
+            messages: vec![message("m1", "alice", "reply")],
+        });
+        state.apply(ChatEvent::CachedMessages {
+            room_id: "dm1".to_owned(),
+            messages: vec![],
+        });
+        assert!(state.open_thread.is_none(), "cached fold clears the thread");
+    }
+
+    #[test]
     fn cached_messages_paint_instantly_and_refresh_follows() {
         let mut state = ChatState::default();
         let follow_up = state.apply(ChatEvent::CachedMessages {

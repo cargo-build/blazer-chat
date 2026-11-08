@@ -1,0 +1,755 @@
+{
+ "messages": [
+  {
+   "_id": "Syn0000000000000X",
+   "rid": "Obj0000000000001X",
+   "msg": "rchat-blazar live probe",
+   "ts": "2026-11-07T23:10:32.367Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-08T01:49:50.928Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "rchat-blazar live probe"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": [],
+   "reactions": {
+    ":+1:": {
+     "usernames": [
+      "alice"
+     ],
+     "names": [
+      "alice"
+     ]
+    }
+   }
+  },
+  {
+   "_id": "Syn0000000000003X",
+   "rid": "Obj0000000000001X",
+   "msg": "кек",
+   "ts": "2026-11-07T22:47:46.133Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-08T00:56:30.790Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "кек"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": [],
+   "reactions": {
+    ":+1:": {
+     "usernames": [
+      "alice"
+     ],
+     "names": [
+      "alice"
+     ]
+    }
+   }
+  },
+  {
+   "_id": "Syn0000000000004X",
+   "rid": "Obj0000000000001X",
+   "msg": "может ли бог создать камень",
+   "ts": "2026-11-07T22:19:05.684Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-08T00:56:22.594Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "может ли бог создать камень"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": [],
+   "reactions": {
+    ":+1:": {
+     "usernames": [
+      "alice"
+     ],
+     "names": [
+      "alice"
+     ]
+    }
+   }
+  },
+  {
+   "_id": "Syn0000000000005X",
+   "rid": "Obj0000000000001X",
+   "msg": "notification probe",
+   "ts": "2026-11-07T21:10:20.826Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-08T00:56:19.928Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "notification probe"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000006X",
+   "rid": "Obj0000000000001X",
+   "msg": "notification probe",
+   "ts": "2026-11-07T20:54:10.308Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-08T00:56:18.871Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "notification probe"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": [],
+   "reactions": {
+    ":+1:": {
+     "usernames": [
+      "alice"
+     ],
+     "names": [
+      "alice"
+     ]
+    }
+   }
+  },
+  {
+   "_id": "Syn0000000000007X",
+   "rid": "Obj0000000000001X",
+   "ts": "2026-11-07T20:32:00.514Z",
+   "msg": "m4 image preview probe",
+   "groupable": false,
+   "file": {
+    "_id": "Obj0000000000008X",
+    "name": "m4-image-probe.png",
+    "type": "image/png",
+    "size": 97,
+    "format": "png",
+    "typeGroup": "image"
+   },
+   "files": [
+    {
+     "_id": "Obj0000000000008X",
+     "name": "m4-image-probe.png",
+     "type": "image/png",
+     "size": 97,
+     "format": "png",
+     "typeGroup": "image"
+    }
+   ],
+   "attachments": [
+    {
+     "title": "m4-image-probe.png",
+     "title_link": "/file-upload/Obj0000000000008X/m4-image-probe.png",
+     "title_link_download": true,
+     "image_dimensions": {
+      "width": 32,
+      "height": 32
+     },
+     "image_preview": "/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAgACADASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFgEBAQEAAAAAAAAAAAAAAAAAAAYI/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AnQCOaRAAAAAAf//Z",
+     "image_url": "/file-upload/Obj0000000000008X/m4-image-probe.png",
+     "image_type": "image/png",
+     "image_size": 97,
+     "type": "file",
+     "fileId": "Obj0000000000008X"
+    }
+   ],
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T21:55:50.542Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "m4 image preview probe"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": [],
+   "reactions": {
+    ":tada:": {
+     "usernames": [
+      "alice"
+     ],
+     "names": [
+      "alice"
+     ]
+    }
+   }
+  },
+  {
+   "_id": "Syn0000000000009X",
+   "rid": "Obj0000000000001X",
+   "msg": "s5 thread root",
+   "ts": "2026-11-07T19:24:56.676Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-08T01:17:16.536Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "s5 thread root"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": [],
+   "replies": [
+    "Syn0000000000002X"
+   ],
+   "tcount": 3,
+   "tlm": "2026-11-08T01:17:16.484Z"
+  },
+  {
+   "_id": "Syn0000000000010X",
+   "rid": "Obj0000000000001X",
+   "ts": "2026-11-07T19:09:50.443Z",
+   "msg": "m4 client upload",
+   "groupable": false,
+   "file": {
+    "_id": "Obj0000000000011X",
+    "name": "m4-client-upload.txt",
+    "type": "text/plain",
+    "size": 30,
+    "format": "",
+    "typeGroup": "text"
+   },
+   "files": [
+    {
+     "_id": "Obj0000000000011X",
+     "name": "m4-client-upload.txt",
+     "type": "text/plain",
+     "size": 30,
+     "format": "",
+     "typeGroup": "text"
+    }
+   ],
+   "attachments": [
+    {
+     "title": "m4-client-upload.txt",
+     "title_link": "/file-upload/Obj0000000000011X/m4-client-upload.txt",
+     "title_link_download": true,
+     "type": "file",
+     "format": "TXT",
+     "size": 30,
+     "fileId": "Obj0000000000011X"
+    }
+   ],
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T19:09:50.465Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "m4 client upload"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000012X",
+   "rid": "Obj0000000000001X",
+   "ts": "2026-11-07T19:06:28.937Z",
+   "msg": "upload probe caption",
+   "groupable": false,
+   "file": {
+    "_id": "Obj0000000000013X",
+    "name": "m4-probe.txt",
+    "type": "text/plain",
+    "size": 16,
+    "format": "",
+    "typeGroup": "text"
+   },
+   "files": [
+    {
+     "_id": "Obj0000000000013X",
+     "name": "m4-probe.txt",
+     "type": "text/plain",
+     "size": 16,
+     "format": "",
+     "typeGroup": "text"
+    }
+   ],
+   "attachments": [
+    {
+     "title": "m4-probe.txt",
+     "title_link": "/file-upload/Obj0000000000013X/m4-probe.txt",
+     "title_link_download": true,
+     "type": "file",
+     "format": "TXT",
+     "size": 16,
+     "fileId": "Obj0000000000013X"
+    }
+   ],
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T19:06:28.964Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "upload probe caption"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000014X",
+   "rid": "Obj0000000000001X",
+   "msg": "notify probe",
+   "ts": "2026-11-07T18:57:54.485Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T18:57:54.511Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "notify probe"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000015X",
+   "rid": "Obj0000000000001X",
+   "msg": "s3 badge check while open",
+   "ts": "2026-11-07T18:56:56.500Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T18:56:56.520Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "s3 badge check while open"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000016X",
+   "rid": "Obj0000000000001X",
+   "msg": "s3 unread badge probe",
+   "ts": "2026-11-07T18:56:19.106Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T18:56:19.127Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "s3 unread badge probe"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000017X",
+   "rid": "Obj0000000000001X",
+   "msg": "s3 unread badge probe",
+   "ts": "2026-11-07T18:55:52.336Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T18:55:52.355Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "s3 unread badge probe"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000018X",
+   "rid": "Obj0000000000001X",
+   "msg": "s2 probe: edited",
+   "ts": "2026-11-07T18:29:41.749Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T18:29:42.054Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "s2 probe: edited"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": [],
+   "reactions": {
+    ":tada:": {
+     "usernames": [
+      "alice"
+     ],
+     "names": [
+      "alice"
+     ]
+    }
+   },
+   "editedAt": "2026-11-07T18:29:42.051Z",
+   "editedBy": {
+    "_id": "Syn0000000000002X",
+    "username": "alice"
+   }
+  },
+  {
+   "_id": "Syn0000000000019X",
+   "rid": "Obj0000000000001X",
+   "msg": "*жирный* _курсив~страйк~_ `код` @alice https://docs.rs :heart_21: :cat_yes: :slowpoke_what:",
+   "ts": "2026-11-07T18:03:37.518Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T18:03:37.563Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "BOLD",
+       "value": [
+        {
+         "type": "PLAIN_TEXT",
+         "value": "жирный"
+        }
+       ]
+      },
+      {
+       "type": "PLAIN_TEXT",
+       "value": " "
+      },
+      {
+       "type": "ITALIC",
+       "value": [
+        {
+         "type": "PLAIN_TEXT",
+         "value": "курсив"
+        },
+        {
+         "type": "STRIKE",
+         "value": [
+          {
+           "type": "PLAIN_TEXT",
+           "value": "страйк"
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "type": "PLAIN_TEXT",
+       "value": " "
+      },
+      {
+       "type": "INLINE_CODE",
+       "value": {
+        "type": "PLAIN_TEXT",
+        "value": "код"
+       }
+      },
+      {
+       "type": "PLAIN_TEXT",
+       "value": " "
+      },
+      {
+       "type": "MENTION_USER",
+       "value": {
+        "type": "PLAIN_TEXT",
+        "value": "alice"
+       }
+      },
+      {
+       "type": "PLAIN_TEXT",
+       "value": " "
+      },
+      {
+       "type": "LINK",
+       "value": {
+        "src": {
+         "type": "PLAIN_TEXT",
+         "value": "https://docs.rs"
+        },
+        "label": [
+         {
+          "type": "PLAIN_TEXT",
+          "value": "https://docs.rs"
+         }
+        ]
+       }
+      },
+      {
+       "type": "PLAIN_TEXT",
+       "value": " "
+      },
+      {
+       "type": "EMOJI",
+       "value": {
+        "type": "PLAIN_TEXT",
+        "value": "heart_21"
+       },
+       "shortCode": "heart_21"
+      },
+      {
+       "type": "PLAIN_TEXT",
+       "value": " "
+      },
+      {
+       "type": "EMOJI",
+       "value": {
+        "type": "PLAIN_TEXT",
+        "value": "cat_yes"
+       },
+       "shortCode": "cat_yes"
+      },
+      {
+       "type": "PLAIN_TEXT",
+       "value": " "
+      },
+      {
+       "type": "EMOJI",
+       "value": {
+        "type": "PLAIN_TEXT",
+        "value": "slowpoke_what"
+       },
+       "shortCode": "slowpoke_what"
+      }
+     ]
+    }
+   ],
+   "mentions": [
+    {
+     "_id": "Syn0000000000002X",
+     "username": "alice",
+     "name": "alice",
+     "type": "user"
+    }
+   ],
+   "channels": [],
+   "urls": [
+    {
+     "url": "https://docs.rs",
+     "meta": {}
+    }
+   ]
+  },
+  {
+   "_id": "Syn0000000000020X",
+   "rid": "Obj0000000000001X",
+   "msg": "app-level live check",
+   "ts": "2026-11-07T17:47:43.933Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T17:47:43.944Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "app-level live check"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000021X",
+   "rid": "Obj0000000000001X",
+   "msg": "rchat-blazar live probe",
+   "ts": "2026-11-07T17:46:57.373Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T17:46:57.393Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "rchat-blazar live probe"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000022X",
+   "rid": "Obj0000000000001X",
+   "msg": "ВОТ ЗДЕСЬ МОЖНО ПИСАТЬ",
+   "ts": "2026-11-07T17:14:25.345Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T17:14:25.359Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "ВОТ ЗДЕСЬ МОЖНО ПИСАТЬ"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  }
+ ],
+ "success": true
+}

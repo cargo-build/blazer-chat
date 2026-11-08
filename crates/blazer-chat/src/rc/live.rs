@@ -746,6 +746,34 @@ mod tests {
         assert_eq!(message.ts, "2026-11-08T00:11:00.000Z");
     }
 
+    /// The REST capture doubles as the live-event body: DDP delivers
+    /// the same message with EJSON dates. Image attachments must
+    /// synthesize the file card on the live path too (regression:
+    /// original-client photos were invisible in live deliveries).
+    #[test]
+    fn live_event_from_captured_message_synthesizes_attachments() {
+        let thread: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/thread-messages.json")).unwrap();
+        let mut message = thread["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m.get("attachments").is_some() && m.get("file").is_none())
+            .expect("fixture has an attachment-only reply")
+            .clone();
+        let ts = message["ts"]
+            .as_str()
+            .expect("REST serves plain ts")
+            .to_owned();
+        message["ts"] = serde_json::json!({ "$date": ts });
+        let event = serde_json::json!({ "fields": { "args": [message] } });
+
+        let msg = message_from_event(&event).expect("parse");
+        assert_eq!(msg.ts, ts);
+        let file = msg.file.expect("attachment synthesizes a file");
+        assert!(file.path.starts_with("/file-upload/"));
+    }
+
     #[test]
     fn websocket_url_carries_scheme_host_and_path() {
         let mut settings = crate::rc::RcSettings::parse("https://example.com").unwrap();

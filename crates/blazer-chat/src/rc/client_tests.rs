@@ -39,7 +39,7 @@ impl FakeTransport {
             .iter()
             .find(|(needle, _, _)| path.contains(needle))
             .map(|(_, status, body)| (*status, body.as_str()))
-            .expect("no route matched the request path")
+            .unwrap_or_else(|| panic!("no route matched the request path: {path}"))
     }
 
     fn last_request(&self) -> String {
@@ -128,6 +128,93 @@ fn authenticated_routes() -> Vec<(&'static str, u16, &'static str)> {
         ("rooms.mediaConfirm/", 200, SEND_BODY),
         ("chat.getThreadMessages", 200, THREAD_BODY),
     ]
+}
+
+/// Captured live payloads, sanitized: real server shapes (file
+/// uploads, image attachments, reactions, thread replies, room kinds)
+/// must keep decoding after wire edits, and the fixtures stay free of
+/// private data (see the privacy test below).
+const IM_HISTORY_FIXTURE: &str = include_str!("fixtures/im-history.json");
+const THREAD_MESSAGES_FIXTURE: &str = include_str!("fixtures/thread-messages.json");
+const ROOMS_GET_FIXTURE: &str = include_str!("fixtures/rooms-get.json");
+
+#[test]
+fn captured_history_fixture_decodes_the_real_shapes() {
+    let mut routes = authenticated_routes();
+    routes.retain(|(route, ..)| !matches!(*route, "rooms.get" | "im.history"));
+    routes.push(("rooms.get", 200, ROOMS_GET_FIXTURE));
+    routes.push(("im.history", 200, IM_HISTORY_FIXTURE));
+    let transport = FakeTransport::answering(&routes);
+    let mut rc = client(transport);
+    futures_lite::future::block_on(rc.login("alice", "secret")).unwrap();
+    let rooms = futures_lite::future::block_on(rc.rooms()).unwrap();
+    let dm = rooms
+        .iter()
+        .find(|room| room.kind == 'd')
+        .expect("fixture has a DM");
+    let messages = futures_lite::future::block_on(rc.history(&dm.id)).unwrap();
+
+    assert!(!messages.is_empty(), "fixture history is not empty");
+    // The fixture's 3 uploaded messages carry BOTH `file` and an
+    // `attachments` array; `file` wins and the card decodes. Reaction
+    // pills fold in on 6 messages.
+    let uploads = messages.iter().filter(|m| m.file.is_some()).count();
+    assert_eq!(uploads, 3, "file takes precedence over attachments");
+    let any_file = messages.iter().find_map(|m| m.file.clone()).unwrap();
+    assert!(any_file.path.starts_with("/file-upload/"));
+    let reacted = messages.iter().filter(|m| !m.reactions.is_empty()).count();
+    assert!(reacted >= 6, "reaction decode, got {reacted}");
+}
+
+#[test]
+fn captured_thread_fixture_decodes_thread_replies() {
+    let routes: Vec<(&'static str, u16, &'static str)> = vec![
+        ("login", 200, LOGIN_BODY),
+        ("chat.getThreadMessages", 200, THREAD_MESSAGES_FIXTURE),
+    ];
+    let transport = FakeTransport::answering(&routes);
+    let mut rc = client(transport);
+    futures_lite::future::block_on(rc.login("alice", "secret")).unwrap();
+    let thread = futures_lite::future::block_on(rc.thread_messages("t1")).unwrap();
+    assert!(!thread.is_empty(), "fixture thread is not empty");
+    assert!(
+        thread.iter().all(|m| m.tmid.is_some()),
+        "thread replies carry tmid"
+    );
+    // The captured image reply was posted through the raw API: it has
+    // `attachments` and NO `file` — the fallback must synthesize the
+    // same card from the attachment metadata.
+    let from_attachment = thread
+        .iter()
+        .find(|m| m.file.is_some())
+        .expect("attachment-only reply synthesizes a file");
+    assert!(
+        from_attachment
+            .file
+            .as_ref()
+            .unwrap()
+            .path
+            .starts_with("/file-upload/")
+    );
+    assert_eq!(from_attachment.file.as_ref().unwrap().mime, "image/png");
+}
+
+#[test]
+fn captured_fixtures_stay_free_of_private_data() {
+    // The fixtures are sanitized captures in a public repository:
+    // this guard fails the gate if a re-capture ever leaks.
+    for fixture in [
+        IM_HISTORY_FIXTURE,
+        THREAD_MESSAGES_FIXTURE,
+        ROOMS_GET_FIXTURE,
+    ] {
+        assert!(!fixture.contains("21-school"), "campus domain leaked");
+        assert!(
+            !fixture.contains("rocketchat-student"),
+            "campus host leaked"
+        );
+        assert!(!fixture.contains("rorikstr"), "operator username leaked");
+    }
 }
 
 #[test]

@@ -1,0 +1,93 @@
+{
+ "messages": [
+  {
+   "_id": "Syn0000000000023X",
+   "rid": "Obj0000000000001X",
+   "msg": "s5 thread reply",
+   "tmid": "Syn0000000000009X",
+   "ts": "2026-11-07T19:24:56.821Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T19:24:56.841Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "s5 thread reply"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000024X",
+   "rid": "Obj0000000000001X",
+   "msg": "socket thread reply",
+   "tmid": "Syn0000000000009X",
+   "ts": "2026-11-07T19:31:08.613Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-07T19:31:08.633Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "socket thread reply"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  },
+  {
+   "_id": "Syn0000000000025X",
+   "rid": "Obj0000000000001X",
+   "tmid": "Syn0000000000009X",
+   "msg": "thread image probe",
+   "attachments": [
+    {
+     "title": "thread-photo-probe.png",
+     "image_url": "/file-upload/Obj0000000000026X/thread-photo-probe.png",
+     "image_type": "image/png"
+    }
+   ],
+   "ts": "2026-11-08T01:17:16.484Z",
+   "u": {
+    "_id": "Syn0000000000002X",
+    "username": "alice",
+    "name": "alice"
+   },
+   "_updatedAt": "2026-11-08T01:17:16.509Z",
+   "md": [
+    {
+     "type": "PARAGRAPH",
+     "value": [
+      {
+       "type": "PLAIN_TEXT",
+       "value": "thread image probe"
+      }
+     ]
+    }
+   ],
+   "mentions": [],
+   "channels": [],
+   "urls": []
+  }
+ ],
+ "success": true
+}
