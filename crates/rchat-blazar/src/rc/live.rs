@@ -549,12 +549,11 @@ fn live_io(error: WsError) -> RcError {
 mod tests {
     use super::*;
 
-    /// The probes' configuration: live URL (or the school server) and
-    /// the self-DM — the only permitted write target (AGENTS.md
-    /// live-send policy).
+    /// The probes' configuration: live URL (required) and the self-DM —
+    /// the only permitted write target (AGENTS.md live-send policy).
     fn probe_env() -> (crate::rc::RcSettings, String) {
-        let url = std::env::var("RCHAT_LIVE_URL")
-            .unwrap_or_else(|_| "https://rocketchat-student.21-school.ru".to_owned());
+        let url =
+            std::env::var("RCHAT_LIVE_URL").expect("set RCHAT_LIVE_URL to the server under test");
         let self_dm = std::env::var("RCHAT_SELF_DM").unwrap();
         (crate::rc::RcSettings::parse(&url).unwrap(), self_dm)
     }

@@ -310,9 +310,9 @@ mod tests {
 
     #[test]
     fn links_and_mentions_decode() {
-        let spans = parse("см. https://example.com/x и @rorikstr", &no_emoji);
+        let spans = parse("см. https://example.com/x и @someuser", &no_emoji);
         assert!(matches!(&spans[1], Span::Link { url, .. } if url == "https://example.com/x"));
-        assert!(matches!(&spans[3], Span::Mention(name) if name == "@rorikstr"));
+        assert!(matches!(&spans[3], Span::Mention(name) if name == "@someuser"));
     }
 
     #[test]

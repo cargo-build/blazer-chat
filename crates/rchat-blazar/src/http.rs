@@ -371,8 +371,8 @@ mod tests {
     #[test]
     #[ignore = "live network probe"]
     fn live_tls_roundtrip() {
-        let url = std::env::var("RCHAT_LIVE_URL")
-            .unwrap_or_else(|_| "https://rocketchat-student.21-school.ru".to_owned());
+        let url =
+            std::env::var("RCHAT_LIVE_URL").expect("set RCHAT_LIVE_URL to the server under test");
         let settings = crate::rc::RcSettings::parse(&url).unwrap();
         let transport =
             HttpTransport::new(settings.addr(), settings.host_header(), settings.is_tls());

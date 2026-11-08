@@ -1,6 +1,9 @@
 # Public, non-secret settings of rchat-blazar.
 # Credentials never go here: use the RCHAT_USER / RCHAT_PASSWORD environment
 # variables or the control socket (POST /login {user, password}).
+# Point [server].url at your Rocket.Chat instance; the RCHAT_URL environment
+# variable overrides it (a concrete deployment's address stays out of the
+# repository).
 
 [server]
-url = "https://rocketchat-student.21-school.ru"
+url = "https://chat.example.com"

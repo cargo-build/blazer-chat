@@ -14,7 +14,14 @@ impl AppSettings {
     /// Reads `public.toml` when present; a missing file or a missing
     /// `[server]` table falls back to the public defaults, while a malformed
     /// value is an error — wrong settings must not be silently ignored.
+    /// `RCHAT_URL` overrides the file: a concrete deployment's address is
+    /// instance-specific and stays out of the repository.
     pub fn load() -> Result<Self, String> {
+        match std::env::var("RCHAT_URL") {
+            Ok(url) => return Self::from_url(&url),
+            Err(std::env::VarError::NotPresent) => {}
+            Err(error) => return Err(error.to_string()),
+        }
         let raw = match std::fs::read_to_string("public.toml") {
             Ok(raw) => Some(raw),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -26,13 +33,18 @@ impl AppSettings {
         Self::load_from(&raw)
     }
 
+    /// Parses a server URL into the settings.
+    fn from_url(url: &str) -> Result<Self, String> {
+        RcSettings::parse(url)
+            .map_err(|error| error.to_string())
+            .map(|server| Self { server })
+    }
+
     /// Loads from in-memory TOML; also the test seam.
     fn load_from(raw: &str) -> Result<Self, String> {
         let parsed: PublicToml = toml::from_str(raw).map_err(|error| error.to_string())?;
         match parsed.server.map(|server| server.url) {
-            Some(url) => RcSettings::parse(&url)
-                .map_err(|error| error.to_string())
-                .map(|server| Self { server }),
+            Some(url) => Self::from_url(&url),
             None => Ok(Self::default()),
         }
     }
@@ -71,6 +83,13 @@ mod tests {
     fn parses_https_with_default_port() {
         let settings =
             AppSettings::load_from("[server]\nurl = \"https://rocketchat.example.com\"\n").unwrap();
+        assert!(settings.server.is_tls());
+        assert_eq!(settings.server.addr().1, 443);
+    }
+
+    #[test]
+    fn parses_override_url() {
+        let settings = AppSettings::from_url("https://chat.example.com").unwrap();
         assert!(settings.server.is_tls());
         assert_eq!(settings.server.addr().1, 443);
     }
