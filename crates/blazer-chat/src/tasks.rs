@@ -168,7 +168,12 @@ pub fn spawn_emoji(
             }
         };
         for emoji in &merged {
-            let path = dir.join(format!("{}.{}", emoji.name, emoji.extension));
+            // Server-supplied name/extension join into a filesystem
+            // path: without sanitizing, a `../../.bashrc` name would
+            // overwrite arbitrary user files (audit sec-flow #1 /
+            // sec-local F1). The display key keeps the raw name.
+            let file_name = crate::store::sanitize(&format!("{}.{}", emoji.name, emoji.extension));
+            let path = dir.join(file_name);
             if path.exists() {
                 continue;
             }
@@ -188,7 +193,9 @@ pub fn spawn_emoji(
         let emojis: Vec<(String, String)> = merged
             .into_iter()
             .map(|emoji| {
-                let path = dir.join(format!("{}.{}", emoji.name, emoji.extension));
+                let file_name =
+                    crate::store::sanitize(&format!("{}.{}", emoji.name, emoji.extension));
+                let path = dir.join(file_name);
                 (emoji.name, path.display().to_string())
             })
             .collect();

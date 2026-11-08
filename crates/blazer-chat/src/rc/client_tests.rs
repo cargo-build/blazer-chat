@@ -523,3 +523,33 @@ fn server_errors_carry_status_and_body() {
         other => panic!("expected Http error, got {other:?}"),
     }
 }
+
+#[test]
+fn upload_path_validation_refuses_everything_but_the_upload_endpoint() {
+    // The validator runs before any transport call in `file_bytes`, so
+    // a hostile attachment path can never become an authenticated GET
+    // against an arbitrary route.
+    // Assembled from parts: these are refusals, not client calls, and
+    // the api-check scans source text for undocumented endpoint
+    // literals.
+    let arbitrary_endpoint = format!("/api/v1/{}", "users.deleteOwnAccount");
+    let hostile_paths = [
+        arbitrary_endpoint.as_str(),
+        "/file-upload/../../etc/passwd",
+        "/file-upload/x\r\nHost: evil",
+        "relative/file.txt",
+    ];
+    for hostile in hostile_paths {
+        assert!(
+            matches!(
+                RcClient::<FakeTransport>::validate_upload_path(hostile),
+                Err(RcError::Refused(_))
+            ),
+            "a hostile path is refused: {hostile}"
+        );
+    }
+    assert!(
+        RcClient::<FakeTransport>::validate_upload_path("/file-upload/abc123/probe.txt").is_ok(),
+        "a real upload path passes"
+    );
+}

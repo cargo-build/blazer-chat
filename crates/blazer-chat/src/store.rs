@@ -220,10 +220,11 @@ impl Store {
     }
 }
 
-/// Filesystem-safe component (one owner; room ids and file names).
+/// Filesystem-safe component (one owner: room ids, file names, emoji
+/// cache names).
 /// Never empty and never a dot segment: `dir.join("..")` would escape
 /// the directory (audit sec-flow #6).
-fn sanitize(value: &str) -> String {
+pub(crate) fn sanitize(value: &str) -> String {
     let mapped: String = value
         .chars()
         .map(|c| {

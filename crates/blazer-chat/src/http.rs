@@ -8,7 +8,7 @@
 use std::io::{ErrorKind, Read as _};
 
 use compio::buf::BufResult;
-use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::tls::{TlsConnector, TlsStream};
 
@@ -80,21 +80,58 @@ impl HttpTransport {
         body: &[u8],
     ) -> std::io::Result<Vec<u8>> {
         let mut conn = self.connect().await?;
-        let mut head = format!(
-            "{} {} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\ncontent-type: {}\r\n",
-            method, path, self.host, content_type
-        );
-        for (name, value) in headers {
-            head.push_str(name);
-            head.push_str(": ");
-            head.push_str(value);
-            head.push_str("\r\n");
-        }
-        head.push_str(&format!("content-length: {}\r\n\r\n", body.len()));
+        let head = request_head(method, path, &self.host, content_type, headers, body.len())?;
         conn.write_all(head.into_bytes()).await?;
         conn.write_all(body.to_vec()).await?;
-        conn.read_to_end(Vec::with_capacity(64 * 1024)).await
+        conn.read_bounded(MAX_RESPONSE_BYTES).await
     }
+}
+
+/// Any single response is capped here: legitimate payloads (history
+/// pages, attachments) sit far below, and a hostile server must not
+/// grow the process without bound (audit sec-network MF3).
+const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Builds the request head, refusing control characters in anything the
+/// server or session supplied: a CR/LF in the path, host or a header
+/// value would inject request lines or headers (audit sec-flow #2 /
+/// sec-network MF2). Header names come only from our code, but a stray
+/// colon would still split a header.
+fn request_head(
+    method: &str,
+    path: &str,
+    host: &str,
+    content_type: &str,
+    headers: &[(String, String)],
+    body_len: usize,
+) -> std::io::Result<String> {
+    let control = |value: &str| value.contains(['\r', '\n', '\0']);
+    if [method, path, host, content_type].into_iter().any(control) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "request line carries control characters",
+        ));
+    }
+    for (name, value) in headers {
+        if control(name) || control(value) || name.contains(':') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "header carries control characters or a split colon",
+            ));
+        }
+    }
+    let mut head = format!(
+        "{} {} HTTP/1.1\r\nhost: {}\r\nconnection: close\r\ncontent-type: {}\r\n",
+        method, path, host, content_type
+    );
+    for (name, value) in headers {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str(&format!("content-length: {}\r\n\r\n", body_len));
+    Ok(head)
 }
 
 impl Transport for HttpTransport {
@@ -157,11 +194,7 @@ impl HttpTransport {
         if !gzipped {
             return Ok(wire.body);
         }
-        let mut decoded = Vec::with_capacity(wire.body.len() * 4);
-        flate2::read::GzDecoder::new(&wire.body[..])
-            .read_to_end(&mut decoded)
-            .map_err(|error| std::io::Error::other(format!("gzip decode: {error}")))?;
-        Ok(decoded)
+        decode_gzip_capped(&wire.body)
     }
 }
 
@@ -189,13 +222,50 @@ impl Conn {
         }
     }
 
-    async fn read_to_end(&mut self, bytes: Vec<u8>) -> std::io::Result<Vec<u8>> {
-        let BufResult(_, raw) = match self {
-            Self::Plain(stream) => stream.read_to_end(bytes).await,
-            Self::Tls(stream) => stream.read_to_end(bytes).await,
-        };
-        Ok(raw)
+    /// Reads to EOF through a bounded buffer: `read_to_end` grew the
+    /// vector without limit and even swallowed IO errors (`Ok(raw)`
+    /// unconditionally).
+    async fn read_bounded(&mut self, cap: usize) -> std::io::Result<Vec<u8>> {
+        let mut buf = Vec::with_capacity(64 * 1024);
+        loop {
+            let chunk = Vec::with_capacity(16 * 1024);
+            let BufResult(read, filled) = match self {
+                Self::Plain(stream) => stream.read(chunk).await,
+                Self::Tls(stream) => stream.read(chunk).await,
+            };
+            read?;
+            if filled.is_empty() {
+                return Ok(buf);
+            }
+            if buf.len() + filled.len() > cap {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "response exceeds the 64 MiB cap",
+                ));
+            }
+            buf.extend_from_slice(&filled);
+        }
     }
+}
+
+/// Inflates a gzip body under [`MAX_RESPONSE_BYTES`]: a decompression
+/// bomb must not grow the process without bound (audit sec-network
+/// MF3). The cap is checked after a bounded `take`, so a bomb that
+/// would exceed it fails instead of truncating silently.
+fn decode_gzip_capped(body: &[u8]) -> std::io::Result<Vec<u8>> {
+    // The Vec grows only as far as the decoder's take() allows.
+    let mut decoded = Vec::with_capacity(body.len().saturating_mul(4));
+    flate2::read::GzDecoder::new(body)
+        .take(MAX_RESPONSE_BYTES as u64 + 1)
+        .read_to_end(&mut decoded)
+        .map_err(|error| std::io::Error::other(format!("gzip decode: {error}")))?;
+    if decoded.len() > MAX_RESPONSE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "gzip body exceeds the 64 MiB cap",
+        ));
+    }
+    Ok(decoded)
 }
 
 /// Wire framing result: status, the decoded body as raw bytes (binary
@@ -412,5 +482,85 @@ mod tests {
             &response.body[..response.body.len().min(120)]
         );
         assert!(response.status == 400 || response.status == 401);
+    }
+
+    #[test]
+    fn request_head_refuses_control_characters() {
+        assert!(
+            request_head(
+                "GET",
+                "/api/v1/channels.history",
+                "host",
+                "application/json",
+                &[],
+                0
+            )
+            .is_ok()
+        );
+        // Server-supplied path: CR/LF would inject request lines.
+        assert!(
+            request_head(
+                "GET",
+                "/x\r\nHost: evil",
+                "host",
+                "application/json",
+                &[],
+                0
+            )
+            .is_err()
+        );
+        assert!(request_head("GET", "/x\0", "host", "application/json", &[], 0).is_err());
+        // Host and content-type come from settings/server too.
+        assert!(
+            request_head(
+                "GET",
+                "/x",
+                "host\r\nset-cookie: x",
+                "application/json",
+                &[],
+                0
+            )
+            .is_err()
+        );
+        assert!(request_head("GET", "/x", "host", "application/json\r\n", &[], 0).is_err());
+        // Header values carry the session token and server strings.
+        let headers = vec![("x-token".to_owned(), "v\r\ninject".to_owned())];
+        assert!(request_head("GET", "/x", "host", "application/json", &headers, 0).is_err());
+        // A colon in the header name would split an extra header.
+        let split = vec![("x: inject".to_owned(), "v".to_owned())];
+        assert!(request_head("GET", "/x", "host", "application/json", &split, 0).is_err());
+    }
+
+    #[test]
+    fn gzip_decode_is_capped_against_bombs() {
+        // ~65 MiB of zeros compress small but decompress over the cap:
+        // decoding must fail instead of growing the process.
+        let bomb = {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder
+                .write_all(&vec![0u8; MAX_RESPONSE_BYTES + 1024 * 1024])
+                .expect("bomb compresses");
+            encoder.finish().expect("bomb finishes")
+        };
+        let Err(error) = decode_gzip_capped(&bomb) else {
+            panic!("a bomb over the cap must fail");
+        };
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidData,
+            "a bomb fails with InvalidData: {error}"
+        );
+        // An ordinary payload still decodes.
+        let plain = {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(b"hello gzip").expect("small compresses");
+            encoder.finish().expect("small finishes")
+        };
+        assert_eq!(
+            decode_gzip_capped(&plain).expect("small decodes"),
+            b"hello gzip"
+        );
     }
 }

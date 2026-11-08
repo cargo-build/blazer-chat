@@ -96,6 +96,7 @@ impl RcClient<HttpTransport> {
 
     /// Downloads an attachment (authenticated GET) as raw bytes.
     pub async fn file_bytes(&self, path: &str) -> Result<Vec<u8>, RcError> {
+        Self::validate_upload_path(path)?;
         let headers = self.auth_headers()?;
         self.transport
             .get_bytes_with_headers(path, &headers)
@@ -105,6 +106,21 @@ impl RcClient<HttpTransport> {
 }
 
 impl<T: Transport> RcClient<T> {
+    /// Attachment paths arrive from server-controlled message fields:
+    /// anything outside the upload endpoint would turn rendering a
+    /// message into an authenticated GET against an arbitrary API
+    /// route, and control characters would inject into the request
+    /// line (audit sec-flow #2). Checked before any transport call.
+    pub(crate) fn validate_upload_path(path: &str) -> Result<(), RcError> {
+        if !path.starts_with("/file-upload/")
+            || path.chars().any(|c| c.is_whitespace() || c.is_control())
+            || path.contains("..")
+        {
+            return Err(RcError::Refused("invalid file upload path".into()));
+        }
+        Ok(())
+    }
+
     /// Injection point: any transport (canned in tests, real in prod).
     /// `settings` stays on the signature for call-site symmetry; only the
     /// transport decides the connection today.
