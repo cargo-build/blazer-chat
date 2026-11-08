@@ -61,6 +61,9 @@ pub fn run(settings: RcSettings) {
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Below ~800px the search field and the room column
+                    // collide; keep the layout intact instead.
+                    window_min_size: Some(size(px(760.0), px(480.0))),
                     titlebar: Some(gpui::TitlebarOptions {
                         title: Some("blazer-chat".into()),
                         ..Default::default()

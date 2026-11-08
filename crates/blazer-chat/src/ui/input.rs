@@ -78,10 +78,17 @@ impl TextInput {
         &self.content
     }
 
-    /// Replaces the text and clears selection/IME state.
+    /// Replaces the text, moving the caret to the end. Unlike
+    /// [`Self::reset`] this keeps the new content — delegating to
+    /// `reset` here wiped it and broke the Edit flow.
     pub(crate) fn set_content(&mut self, text: &str, cx: &mut Context<Self>) {
         self.content = text.to_owned().into();
-        self.reset(cx);
+        self.selected_range = self.content.len()..self.content.len();
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.last_layout = None;
+        self.last_bounds = None;
+        self.is_selecting = false;
         cx.notify();
     }
 
