@@ -4,8 +4,8 @@
 
 use gpui::{
     Anchor, AnyElement, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    ListAlignment, ListState, Pixels, SharedString, Window, anchored, deferred, div, hsla, img,
-    list, prelude::*, px, rgb, uniform_list, white,
+    ListAlignment, ListState, Pixels, Role, SharedString, Window, anchored, deferred, div, hsla,
+    img, list, prelude::*, px, rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
@@ -486,6 +486,9 @@ impl ChatRoot {
     /// A centered day divider between messages of different dates.
     fn day_separator(&self, day_ts: &str) -> AnyElement {
         div()
+            .id(SharedString::from(format!("day-{day_ts}")))
+            .role(Role::Heading)
+            .aria_label(format!("Messages from {}", pretty_day(day_ts)))
             .flex_none()
             .w_full()
             .flex()
@@ -533,6 +536,11 @@ impl ChatRoot {
                 let names = reaction.usernames.join(", ");
                 let pill = div()
                     .id(SharedString::from(format!("react-{msg_id}-{name}")))
+                    .role(Role::Button)
+                    .aria_label(format!(
+                        "React {name} — {count} so far: {names}",
+                        count = reaction.count()
+                    ))
                     .px_1p5()
                     .rounded_full()
                     .border_1()
@@ -576,6 +584,11 @@ impl ChatRoot {
             let tmid = msg_id.clone();
             div()
                 .id(SharedString::from(format!("thread-{msg_id}")))
+                .role(Role::Button)
+                .aria_label(format!(
+                    "Open thread — {count} {}",
+                    if count == &1 { "reply" } else { "replies" }
+                ))
                 .mt_0p5()
                 .px_2()
                 .py_0p5()
@@ -614,6 +627,17 @@ impl ChatRoot {
         };
         div()
             .id(SharedString::from(format!("msg-{msg_id}")))
+            .role(Role::ListItem)
+            .aria_label(format!(
+                "{} at {}, {}",
+                view.sender,
+                view.ts,
+                if view.text.is_empty() {
+                    "attachment".to_owned()
+                } else {
+                    view.text.replace('\n', " ")
+                }
+            ))
             .group("msg")
             .flex()
             .gap_2()
@@ -749,6 +773,11 @@ impl gpui::Render for ChatRoot {
                     let this = this.clone();
                     div()
                         .id(SharedString::from(room.id.clone()))
+                        .role(Role::ListItem)
+                        .aria_label(match room.unread {
+                            0 => room.name.clone(),
+                            unread => format!("{} — {} unread", room.name, unread),
+                        })
                         .px_2()
                         .py_1()
                         .h(px(48.0))
@@ -925,6 +954,8 @@ impl gpui::Render for ChatRoot {
                 .child(
                     div()
                         .id("search")
+                        .role(Role::Button)
+                        .aria_label("Search rooms")
                         .px_3()
                         .py_1()
                         .bg(rgb(PANEL))
@@ -1262,6 +1293,8 @@ impl gpui::Render for ChatRoot {
                     .child(
                         div()
                             .id("user-avatar")
+                            .role(Role::Button)
+                            .aria_label("Account menu")
                             .flex_none()
                             .cursor_pointer()
                             .rounded_full()
@@ -1317,6 +1350,8 @@ impl gpui::Render for ChatRoot {
                     .child(
                         div()
                             .id("attach")
+                            .role(Role::Button)
+                            .aria_label("Attach a file")
                             .flex_none()
                             .px_2()
                             .py_1()
@@ -1342,6 +1377,11 @@ impl gpui::Render for ChatRoot {
                     .child(
                         div()
                             .id("send")
+                            .role(Role::Button)
+                            .aria_label(match self.editing.is_some() {
+                                true => "Save edited message",
+                                false => "Send message",
+                            })
                             .px_3()
                             .py_1()
                             .bg(rgb(PANEL))
