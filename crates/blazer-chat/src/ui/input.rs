@@ -5,8 +5,16 @@
 //! Enter submits, and paste keeps line breaks. Internal editing logic
 //! (selection, IME marked ranges, mouse) stays as shipped except where a
 //! mapping had to become line-aware.
+//!
+//! Shaping is cached per (text, font size, wrap width, line height): a
+//! frame never reshapes text unless one of those changed, because the
+//! window re-renders on every scroll tick and reshaping each frame made
+//! scrolling janky.
 
+use std::cell::RefCell;
 use std::ops::Range;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId,
@@ -53,6 +61,45 @@ pub(crate) enum TextInputEvent {
     Submitted,
 }
 
+/// What a shaping result depends on; equality means the cached wrapped
+/// lines are still valid.
+#[derive(PartialEq)]
+struct ShapeKey {
+    text: SharedString,
+    font_size: Pixels,
+    wrap_width: Option<Pixels>,
+}
+
+/// Shaped lines plus everything the mappings need, shared across frames.
+struct ShapeEntry {
+    key: ShapeKey,
+    lines: Vec<WrappedLine>,
+    /// Byte offset of each source line within the text — index-parallel
+    /// to `lines`.
+    line_offsets: Vec<usize>,
+    /// Unwrapped byte length of each source line.
+    line_lens: Vec<usize>,
+    total_rows: usize,
+}
+
+impl ShapeEntry {
+    fn build(key: ShapeKey, lines: Vec<WrappedLine>) -> Self {
+        let line_lens: Vec<usize> = lines.iter().map(WrappedLine::len).collect();
+        let total_rows: usize = lines
+            .iter()
+            .map(line_rows)
+            .sum::<usize>()
+            .clamp(1, COMPOSER_MAX_ROWS);
+        Self {
+            line_offsets: line_starts(&key.text),
+            key,
+            lines,
+            line_lens,
+            total_rows,
+        }
+    }
+}
+
 pub(crate) struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
@@ -60,11 +107,13 @@ pub(crate) struct TextInput {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    /// One wrapped layout per source line (split on `\n`), from the last
-    /// paint. Empty until then.
-    last_layout: Vec<WrappedLine>,
-    /// Line height the layouts were painted with; maps mouse positions
-    /// back to rows.
+    /// Shared across measure and prepaint so a frame reshapes only when
+    /// the key changed; `Rc<RefCell>` because both phases run on the UI
+    /// thread and the closure in `request_measured_layout` is `Fn`.
+    shape_cache: Rc<RefCell<Option<Arc<ShapeEntry>>>>,
+    /// Entry painted last; drives the mouse/IME mappings.
+    last_shape: Option<Arc<ShapeEntry>>,
+    /// Line height the entry was painted with.
     last_line_height: Pixels,
     /// Vertical scroll applied when content exceeds `COMPOSER_MAX_ROWS`.
     last_scroll: Pixels,
@@ -87,7 +136,8 @@ impl TextInput {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
-            last_layout: Vec::new(),
+            shape_cache: Rc::new(RefCell::new(None)),
+            last_shape: None,
             last_line_height: px(28.),
             last_scroll: px(0.),
             last_bounds: None,
@@ -108,7 +158,7 @@ impl TextInput {
         self.selected_range = self.content.len()..self.content.len();
         self.selection_reversed = false;
         self.marked_range = None;
-        self.last_layout = Vec::new();
+        self.last_shape = None;
         self.last_bounds = None;
         self.is_selecting = false;
         cx.notify();
@@ -244,7 +294,10 @@ impl TextInput {
     }
 
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
-        if self.content.is_empty() || self.last_layout.is_empty() {
+        let Some(shape) = self.last_shape.as_ref() else {
+            return 0;
+        };
+        if shape.key.text.is_empty() {
             return 0;
         }
 
@@ -260,8 +313,8 @@ impl TextInput {
         let line_height = self.last_line_height;
         let mut row_top = bounds.top() - self.last_scroll;
         let mut bytes_before = 0usize;
-        for line in &self.last_layout {
-            let is_last = bytes_before + line.len() >= self.content.len();
+        for (index, line) in shape.lines.iter().enumerate() {
+            let is_last = bytes_before + shape.line_lens[index] >= shape.key.text.len();
             let height = line_height * line_rows(line);
             if position.y < row_top + height || is_last {
                 let local = line
@@ -270,12 +323,12 @@ impl TextInput {
                         line_height,
                     )
                     .unwrap_or_else(|closest| closest);
-                return (bytes_before + local).min(self.content.len());
+                return (bytes_before + local).min(shape.key.text.len());
             }
             row_top += height;
-            bytes_before += line.len() + 1;
+            bytes_before += shape.line_lens[index] + 1;
         }
-        self.content.len()
+        shape.key.text.len()
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -358,7 +411,7 @@ impl TextInput {
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
-        self.last_layout = Vec::new();
+        self.last_shape = None;
         self.last_bounds = None;
         self.is_selecting = false;
         cx.notify();
@@ -463,8 +516,9 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<gpui::Bounds<Pixels>> {
-        let start = self.painted_position(self.range_from_utf16(&range_utf16).start)?;
-        let end = self.painted_position(self.range_from_utf16(&range_utf16).end)?;
+        let range = self.range_from_utf16(&range_utf16);
+        let start = self.painted_position(range.start)?;
+        let end = self.painted_position(range.end)?;
         Some(Bounds::from_corners(
             point(
                 bounds.left() + start.x,
@@ -488,25 +542,17 @@ impl EntityInputHandler for TextInput {
 }
 
 impl TextInput {
-    /// Painted offset of a byte index within the last layout, in element
-    /// coordinates (before scroll). `None` without a prior paint.
+    /// Painted offset of a byte index within the last painted entry, in
+    /// element coordinates (before scroll). `None` without a prior paint.
     fn painted_position(&self, offset: usize) -> Option<Point<Pixels>> {
-        let mut bytes_before = 0usize;
-        let mut rows_before = 0usize;
-        for line in &self.last_layout {
-            let len = line.len();
-            if offset <= bytes_before + len {
-                let position =
-                    line.position_for_index(offset - bytes_before, self.last_line_height)?;
-                return Some(point(
-                    position.x,
-                    position.y + self.last_line_height * rows_before,
-                ));
-            }
-            rows_before += line_rows(line);
-            bytes_before += len + 1;
-        }
-        None
+        let shape = self.last_shape.as_ref()?;
+        let (line_index, local) = locate_offset(&shape.line_offsets, &shape.line_lens, offset);
+        let line = shape.lines.get(line_index)?;
+        let position = line.position_for_index(local, self.last_line_height)?;
+        Some(point(
+            position.x,
+            position.y + self.last_line_height * rows_before(&shape.lines, line_index),
+        ))
     }
 }
 
@@ -553,12 +599,53 @@ fn scroll_rows(cursor_row: usize, visible_rows: usize) -> usize {
     cursor_row.saturating_sub(visible_rows.saturating_sub(1))
 }
 
+/// Rows of `lines` before line `index`.
+fn rows_before(lines: &[WrappedLine], index: usize) -> usize {
+    lines.iter().take(index).map(line_rows).sum()
+}
+
+/// Shaped lines for `key`, through the shared cache: a key miss shapes
+/// once and stores; a hit reuses the previous frame's lines untouched.
+fn ensure_shaped(
+    cache: &RefCell<Option<Arc<ShapeEntry>>>,
+    key: ShapeKey,
+    window: &mut Window,
+) -> Arc<ShapeEntry> {
+    {
+        let slot = cache.borrow();
+        if let Some(entry) = slot.as_ref()
+            && entry.key == key
+        {
+            return entry.clone();
+        }
+    }
+    let style = window.text_style();
+    let font_size = key.font_size;
+    let run = TextRun {
+        len: key.text.len(),
+        font: style.font(),
+        color: style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let lines: Vec<WrappedLine> = window
+        .text_system()
+        .shape_text(key.text.clone(), font_size, &[run], key.wrap_width, None)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let entry = Arc::new(ShapeEntry::build(key, lines));
+    *cache.borrow_mut() = Some(entry.clone());
+    entry
+}
+
 struct TextElement {
     input: Entity<TextInput>,
 }
 
 struct PrepaintState {
-    lines: Vec<WrappedLine>,
+    shape: Arc<ShapeEntry>,
     cursor: Option<PaintQuad>,
     selection: Vec<PaintQuad>,
     scroll: Pixels,
@@ -589,15 +676,16 @@ impl Element for TextElement {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&gpui::InspectorElementId>,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         let input = self.input.clone();
+        let cache = input.read(cx).shape_cache.clone();
         let line_height = window.line_height();
         // The element is as tall as its wrapped content, capped at
-        // COMPOSER_MAX_ROWS — measured from a shaping pass because the
-        // row count depends on both the text and the available width.
+        // COMPOSER_MAX_ROWS — measured from the cached shaping because
+        // the row count depends on both the text and the width.
         (
             window.request_measured_layout(style, move |known, available, window, cx| {
                 let input = input.read(cx);
@@ -610,8 +698,17 @@ impl Element for TextElement {
                     AvailableSpace::Definite(width) => Some(width),
                     _ => None,
                 });
-                let rows = shaped_rows(&display, wrap_width, window, cx);
-                size(known.width.unwrap_or_default(), line_height * rows)
+                let font_size = window.text_style().font_size.to_pixels(window.rem_size());
+                let key = ShapeKey {
+                    text: display,
+                    font_size,
+                    wrap_width,
+                };
+                let shape = ensure_shaped(&cache, key, window);
+                size(
+                    known.width.unwrap_or_default(),
+                    line_height * shape.total_rows,
+                )
             }),
             (),
         )
@@ -627,15 +724,15 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
-        let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
+        let marked_range = input.marked_range.clone();
         let style = window.text_style();
 
-        let (display_text, text_color) = if content.is_empty() {
+        let (display_text, text_color) = if input.content.is_empty() {
             (input.placeholder.clone(), hsla(0., 0., 0., 0.2))
         } else {
-            (content, style.color)
+            (input.content.clone(), style.color)
         };
 
         let run = TextRun {
@@ -646,7 +743,7 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+        let runs = if let Some(marked_range) = marked_range.as_ref() {
             vec![
                 TextRun {
                     len: marked_range.start,
@@ -673,37 +770,58 @@ impl Element for TextElement {
             vec![run]
         };
 
-        let font_size = style.font_size.to_pixels(window.rem_size());
-        let line_height = window.line_height();
-        let lines: Vec<WrappedLine> = window
-            .text_system()
-            .shape_text(
-                display_text.clone(),
-                font_size,
-                &runs,
-                Some(bounds.size.width),
-                None,
+        // The IME underline needs different runs than the cached entry
+        // was shaped with; only shape with decoration when composing.
+        let shape = if marked_range.is_some() {
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            let lines: Vec<WrappedLine> = window
+                .text_system()
+                .shape_text(
+                    display_text.clone(),
+                    font_size,
+                    &runs,
+                    Some(bounds.size.width),
+                    None,
+                )
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            Arc::new(ShapeEntry::build(
+                ShapeKey {
+                    text: display_text.clone(),
+                    font_size,
+                    wrap_width: Some(bounds.size.width),
+                },
+                lines,
+            ))
+        } else {
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            ensure_shaped(
+                &input.shape_cache,
+                ShapeKey {
+                    text: display_text,
+                    font_size,
+                    wrap_width: Some(bounds.size.width),
+                },
+                window,
             )
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        };
 
-        let line_lens: Vec<usize> = lines.iter().map(WrappedLine::len).collect();
-        let line_offsets = line_starts(&display_text);
-        let total_rows: usize = lines.iter().map(line_rows).sum();
-        let visible = visible_rows(total_rows);
+        let line_height = window.line_height();
+        let visible = visible_rows(shape.total_rows);
 
         // Cursor position and the follow-cursor scroll.
         let mut scroll = px(0.);
         let mut cursor_quad = None;
-        let (cursor_line, cursor_local) = locate_offset(&line_offsets, &line_lens, cursor);
-        if let Some(line) = lines.get(cursor_line)
+        let (cursor_line, cursor_local) =
+            locate_offset(&shape.line_offsets, &shape.line_lens, cursor);
+        if let Some(line) = shape.lines.get(cursor_line)
             && let Some(position) = line.position_for_index(cursor_local, line_height)
         {
             let row_within = (position.y.to_f64() / line_height.to_f64()).round() as usize;
-            let cursor_row = rows_before(&lines, cursor_line) + row_within;
+            let cursor_row = rows_before(&shape.lines, cursor_line) + row_within;
             scroll = line_height * scroll_rows(cursor_row, visible);
-            let y_before = line_height * rows_before(&lines, cursor_line);
+            let y_before = line_height * rows_before(&shape.lines, cursor_line);
             cursor_quad = Some(fill(
                 Bounds::new(
                     point(
@@ -716,10 +834,10 @@ impl Element for TextElement {
             ));
         }
 
-        let selection = selection_quads(&lines, &selected_range, bounds, line_height, scroll);
+        let selection = selection_quads(&shape, &selected_range, bounds, line_height, scroll);
 
         PrepaintState {
-            lines,
+            shape,
             cursor: cursor_quad,
             selection,
             scroll,
@@ -743,10 +861,10 @@ impl Element for TextElement {
             cx,
         );
         let line_height = window.line_height();
-        let lines = std::mem::take(&mut prepaint.lines);
         let selection = std::mem::take(&mut prepaint.selection);
         let cursor = prepaint.cursor.take();
         let scroll = prepaint.scroll;
+        let lines = &prepaint.shape.lines;
 
         // Wrapped rows overflowing the capped height must not paint over
         // neighboring UI, so everything clips to the element bounds.
@@ -757,7 +875,7 @@ impl Element for TextElement {
             }),
             |window| {
                 let mut line_top = bounds.top() - scroll;
-                for line in &lines {
+                for line in lines {
                     if let Err(error) = line.paint(
                         point(bounds.left(), line_top),
                         line_height,
@@ -782,7 +900,7 @@ impl Element for TextElement {
         );
 
         self.input.update(cx, |input, _cx| {
-            input.last_layout = lines;
+            input.last_shape = Some(prepaint.shape.clone());
             input.last_line_height = line_height;
             input.last_scroll = scroll;
             input.last_bounds = Some(bounds);
@@ -790,39 +908,9 @@ impl Element for TextElement {
     }
 }
 
-/// Rows of `lines` before line `index`.
-fn rows_before(lines: &[WrappedLine], index: usize) -> usize {
-    lines.iter().take(index).map(line_rows).sum()
-}
-
-/// Row count of `text` when wrapped at `wrap_width` — one shaping pass.
-fn shaped_rows(
-    text: &SharedString,
-    wrap_width: Option<Pixels>,
-    window: &mut Window,
-    _cx: &mut App,
-) -> usize {
-    let style = window.text_style();
-    let font_size = style.font_size.to_pixels(window.rem_size());
-    let run = TextRun {
-        len: text.len(),
-        font: style.font(),
-        color: style.color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let lines = window
-        .text_system()
-        .shape_text(text.clone(), font_size, &[run], wrap_width, None)
-        .unwrap_or_default();
-    let rows: usize = lines.iter().map(line_rows).sum();
-    rows.clamp(1, COMPOSER_MAX_ROWS)
-}
-
 /// Selection rectangles, one per wrapped row the selection touches.
 fn selection_quads(
-    lines: &[WrappedLine],
+    shape: &ShapeEntry,
     selected_range: &Range<usize>,
     bounds: gpui::Bounds<Pixels>,
     line_height: Pixels,
@@ -834,7 +922,7 @@ fn selection_quads(
     let mut quads = Vec::new();
     let mut bytes_before = 0usize;
     let mut line_top = bounds.top() - scroll;
-    for line in lines {
+    for line in &shape.lines {
         let len = line.len();
         let start = selected_range.start.saturating_sub(bytes_before).min(len);
         let end = selected_range.end.saturating_sub(bytes_before).min(len);
