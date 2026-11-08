@@ -81,6 +81,9 @@ pub struct DdpLive {
     notification_sub: Option<String>,
     /// The watched room, remembered across reconnects (resubscribe).
     watched: Option<String>,
+    /// The REST origin derived from the WebSocket URL: live rows build
+    /// attachment chip URLs from it (REST rows carry it already).
+    origin: String,
 }
 
 /// What the live connection watches. The only permitted write target is the
@@ -110,9 +113,12 @@ impl DdpLive {
         )
         .await
         .map_err(live_io)?;
+        let host = url.split("://").nth(1).unwrap_or(url);
+        let host = host.split('/').next().unwrap_or(host);
         let mut live = Self {
             ws,
             next_id: 0,
+            origin: format!("https://{host}"),
             room_sub: None,
             notify_sub: None,
             notification_sub: None,
@@ -299,7 +305,7 @@ impl DdpLive {
                         Ok(document) => document,
                         Err(_) => continue, // not DDP — ignore
                     };
-                    return Ok(decode_document(document));
+                    return Ok(decode_document(document, Some(&self.origin)));
                 }
                 Message::Ping(payload) => {
                     self.ws
@@ -339,13 +345,13 @@ impl DdpLive {
 }
 
 /// Decodes a DDP document into the frame the live loop acts on.
-fn decode_document(document: Value) -> Frame {
+fn decode_document(document: Value, origin: Option<&str>) -> Frame {
     match document.get("msg").and_then(Value::as_str) {
         Some("ping") => Frame::Ping,
         Some("added" | "changed")
             if document.get("collection").and_then(Value::as_str) == Some(ROOM_STREAM) =>
         {
-            match message_from_event(&document) {
+            match message_from_event(&document, origin) {
                 Some(message) => Frame::RoomMessage(Box::new(message)),
                 None => Frame::Document(document),
             }
@@ -451,14 +457,23 @@ pub fn websocket_url(settings: &crate::rc::RcSettings) -> String {
 fn ejson_date(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(text) => Some(text.clone()),
-        Value::Object(map) => map.get("$date")?.as_str().map(str::to_owned),
+        Value::Object(map) => match map.get("$date")? {
+            Value::String(text) => Some(text.clone()),
+            // Some servers deliver epoch milliseconds; normalize to
+            // RFC 3339 so day separators and grouping keep working.
+            Value::Number(ms) => {
+                let stamp = jiff::Timestamp::from_millisecond(ms.as_f64()? as i64).ok()?;
+                Some(stamp.to_string())
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
 
 /// Extracts the chat message carried by a `stream-room-messages` event:
 /// `fields.args[0]` is an IMessage.
-fn message_from_event(event: &Value) -> Option<Msg> {
+fn message_from_event(event: &Value, origin: Option<&str>) -> Option<Msg> {
     let message = event.get("fields")?.get("args")?.as_array()?.first()?;
     let reactions = message
         .get("reactions")
@@ -518,7 +533,9 @@ fn message_from_event(event: &Value) -> Option<Msg> {
                         .and_then(Value::as_str)
                         .map(str::to_owned)?;
                     Some(crate::rc::types::AttachedFile {
-                        url: String::new(),
+                        url: origin
+                            .map(|origin| format!("{origin}{path}"))
+                            .unwrap_or_default(),
                         path: path.clone(),
                         mime: attachment
                             .get("image_type")
@@ -610,13 +627,16 @@ mod tests {
     /// events and removed-type args fall through to Document.
     #[test]
     fn notify_frames_decode_into_unread_updates() {
-        let frame = decode_document(serde_json::json!({
-            "msg": "changed", "collection": "stream-notify-user",
-            "fields": {
-                "eventName": "27wWpti9Nii4yRxac/subscriptions-changed",
-                "args": ["updated", {"rid": "dm1", "unread": 3}]
-            }
-        }));
+        let frame = decode_document(
+            serde_json::json!({
+                "msg": "changed", "collection": "stream-notify-user",
+                "fields": {
+                    "eventName": "27wWpti9Nii4yRxac/subscriptions-changed",
+                    "args": ["updated", {"rid": "dm1", "unread": 3}]
+                }
+            }),
+            None,
+        );
         match frame {
             Frame::Notify { room_id, unread } => {
                 assert_eq!(room_id, "dm1");
@@ -625,37 +645,46 @@ mod tests {
             other => panic!("expected Notify, got {other:?}"),
         }
 
-        let removed = decode_document(serde_json::json!({
-            "msg": "changed", "collection": "stream-notify-user",
-            "fields": {
-                "eventName": "id/subscriptions-changed",
-                "args": ["removed", {"rid": "dm1"}]
-            }
-        }));
+        let removed = decode_document(
+            serde_json::json!({
+                "msg": "changed", "collection": "stream-notify-user",
+                "fields": {
+                    "eventName": "id/subscriptions-changed",
+                    "args": ["removed", {"rid": "dm1"}]
+                }
+            }),
+            None,
+        );
         assert!(matches!(removed, Frame::Document(_)));
 
-        let foreign = decode_document(serde_json::json!({
-            "msg": "changed", "collection": "stream-notify-user",
-            "fields": {
-                "eventName": "id/message",
-                "args": [{"rid": "dm1"}]
-            }
-        }));
+        let foreign = decode_document(
+            serde_json::json!({
+                "msg": "changed", "collection": "stream-notify-user",
+                "fields": {
+                    "eventName": "id/message",
+                    "args": [{"rid": "dm1"}]
+                }
+            }),
+            None,
+        );
         assert!(matches!(foreign, Frame::Document(_)));
     }
 
     #[test]
     fn decodes_a_stream_event_into_a_room_message() {
-        let frame = decode_document(serde_json::json!({
-            "msg": "changed",
-            "collection": "stream-room-messages",
-            "id": "id1",
-            "fields": {"args": [{
-                "_id": "m9", "rid": "ROOM", "msg": "привет",
-                "ts": "2026-11-07T17:30:00.000Z",
-                "u": {"_id": "u1", "username": "alice"}
-            }]}
-        }));
+        let frame = decode_document(
+            serde_json::json!({
+                "msg": "changed",
+                "collection": "stream-room-messages",
+                "id": "id1",
+                "fields": {"args": [{
+                    "_id": "m9", "rid": "ROOM", "msg": "привет",
+                    "ts": "2026-11-07T17:30:00.000Z",
+                    "u": {"_id": "u1", "username": "alice"}
+                }]}
+            }),
+            None,
+        );
         match frame {
             Frame::RoomMessage(message) => {
                 assert_eq!(message.id, "m9");
@@ -670,20 +699,26 @@ mod tests {
     #[test]
     fn decodes_ping_and_foreign_collections_as_documents() {
         assert!(matches!(
-            decode_document(serde_json::json!({"msg": "ping"})),
+            decode_document(serde_json::json!({"msg": "ping"}), None),
             Frame::Ping
         ));
 
-        let notify = decode_document(serde_json::json!({
-            "msg": "changed", "collection": "stream-notify-user",
-            "id": "id2", "fields": {"args": ["something"]}
-        }));
+        let notify = decode_document(
+            serde_json::json!({
+                "msg": "changed", "collection": "stream-notify-user",
+                "id": "id2", "fields": {"args": ["something"]}
+            }),
+            None,
+        );
         assert!(matches!(notify, Frame::Document(_)));
 
-        let empty_args = decode_document(serde_json::json!({
-            "msg": "added", "collection": "stream-room-messages",
-            "id": "id3", "fields": {"args": []}
-        }));
+        let empty_args = decode_document(
+            serde_json::json!({
+                "msg": "added", "collection": "stream-room-messages",
+                "id": "id3", "fields": {"args": []}
+            }),
+            None,
+        );
         assert!(matches!(empty_args, Frame::Document(_)));
     }
 
@@ -691,25 +726,28 @@ mod tests {
     /// the vendored ruqola client (`rocketchataccount.cpp`).
     #[test]
     fn notification_events_decode_with_the_documented_shape() {
-        let frame = decode_document(serde_json::json!({
-            "msg": "changed", "collection": "stream-notify-user",
-            "id": "id4",
-            "fields": {
-                "eventName": "MYUID/notification",
-                "args": [{
-                    "title": "laurent",
-                    "text": "",
-                    "payload": {
-                        "_id": "vD3CXNB2oK5uB8nDT",
-                        "message": {"msg": "hello there"},
-                        "rid": "DMROOM",
-                        "sender": {"_id": "SENDER", "name": "laurent",
-                                   "username": "laurent-montel"},
-                        "type": "d"
-                    }
-                }]
-            }
-        }));
+        let frame = decode_document(
+            serde_json::json!({
+                "msg": "changed", "collection": "stream-notify-user",
+                "id": "id4",
+                "fields": {
+                    "eventName": "MYUID/notification",
+                    "args": [{
+                        "title": "laurent",
+                        "text": "",
+                        "payload": {
+                            "_id": "vD3CXNB2oK5uB8nDT",
+                            "message": {"msg": "hello there"},
+                            "rid": "DMROOM",
+                            "sender": {"_id": "SENDER", "name": "laurent",
+                                       "username": "laurent-montel"},
+                            "type": "d"
+                        }
+                    }]
+                }
+            }),
+            None,
+        );
         match frame {
             Frame::Notification(note) => {
                 assert_eq!(note.title, "laurent");
@@ -721,6 +759,36 @@ mod tests {
             }
             other => panic!("expected Notification, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ejson_date_accepts_epoch_milliseconds() {
+        let value = serde_json::json!({ "$date": 0 });
+        assert_eq!(
+            ejson_date(Some(&value)).as_deref(),
+            Some("1970-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn live_attachment_carries_the_origin_url() {
+        let event = serde_json::json!({
+            "fields": { "args": [{
+                "_id": "m3", "rid": "r1", "msg": "",
+                "u": { "username": "tester" },
+                "ts": "2026-11-08T01:00:00.000Z",
+                "attachments": [{
+                    "image_url": "/file-upload/f1/img.png",
+                    "image_type": "image/png",
+                    "title": "img.png",
+                }],
+            }]}
+        });
+        let message = message_from_event(&event, Some("https://chat.example.com")).expect("parse");
+        let file = message.file.expect("attachment synthesizes a file");
+        assert_eq!(file.url, "https://chat.example.com/file-upload/f1/img.png");
+        let message = message_from_event(&event, None).expect("parse");
+        assert_eq!(message.file.as_ref().unwrap().url, "");
     }
 
     #[test]
@@ -736,7 +804,7 @@ mod tests {
                 "tlm": { "$date": "2026-11-08T00:10:00.000Z" },
             }]}
         });
-        let message = message_from_event(&event).expect("parse");
+        let message = message_from_event(&event, None).expect("parse");
         assert_eq!(message.ts, "2026-11-08T00:10:00.000Z");
         assert_eq!(message.tlm.as_deref(), Some("2026-11-08T00:10:00.000Z"));
 
@@ -747,7 +815,7 @@ mod tests {
                 "ts": "2026-11-08T00:11:00.000Z",
             }]}
         });
-        let message = message_from_event(&event).expect("parse");
+        let message = message_from_event(&event, None).expect("parse");
         assert_eq!(message.ts, "2026-11-08T00:11:00.000Z");
     }
 
@@ -773,7 +841,7 @@ mod tests {
         message["ts"] = serde_json::json!({ "$date": ts });
         let event = serde_json::json!({ "fields": { "args": [message] } });
 
-        let msg = message_from_event(&event).expect("parse");
+        let msg = message_from_event(&event, None).expect("parse");
         assert_eq!(msg.ts, ts);
         let file = msg.file.expect("attachment synthesizes a file");
         assert!(file.path.starts_with("/file-upload/"));

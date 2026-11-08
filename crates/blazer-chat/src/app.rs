@@ -262,12 +262,12 @@ impl ChatState {
                 None
             }
             ChatEvent::LoggedOut => {
-                self.username = None;
-                self.origin = None;
-                self.rooms.clear();
-                self.messages.clear();
-                self.active_room = None;
-                self.error = None;
+                // A full reset: leftover threads, avatars, searches,
+                // notifications or exhausted-paging flags from the
+                // previous account must not leak into the next one.
+                let version = self.messages_version + 1;
+                *self = ChatState::default();
+                self.messages_version = version;
                 None
             }
             ChatEvent::SessionExpired { reason } => {
@@ -288,7 +288,15 @@ impl ChatState {
             }
             ChatEvent::Messages { room_id, messages } => {
                 self.messages_version += 1;
-                self.messages.insert(room_id.clone(), messages);
+                // Merge instead of replacing: live or paged messages that
+                // arrived while the request was in flight must not vanish
+                // with the refreshed slice.
+                let entry = self.messages.entry(room_id.clone()).or_default();
+                let fresh: std::collections::BTreeSet<&str> =
+                    messages.iter().map(|m| m.id.as_str()).collect();
+                entry.retain(|known| !fresh.contains(known.id.as_str()));
+                entry.extend(messages.iter().cloned());
+                entry.sort_by(|a, b| a.ts.cmp(&b.ts));
                 // The room is on screen now; the server-side read receipt
                 // went out with the history call.
                 if let Some(room) = self.rooms.iter_mut().find(|room| room.id == room_id) {
@@ -309,7 +317,16 @@ impl ChatState {
                             .collect()
                     })
                     .unwrap_or_default();
-                self.active_room = Some(room_id);
+                // A stale refresh must not drag the pane back to a room
+                // the user already left: navigation follows only when
+                // nothing else was selected meanwhile.
+                if self
+                    .active_room
+                    .as_deref()
+                    .is_none_or(|current| current == room_id.as_str())
+                {
+                    self.active_room = Some(room_id.clone());
+                }
                 // Opening a room navigates out of any open thread.
                 self.open_thread = None;
                 self.error = None;
@@ -335,7 +352,7 @@ impl ChatState {
                 }
                 None
             }
-            ChatEvent::LiveMessage(message) => {
+            ChatEvent::LiveMessage(mut message) => {
                 self.messages_version += 1;
                 self.bump_room_activity(&message.room_id, message.ts.clone());
                 // The stream redelivers what REST already folded in and
@@ -344,7 +361,17 @@ impl ChatState {
                 let room_id = message.room_id.clone();
                 let entry = self.messages.entry(room_id).or_default();
                 match entry.iter_mut().find(|known| known.id == message.id) {
-                    Some(known) => *known = message,
+                    Some(known) => {
+                        // Live deliveries do not carry the REST origin:
+                        // keep the working chip URL from the fetched row.
+                        if let (Some(incoming), Some(old)) =
+                            (message.file.as_mut(), known.file.as_ref())
+                            && incoming.url.is_empty()
+                        {
+                            incoming.url = old.url.clone();
+                        }
+                        *known = message;
+                    }
                     None => entry.push(message),
                 }
                 self.error = None;
@@ -443,7 +470,17 @@ impl ChatState {
             }
             ChatEvent::CachedMessages { room_id, messages } => {
                 self.messages_version += 1;
-                self.messages.insert(room_id.clone(), messages);
+                // The store snapshot is older than live state: merge
+                // only rows the in-memory slice does not know yet.
+                let entry = self.messages.entry(room_id.clone()).or_default();
+                let known: std::collections::BTreeSet<&str> =
+                    entry.iter().map(|m| m.id.as_str()).collect();
+                let mut missing = messages
+                    .into_iter()
+                    .filter(|message| !known.contains(message.id.as_str()))
+                    .collect::<Vec<_>>();
+                entry.append(&mut missing);
+                entry.sort_by(|a, b| a.ts.cmp(&b.ts));
                 if let Some(room) = self.rooms.iter_mut().find(|room| room.id == room_id) {
                     room.unread = 0;
                 }
@@ -733,6 +770,10 @@ async fn drive(
     let settings_for_live = settings.clone();
     let mut client = RcClient::new(settings);
     let mut live: Option<Sender<LiveCommand>> = None;
+    // The paging cursor lives here, not in the store snapshot: the
+    // store keeps only the refresh slice, so a cursor read from it
+    // re-fetched the same page forever.
+    let mut oldest: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     // Resumable start: stored session and rooms paint the UI instantly; a
     // stale token surfaces as a 401 on the first refresh and gets cleared.
@@ -751,6 +792,10 @@ async fn drive(
             live = ensure_live(&settings_for_live, Some(store), &events);
         }
         if let Some(rooms) = store.load_rooms() {
+            // History routing needs the room kinds before the first
+            // live rooms() refresh (the startup race: opening a DM
+            // queried channels.history and failed).
+            client.seed_room_kinds(&rooms);
             let _ = events.send(ChatEvent::Rooms { rooms }).await;
         }
     }
@@ -765,7 +810,17 @@ async fn drive(
     }
 
     while let Ok(command) = commands.recv().await {
-        let event = execute(&mut client, store.as_deref(), command).await;
+        let event = execute(&mut client, store.as_deref(), &mut oldest, command).await;
+        match &event {
+            ChatEvent::Messages { room_id, messages }
+            | ChatEvent::CachedMessages { room_id, messages }
+            | ChatEvent::OlderMessages { room_id, messages } => {
+                if let Some(message) = messages.first() {
+                    oldest.insert(room_id.clone(), message.ts.clone());
+                }
+            }
+            _ => {}
+        }
         match &event {
             ChatEvent::LoggedOut => live = None,
             ChatEvent::LoggedIn { .. } if live.is_none() => {
@@ -829,7 +884,12 @@ fn session_expired(
 
 /// One command → one event; failures always surface as `Failed`. `store`
 /// persists the session and room cache; a 401 clears the stored session.
-async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatCommand) -> ChatEvent {
+async fn execute(
+    client: &mut RcClient,
+    store: Option<&Store>,
+    oldest: &mut std::collections::HashMap<String, String>,
+    command: ChatCommand,
+) -> ChatEvent {
     match command {
         ChatCommand::Login { user, password } => match client.login(&user, &password).await {
             Ok(session) => {
@@ -905,20 +965,26 @@ async fn execute(client: &mut RcClient, store: Option<&Store>, command: ChatComm
                 .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
         ChatCommand::FetchOlder { room_id } => {
-            let cursor = store
-                .and_then(|store| store.load_messages(&room_id))
-                .and_then(|messages| messages.first().map(|message| message.ts.clone()));
-            match cursor {
-                Some(ts) => match client.history_page(&room_id, Some(&ts)).await {
-                    Ok(messages) => ChatEvent::OlderMessages { room_id, messages },
-                    Err(error) => session_expired(store, client, &error)
-                        .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
-                },
-                // Nothing cached: the refresh already covers the slice.
-                None => ChatEvent::OlderMessages {
-                    room_id,
-                    messages: Vec::new(),
-                },
+            let cursor = oldest.get(&room_id).cloned().or_else(|| {
+                store
+                    .and_then(|store| store.load_messages(&room_id))
+                    .and_then(|messages| messages.first().map(|message| message.ts.clone()))
+            });
+            match client.history_page(&room_id, cursor.as_deref()).await {
+                Ok(messages) => ChatEvent::OlderMessages { room_id, messages },
+                Err(error) => {
+                    // A failed page must not wedge the strip: an empty
+                    // OlderMessages clears loading_older for a later
+                    // retry (a 401 here still expires the session).
+                    if matches!(error, RcError::Http { status: 401, .. }) {
+                        session_expired(store, client, &error);
+                    }
+                    eprintln!("blazer-chat: older history: {error}");
+                    ChatEvent::OlderMessages {
+                        room_id,
+                        messages: Vec::new(),
+                    }
+                }
             }
         }
         ChatCommand::Send { room_id, text } => match client.send(&room_id, &text).await {

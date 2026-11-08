@@ -128,6 +128,17 @@ impl<T: Transport> RcClient<T> {
         self.session = None;
     }
 
+    /// Seeds the room-kind routing from a cached room list (startup
+    /// resume): history requests hit the right endpoint before the
+    /// first live `rooms()` refresh lands, instead of silently
+    /// defaulting to `channels.history`.
+    pub fn seed_room_kinds(&mut self, rooms: &[Room]) {
+        self.room_kinds = rooms
+            .iter()
+            .map(|room| (room.id.clone(), room.kind))
+            .collect();
+    }
+
     /// Installs a previously stored session (startup resume).
     pub fn set_session(&mut self, session: Session) {
         self.session = Some(session);
