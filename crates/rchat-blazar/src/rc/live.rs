@@ -441,6 +441,16 @@ pub fn websocket_url(settings: &crate::rc::RcSettings) -> String {
     format!("{scheme}://{host}:{port}/websocket")
 }
 
+/// Reads a timestamp that DDP serializes as EJSON — a plain string on
+/// some events, `{"$date": "..."}` on others. Both carry RFC 3339 text.
+fn ejson_date(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => Some(text.clone()),
+        Value::Object(map) => map.get("$date")?.as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
 /// Extracts the chat message carried by a `stream-room-messages` event:
 /// `fields.args[0]` is an IMessage.
 fn message_from_event(event: &Value) -> Option<Msg> {
@@ -483,11 +493,7 @@ fn message_from_event(event: &Value) -> Option<Msg> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
-        ts: message
-            .get("ts")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
+        ts: ejson_date(message.get("ts")).unwrap_or_default(),
         tmid: message
             .get("tmid")
             .and_then(Value::as_str)
@@ -496,10 +502,7 @@ fn message_from_event(event: &Value) -> Option<Msg> {
             .get("tcount")
             .and_then(Value::as_u64)
             .map(|n| n as u32),
-        tlm: message
-            .get("tlm")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        tlm: ejson_date(message.get("tlm")),
         file: None,
         reactions,
         // Live updates don't carry the starred set in this build; the
@@ -685,6 +688,34 @@ mod tests {
             }
             other => panic!("expected Notification, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn message_from_event_reads_ejson_and_plain_dates() {
+        // DDP wraps dates as {"$date": rfc3339}; the parser must take
+        // both shapes — an empty ts breaks day separators and grouping
+        // for every live-delivered message.
+        let event = serde_json::json!({
+            "fields": { "args": [{
+                "_id": "m1", "rid": "r1", "msg": "hello",
+                "u": { "username": "tester" },
+                "ts": { "$date": "2026-11-08T00:10:00.000Z" },
+                "tlm": { "$date": "2026-11-08T00:10:00.000Z" },
+            }]}
+        });
+        let message = message_from_event(&event).expect("parse");
+        assert_eq!(message.ts, "2026-11-08T00:10:00.000Z");
+        assert_eq!(message.tlm.as_deref(), Some("2026-11-08T00:10:00.000Z"));
+
+        let event = serde_json::json!({
+            "fields": { "args": [{
+                "_id": "m2", "rid": "r1", "msg": "hello",
+                "u": { "username": "tester" },
+                "ts": "2026-11-08T00:11:00.000Z",
+            }]}
+        });
+        let message = message_from_event(&event).expect("parse");
+        assert_eq!(message.ts, "2026-11-08T00:11:00.000Z");
     }
 
     #[test]
