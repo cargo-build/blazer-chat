@@ -57,7 +57,9 @@ impl FakeTransport {
 }
 
 impl Transport for FakeTransport {
-    async fn get_bytes(&self, _path: &str) -> std::io::Result<Vec<u8>> {
+    async fn get_bytes(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        // Record like `call` does, so byte-GET paths are assertable.
+        *self.last_request.borrow_mut() = Some(format!("GET {path}"));
         Ok(Vec::new())
     }
 
@@ -162,6 +164,20 @@ fn authenticated_routes() -> Vec<(&'static str, u16, &'static str)> {
 const IM_HISTORY_FIXTURE: &str = include_str!("fixtures/im-history.json");
 const THREAD_MESSAGES_FIXTURE: &str = include_str!("fixtures/thread-messages.json");
 const ROOMS_GET_FIXTURE: &str = include_str!("fixtures/rooms-get.json");
+
+#[test]
+fn emoji_image_path_percent_encodes_server_supplied_parts() {
+    // state-audit A2 follow-up: name/extension are server-controlled —
+    // a raw space or `?`/`#` would split or re-target the request line.
+    let transport = FakeTransport::answering(&[("emoji-custom", 200, "png-bytes")]);
+    let rc = client(transport.clone());
+    futures_lite::future::block_on(rc.emoji_image("my emoji", "png")).unwrap();
+    let request = transport.last_request();
+    assert!(
+        request.contains("GET /emoji-custom/my%20emoji.png"),
+        "the path rides percent-encoded: {request}"
+    );
+}
 
 #[test]
 fn captured_history_fixture_decodes_the_real_shapes() {
@@ -635,10 +651,13 @@ fn rooms_decode_mention_counts() {
 }
 
 #[test]
-fn mark_room_unread_posts_the_unread_flag() {
+fn mark_room_unread_posts_the_unread_route() {
+    // state-audit A11: the pinned server schema rejects `unread` on
+    // subscriptions.read (additionalProperties: false) — the real call
+    // is subscriptions.unread with {roomId} only.
     let transport = FakeTransport::answering(&[
         ("login", 200, LOGIN_BODY),
-        ("subscriptions.read", 200, r#"{"success":true}"#),
+        ("subscriptions.unread", 200, r#"{"success":true}"#),
     ]);
     let mut rc = client(transport.clone());
 
@@ -646,10 +665,14 @@ fn mark_room_unread_posts_the_unread_flag() {
     futures_lite::future::block_on(rc.mark_room_unread("dm1")).unwrap();
 
     let request = transport.last_request();
-    assert!(request.contains("POST /api/v1/subscriptions.read"));
+    assert!(request.contains("POST /api/v1/subscriptions.unread"));
     assert!(
-        request.contains(r#""unread":true"#),
-        "the unread flag rides the body"
+        request.contains(r#""roomId":"dm1""#),
+        "the roomId rides the body, nothing else: {request}"
+    );
+    assert!(
+        !request.contains(r#""unread""#),
+        "no unread property may ride the body: {request}"
     );
 }
 

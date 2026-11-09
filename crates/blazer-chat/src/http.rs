@@ -464,6 +464,12 @@ fn parse_framed(buf: &[u8]) -> Parsed {
     let Some(split) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
         return Parsed::NeedMore;
     };
+    // A complete head is bounded on its own: a hostile peer must not
+    // grow a headless stream to the body cap before failing (audit
+    // A.8 — MAX_HEAD_BYTES is a real head bound, not slack).
+    if split > MAX_HEAD_BYTES {
+        return Parsed::Invalid(invalid("response head exceeds the 64 KiB cap"));
+    }
     let head = String::from_utf8_lossy(&buf[..split]);
     let info = match parse_head(&head) {
         Ok(info) => info,
@@ -736,6 +742,21 @@ mod tests {
             panic!("an oversized content-length must fail before the body arrives");
         };
         assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn oversized_head_is_rejected() {
+        // state-audit A.8: MAX_HEAD_BYTES is enforced on the complete
+        // head itself, not only as slack on the combined buffer bound.
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\n{}content-length: 2\r\n\r\nok",
+            "x-filler: 8\r\n".repeat(MAX_HEAD_BYTES / 12 + 1)
+        );
+        let Parsed::Invalid(error) = parse_framed(raw.as_bytes()) else {
+            panic!("a head over the 64 KiB cap must fail");
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(error.to_string().contains("64 KiB cap"));
     }
 
     #[test]

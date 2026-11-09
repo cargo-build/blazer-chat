@@ -99,8 +99,15 @@ pub(super) fn encode_query_param(value: &str) -> String {
 
 impl<T: Transport> RcClient<T> {
     /// The image bytes of a custom emoji (`/emoji-custom/{name}.{ext}`).
+    /// Name and extension are server-supplied and ride the path
+    /// percent-encoded: a raw space, `?`, `#` or `/` would split or
+    /// re-target the request line (state-audit A2 follow-up).
     pub async fn emoji_image(&self, name: &str, extension: &str) -> Result<Vec<u8>, RcError> {
-        let path = format!("/emoji-custom/{name}.{extension}");
+        let path = format!(
+            "/emoji-custom/{}.{}",
+            encode_query_param(name),
+            encode_query_param(extension)
+        );
         self.transport.get_bytes(&path).await.map_err(RcError::Io)
     }
 
@@ -493,17 +500,21 @@ impl<T: Transport> RcClient<T> {
         }
     }
 
-    /// Flags a room unread server-side (`subscriptions.read` with the
-    /// unread flag) — the sidebar context menu's Mark-unread (m12 F5).
+    /// Flags a room unread server-side (`subscriptions.unread` with
+    /// `{roomId}`) — the sidebar context menu's Mark-unread (m12 F5).
+    /// The pinned server schema rejects any other property on this
+    /// route, and `subscriptions.read` carries no `unread` flag at all
+    /// (state-audit A11: the old `subscriptions.read {unread:true}`
+    /// body failed AJV and always 400'd).
     pub async fn mark_room_unread(&self, room_id: &str) -> Result<(), RcError> {
-        let body = serde_json::json!({ "rid": room_id, "unread": true }).to_string();
+        let body = serde_json::json!({ "roomId": room_id }).to_string();
         let body = self
-            .call("POST", "/api/v1/subscriptions.read", Some(body), true)
+            .call("POST", "/api/v1/subscriptions.unread", Some(body), true)
             .await?;
-        match Self::parse::<SuccessResponse>(&body, "subscriptions.read")?.success {
+        match Self::parse::<SuccessResponse>(&body, "subscriptions.unread")?.success {
             true => Ok(()),
             false => Err(RcError::Refused(
-                "subscriptions.read answered success=false".to_owned(),
+                "subscriptions.unread answered success=false".to_owned(),
             )),
         }
     }
