@@ -101,8 +101,8 @@ pub enum ChatCommand {
         tmid: String,
         text: String,
     },
-    /// Flags a room unread (`subscriptions.read` unread flag) — the
-    /// sidebar context menu's Mark-unread (m12 F5).
+    /// Flags a room unread (`subscriptions.unread` with `{roomId}`) —
+    /// the sidebar context menu's Mark-unread (m12 F5).
     MarkRoomUnread {
         room_id: String,
     },

@@ -432,9 +432,9 @@
                   "rid": {
                     "type": "string"
                   },
-                  "unread": {
+                  "readThreads": {
                     "type": "boolean",
-                    "description": "Set true to flag the room unread instead of read."
+                    "nullable": true
                   }
                 }
               }
@@ -1545,8 +1545,8 @@
         "tags": [
           "rooms"
         ],
-        "summary": "Mark room read",
-        "description": "Server-side read receipt; stops the unread stream counting the room.",
+        "summary": "Mark room unread",
+        "description": "Flags the room as unread for the authenticated user (m12 F5 Mark-unread; state-audit A11 route fix). Body: {roomId} \u2014 the pinned server schema accepts roomId or firstUnreadMessage only.",
         "security": [
           {
             "authToken": [],
@@ -1559,16 +1559,14 @@
             "application/json": {
               "schema": {
                 "type": "object",
+                "additionalProperties": false,
                 "required": [
-                  "rid"
+                  "roomId"
                 ],
                 "properties": {
-                  "rid": {
-                    "type": "string"
-                  },
-                  "unread": {
-                    "type": "boolean",
-                    "description": "Set true to flag the room unread instead of read."
+                  "roomId": {
+                    "type": "string",
+                    "description": "Room id."
                   }
                 }
               }

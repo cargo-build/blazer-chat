@@ -465,8 +465,10 @@ fn parse_framed(buf: &[u8]) -> Parsed {
         return Parsed::NeedMore;
     };
     // A complete head is bounded on its own: a hostile peer must not
-    // grow a headless stream to the body cap before failing (audit
-    // A.8 — MAX_HEAD_BYTES is a real head bound, not slack).
+    // grow the buffered head beyond the cap before failing (audit
+    // A.8 — MAX_HEAD_BYTES is a real head bound on both the keep-alive
+    // and the close path). A stream that never terminates still grows
+    // to the combined MAX_RESPONSE_BYTES + MAX_HEAD_BYTES bound below.
     if split > MAX_HEAD_BYTES {
         return Parsed::Invalid(invalid("response head exceeds the 64 KiB cap"));
     }
@@ -518,6 +520,11 @@ fn response_at_close(buf: &mut Vec<u8>) -> std::io::Result<WireResponse> {
     let Some(split) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
         return Err(invalid("connection closed before a response head arrived"));
     };
+    // Same head bound as the keep-alive path (state-audit r2 SF-1):
+    // EOF resolves the parse, but the head itself stays capped.
+    if split > MAX_HEAD_BYTES {
+        return Err(invalid("response head exceeds the 64 KiB cap"));
+    }
     let head = String::from_utf8_lossy(&buf[..split]).into_owned();
     let info = parse_head(&head)?;
     let rest = buf[split + 4..].to_vec();
@@ -1197,6 +1204,27 @@ mod tests {
             &response.body[..response.body.len().min(120)]
         );
         assert!(response.status == 400 || response.status == 401);
+    }
+
+    #[test]
+    fn response_at_close_enforces_the_head_cap() {
+        // state-audit r2 SF-1: the EOF path applies the same 64 KiB
+        // head bound as the keep-alive path.
+        let mut buf = format!(
+            "HTTP/1.1 200 OK\r\n{}content-length: 4\r\n\r\nbody",
+            "x-filler: 8\r\n".repeat(MAX_HEAD_BYTES / 12 + 1)
+        )
+        .into_bytes();
+        let Err(error) = response_at_close(&mut buf) else {
+            panic!("a close-path head over the 64 KiB cap must fail");
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        // An ordinary until-close response still resolves.
+        let mut buf =
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"eof\":true}".to_vec();
+        let response = response_at_close(&mut buf).expect("a small EOF response resolves");
+        assert_eq!(response.body, b"{\"eof\":true}".as_slice());
+        assert!(buf.is_empty(), "the consumed buffer is drained");
     }
 
     #[test]
