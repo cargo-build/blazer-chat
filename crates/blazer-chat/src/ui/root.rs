@@ -14,7 +14,7 @@ use async_channel::Sender;
 use super::markdown::{self, Span};
 use super::{
     ZoomIn, ZoomOut, ZoomReset,
-    input::{MUTED, PANEL, TextInput, TextInputEvent},
+    input::{MUTED, PANEL, Suggest, TextInput, TextInputEvent},
 };
 use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
 use crate::rc::{Msg, Room};
@@ -61,6 +61,8 @@ pub(crate) struct ChatRoot {
     show_info: bool,
     /// The username whose user card is open (m12 F8).
     user_card: Option<String>,
+    /// The emoji picker popover is open (m12 F9).
+    emoji_picker_open: bool,
     /// The top-bar avatar menu is open.
     user_menu_open: bool,
     /// An older-slice fetch is in flight (one at a time per pane).
@@ -170,12 +172,19 @@ impl ChatRoot {
             TextInputEvent::ImagePasted { bytes, ext } => {
                 chat.upload_clipboard_image(bytes, ext, cx);
             }
+            TextInputEvent::Changed { text, caret } => {
+                chat.update_suggestions(text, *caret, cx);
+            }
+            TextInputEvent::SuggestMoved => cx.notify(),
         })
         .detach();
         let search = cx.new(|cx| TextInput::new("Search…", cx));
         cx.subscribe(&search, |chat, _, event, cx| match event {
             TextInputEvent::Submitted => chat.run_search(cx),
-            TextInputEvent::Cancelled | TextInputEvent::ImagePasted { .. } => {}
+            TextInputEvent::Cancelled
+            | TextInputEvent::ImagePasted { .. }
+            | TextInputEvent::Changed { .. }
+            | TextInputEvent::SuggestMoved => {}
         })
         .detach();
         Self {
@@ -199,6 +208,7 @@ impl ChatRoot {
             room_menu: None,
             show_info: false,
             user_card: None,
+            emoji_picker_open: false,
             user_menu_open: false,
             loading_older: false,
             parsed: Default::default(),
@@ -390,6 +400,7 @@ impl ChatRoot {
         // Panels and cards belong to the room they opened in.
         self.show_info = false;
         self.user_card = None;
+        self.emoji_picker_open = false;
         let restored = self.state.drafts.get(&room_id).cloned().unwrap_or_default();
         self.composer
             .update(cx, |composer, cx| composer.set_content(&restored, cx));
@@ -437,6 +448,57 @@ impl ChatRoot {
         cx.notify();
     }
 
+    /// Recomputes the completion popup from the text around the caret
+    /// (m12 F10): @ over senders seen in the room plus the own name,
+    /// : over the unicode shortcodes.
+    fn update_suggestions(&mut self, text: &str, caret: usize, cx: &mut Context<Self>) {
+        let suggest = completion_token(text, caret).and_then(|(token_start, sigil, query)| {
+            let mut candidates: Vec<String> = match sigil {
+                '@' => {
+                    let mut names: std::collections::BTreeSet<String> = self
+                        .state
+                        .messages
+                        .get(self.state.active_room.as_deref()?)
+                        .map(|messages| {
+                            messages
+                                .iter()
+                                .map(|message| message.sender.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if let Some(me) = self.state.username.clone() {
+                        names.insert(me);
+                    }
+                    let query = query.to_lowercase();
+                    names
+                        .into_iter()
+                        .filter(|name| name.to_lowercase().starts_with(&query))
+                        .collect()
+                }
+                _ => {
+                    let query = query.to_lowercase();
+                    markdown::SHORTCODES
+                        .iter()
+                        .map(|(name, _)| (*name).to_owned())
+                        .filter(|name| name.starts_with(&query))
+                        .collect()
+                }
+            };
+            candidates.sort();
+            candidates.truncate(5);
+            (!candidates.is_empty()).then_some(Suggest {
+                token_start,
+                caret,
+                items: candidates,
+                selected: 0,
+                emoji: sigil == ':',
+            })
+        });
+        self.composer
+            .update(cx, |composer, cx| composer.set_suggest(suggest, cx));
+        cx.notify();
+    }
+
     /// An image pasted into the composer rides the upload path (m12
     /// F14): bytes land in a temp file, the attach flow uploads.
     fn upload_clipboard_image(&mut self, bytes: &[u8], ext: &str, cx: &mut Context<Self>) {
@@ -473,6 +535,10 @@ impl ChatRoot {
         if text.is_empty() {
             return;
         }
+        // Unicode shortcodes resolve on the wire (:smile: → 😄, m12
+        // F9); unknown names stay literal for the server's custom
+        // emoji.
+        let text = markdown::resolve_shortcodes(&text);
         self.composer.update(cx, |composer, cx| composer.reset(cx));
         // A thread reply posts into the open thread; the main composer
         // posts to the room (SendThread was unreachable from the UI).
@@ -843,23 +909,10 @@ impl ChatRoot {
                 )
                 .into_any_element();
         }
-        // The user card opens from the avatar or the sender name (m12
-        // F8); unknown users fetch their card data on the first open.
+        // The user card opens from the avatar, the sender name or a
+        // mention pill (m12 D3/F8); unknown users fetch their card
+        // data on the first open.
         let card_open = self.user_card.as_deref() == Some(view.sender.as_str());
-        let card_click = |sender: String| {
-            let this = self.handle.clone();
-            move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
-                this.update(cx, |chat, cx| {
-                    chat.user_card = Some(sender.clone());
-                    if !chat.state.user_info.contains_key(&sender) {
-                        let _ = chat.commands.try_send(ChatCommand::UserInfo {
-                            username: sender.clone(),
-                        });
-                    }
-                    cx.notify();
-                });
-            }
-        };
         let lead = if grouped {
             div().flex_none().w(px(32.0)).into_any_element()
         } else {
@@ -869,7 +922,7 @@ impl ChatRoot {
                 .aria_label(format!("Open user card for {}", view.sender))
                 .flex_none()
                 .cursor_pointer()
-                .on_click(card_click(view.sender.clone()))
+                .on_click(card_opener(self.handle.clone(), view.sender.clone()))
                 .child(match view.avatar.as_deref() {
                     Some(path) => img(std::path::PathBuf::from(path))
                         .flex_none()
@@ -923,7 +976,10 @@ impl ChatRoot {
                                         .text_color(rgb(TEXT))
                                         .cursor_pointer()
                                         .hover(|style| style.text_color(rgb(ACCENT)))
-                                        .on_click(card_click(view.sender.clone()))
+                                        .on_click(card_opener(
+                                            self.handle.clone(),
+                                            view.sender.clone(),
+                                        ))
                                         .child(SharedString::from(view.sender.clone())),
                                 )
                                 .child(
@@ -934,7 +990,11 @@ impl ChatRoot {
                                 ),
                         )
                     })
-                    .child(message_element(view))
+                    .child(message_element(
+                        view,
+                        self.state.username.as_deref(),
+                        &self.handle,
+                    ))
                     .children(thread_pill)
                     .children(view.file.as_ref().map(|(name, url, size)| {
                         attachment_card(&msg_id, name, url, *size, view.image_path.as_deref())
@@ -2080,6 +2140,63 @@ impl gpui::Render for ChatRoot {
             )
             .children(user_menu);
 
+        // The completion popup (m12 F10): Tab/Enter accept, arrows
+        // move, a chip click accepts directly.
+        let suggest_popup = self.composer.read(cx).suggest().cloned().map(|suggest| {
+            let composer = self.composer.clone();
+            let chips: Vec<gpui::AnyElement> = suggest
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let composer = composer.clone();
+                    let label = match suggest.emoji {
+                        true => format!(
+                            ":{item}: {}",
+                            markdown::shortcode_glyph(item).unwrap_or("?")
+                        ),
+                        false => format!("@{item}"),
+                    };
+                    div()
+                        .id(SharedString::from(format!("sug-{index}-{item}")))
+                        .px_2()
+                        .py_0p5()
+                        .rounded_xs()
+                        .text_xs()
+                        .cursor_pointer()
+                        .when(index == suggest.selected, |chip| {
+                            chip.bg(rgb(ACCENT)).text_color(white())
+                        })
+                        .when(index != suggest.selected, |chip| {
+                            chip.text_color(rgb(TEXT))
+                                .hover(|style| style.bg(rgb(ROW_HOVER)))
+                        })
+                        .child(SharedString::from(label))
+                        .on_click(
+                            move |_: &gpui::ClickEvent,
+                                  _: &mut gpui::Window,
+                                  cx: &mut gpui::App| {
+                                composer
+                                    .update(cx, |composer, cx| composer.pick_suggestion(index, cx));
+                            },
+                        )
+                        .into_any_element()
+                })
+                .collect();
+            div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .p_1()
+                .gap_0p5()
+                .bg(rgb(PANEL))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .rounded_md()
+                .shadow_lg()
+                .children(chips)
+        });
+
         // The formatting toolbar: wrap-on-type over the selection
         // (m12 F11); Ctrl+B/I drive the same paths.
         let fmt_button = |label: &'static str, id: &'static str, marker: &'static str| {
@@ -2107,6 +2224,71 @@ impl gpui::Render for ChatRoot {
                     }
                 })
         };
+        let emoji_button = div()
+            .id("emoji-picker")
+            .role(Role::Button)
+            .aria_label("Emoji")
+            .px_1p5()
+            .rounded_xs()
+            .text_xs()
+            .text_color(rgb(MUTED))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(BORDER)))
+            .child("😊")
+            .on_click({
+                let this = cx.entity();
+                move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+                    this.update(cx, |chat, cx| {
+                        chat.emoji_picker_open = !chat.emoji_picker_open;
+                        cx.notify();
+                    });
+                }
+            });
+        let picker_rows: Vec<gpui::AnyElement> = markdown::SHORTCODES
+            .iter()
+            .map(|(_, glyph)| {
+                let composer = self.composer.clone();
+                let this = cx.entity();
+                div()
+                    .id(SharedString::from(format!("pick-{glyph}")))
+                    .px_1()
+                    .py_0p5()
+                    .text_lg()
+                    .cursor_pointer()
+                    .rounded_xs()
+                    .hover(|style| style.bg(rgb(ROW_HOVER)))
+                    .child(*glyph)
+                    .on_click(
+                        move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+                            composer.update(cx, |composer, cx| composer.insert_at_caret(glyph, cx));
+                            this.update(cx, |chat, cx| {
+                                chat.emoji_picker_open = false;
+                                cx.notify();
+                            });
+                        },
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let emoji_picker = self.emoji_picker_open.then(|| {
+            deferred(
+                anchored().anchor(Anchor::TopLeft).child(
+                    div()
+                        .occlude()
+                        .flex()
+                        .flex_wrap()
+                        .w(px(230.0))
+                        .p_1()
+                        .gap_0p5()
+                        .bg(rgb(PANEL))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .rounded_md()
+                        .shadow_lg()
+                        .children(picker_rows),
+                ),
+            )
+        });
         let toolbar = div()
             .flex()
             .flex_none()
@@ -2114,7 +2296,9 @@ impl gpui::Render for ChatRoot {
             .child(fmt_button("B", "fmt-bold", "**"))
             .child(fmt_button("I", "fmt-italic", "_"))
             .child(fmt_button("S", "fmt-strike", "~~"))
-            .child(fmt_button("</>", "fmt-code", "`"));
+            .child(fmt_button("</>", "fmt-code", "`"))
+            .child(emoji_button)
+            .children(emoji_picker);
 
         // The pending quote card rides above the composer; a foreign
         // room's quote never shows (m12 F6).
@@ -2241,6 +2425,7 @@ impl gpui::Render for ChatRoot {
                     .flex_none()
                     .gap_1()
                     .children(quote_card)
+                    .children(suggest_popup)
                     .child(toolbar)
                     .child(
                         div()
@@ -2491,14 +2676,16 @@ fn attachment_card(
         }))
 }
 
-fn message_element(view: &MessageView) -> gpui::Div {
+fn message_element(view: &MessageView, me: Option<&str>, this: &Entity<ChatRoot>) -> gpui::Div {
     let lines: Vec<gpui::Div> = view
         .lines
         .iter()
-        .map(|spans| {
+        .enumerate()
+        .map(|(line_index, spans)| {
             let mut row = div().flex().flex_wrap().items_center();
-            for span in spans {
-                row = row.child(span_element(span.clone()));
+            for (span_index, span) in spans.iter().enumerate() {
+                let id = format!("{}-{line_index}-{span_index}", view.id);
+                row = row.child(span_element(span.clone(), me, this, &id));
             }
             row
         })
@@ -2506,8 +2693,15 @@ fn message_element(view: &MessageView) -> gpui::Div {
     div().flex().flex_col().children(lines)
 }
 
-/// One span as an inline element.
-fn span_element(span: Span) -> gpui::Div {
+/// One span as an inline element; links open in the browser,
+/// mentions highlight the own name and open the user's card (m12
+/// D3). `id` makes the clickable spans stateful and unique.
+fn span_element(
+    span: Span,
+    me: Option<&str>,
+    this: &Entity<ChatRoot>,
+    id: &str,
+) -> gpui::AnyElement {
     match span {
         Span::Text {
             text,
@@ -2533,23 +2727,46 @@ fn span_element(span: Span) -> gpui::Div {
                     .px_1()
                     .rounded_sm();
             }
-            element
+            element.into_any_element()
         }
-        Span::Link { label, .. } => div()
+        Span::Link { label, url } => div()
+            .id(SharedString::from(format!("lnk-{id}")))
             .text_sm()
             .underline()
             .text_color(rgb(ACCENT))
-            .child(SharedString::from(label)),
-        Span::Mention(name) => div()
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(ACCENT))
-            .child(SharedString::from(name)),
-        Span::Emoji { path } => div().child(
-            img(std::path::PathBuf::from(&path))
-                .h(rems(1.125))
-                .w(rems(1.125)),
-        ),
+            .cursor_pointer()
+            .hover(|style| style.text_color(white()))
+            .on_click({
+                let url = url.clone();
+                move |_: &gpui::ClickEvent, _: &mut gpui::Window, _: &mut gpui::App| {
+                    open_url(&url);
+                }
+            })
+            .child(SharedString::from(label))
+            .into_any_element(),
+        Span::Mention(name) => {
+            let mine = name.strip_prefix('@') == me;
+            div()
+                .id(SharedString::from(format!("mnt-{id}")))
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .px_1()
+                .rounded_xs()
+                .cursor_pointer()
+                .when(mine, |pill| pill.bg(rgb(ACCENT)).text_color(white()))
+                .when(!mine, |pill| pill.text_color(rgb(ACCENT)))
+                .hover(|style| style.bg(rgb(ROW_HOVER)))
+                .on_click(card_opener(this.clone(), name.clone()))
+                .child(SharedString::from(name))
+                .into_any_element()
+        }
+        Span::Emoji { path } => div()
+            .child(
+                img(std::path::PathBuf::from(&path))
+                    .h(rems(1.125))
+                    .w(rems(1.125)),
+            )
+            .into_any_element(),
         Span::CodeBlock { body } => div()
             .font_family("monospace")
             .text_sm()
@@ -2560,8 +2777,53 @@ fn span_element(span: Span) -> gpui::Div {
             .px_2()
             .py_1()
             .min_w_0()
-            .child(SharedString::from(body.clone())),
+            .child(SharedString::from(body.clone()))
+            .into_any_element(),
     }
+}
+
+/// The word ending at `caret`, if it starts with `@` or `:` — the
+/// completion token (m12 F10). Returns the token's start (the sigil
+/// included), the sigil and the query after it.
+fn completion_token(text: &str, caret: usize) -> Option<(usize, char, String)> {
+    let caret = caret.min(text.len());
+    let mut start = caret;
+    for (index, character) in text[..caret].char_indices().rev() {
+        if character.is_whitespace() {
+            start = index + character.len_utf8();
+            break;
+        }
+        start = index;
+    }
+    let token = &text[start..caret];
+    let sigil = token.chars().next()?;
+    (sigil == '@' || sigil == ':').then(|| (start, sigil, token[1..].to_owned()))
+}
+
+/// The click handler opening a user's card — avatars, sender names
+/// and mention pills (m12 D3/F8); unknown users fetch their card
+/// data on the first open.
+fn card_opener(
+    this: Entity<ChatRoot>,
+    name: String,
+) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static {
+    move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+        this.update(cx, |chat, cx| {
+            chat.user_card = Some(name.clone());
+            if !chat.state.user_info.contains_key(&name) {
+                let _ = chat.commands.try_send(ChatCommand::UserInfo {
+                    username: name.clone(),
+                });
+            }
+            cx.notify();
+        });
+    }
+}
+
+/// Opens a link in the system browser; the spawn is fire-and-forget
+/// (m12 D3).
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 /// What a message row's action buttons need at click time.
@@ -2919,6 +3181,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["d1"],
             "matching is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn completion_token_finds_the_sigil_word() {
+        assert_eq!(
+            completion_token("hi @bo", 6),
+            Some((3, '@', "bo".to_owned()))
+        );
+        assert_eq!(
+            completion_token(":smi", 4),
+            Some((0, ':', "smi".to_owned()))
+        );
+        assert_eq!(completion_token("plain", 5), None, "no sigil, no popup");
+        assert_eq!(
+            completion_token("a @b c", 6),
+            None,
+            "the query never crosses whitespace"
         );
     }
 

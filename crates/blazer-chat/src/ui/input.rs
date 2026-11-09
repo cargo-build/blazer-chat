@@ -58,6 +58,9 @@ actions!(
         WrapStrike,
         WrapCode,
         Cancel,
+        AcceptSuggestion,
+        SuggestNext,
+        SuggestPrev,
     ]
 );
 
@@ -72,6 +75,27 @@ pub(crate) enum TextInputEvent {
         bytes: Vec<u8>,
         ext: String,
     },
+    /// The text changed under the user's fingers: content plus the
+    /// caret (m12 F10).
+    Changed {
+        text: String,
+        caret: usize,
+    },
+    /// The suggestion selection moved (m12 F10): the host re-renders
+    /// the popup.
+    SuggestMoved,
+}
+
+/// Composer suggestions (m12 F10): the token being completed, the
+/// candidates and the selected row. State lives in the input so
+/// Enter/Tab intercept before submit.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Suggest {
+    pub(crate) token_start: usize,
+    pub(crate) caret: usize,
+    pub(crate) items: Vec<String>,
+    pub(crate) selected: usize,
+    pub(crate) emoji: bool,
 }
 
 /// What a shaping result depends on; equality means the cached wrapped
@@ -117,6 +141,9 @@ pub(crate) struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    /// The active completion popup; the host computes candidates (m12
+    /// F10).
+    suggest: Option<Suggest>,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -146,11 +173,15 @@ impl TextInput {
             KeyBinding::new("ctrl-b", WrapBold, Some("TextInput")),
             KeyBinding::new("ctrl-i", WrapItalic, Some("TextInput")),
             KeyBinding::new("escape", Cancel, Some("TextInput")),
+            KeyBinding::new("tab", AcceptSuggestion, Some("TextInput")),
+            KeyBinding::new("down", SuggestNext, Some("TextInput")),
+            KeyBinding::new("up", SuggestPrev, Some("TextInput")),
         ]);
         Self {
             focus_handle: cx.focus_handle(),
             content: "".into(),
             placeholder: placeholder.to_owned().into(),
+            suggest: None,
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -176,6 +207,36 @@ impl TextInput {
             self.last_shape = None;
             cx.notify();
         }
+    }
+
+    /// Installs or clears the completion popup (m12 F10); the host
+    /// computes the candidates from the changed text.
+    pub(crate) fn set_suggest(&mut self, suggest: Option<Suggest>, cx: &mut Context<Self>) {
+        if self.suggest != suggest {
+            self.suggest = suggest;
+            cx.notify();
+        }
+    }
+
+    /// The active completion popup, for the host to render (m12 F10).
+    pub(crate) fn suggest(&self) -> Option<&Suggest> {
+        self.suggest.as_ref()
+    }
+
+    /// Inserts text at the caret (the emoji picker's path, m12 F9).
+    pub(crate) fn insert_at_caret(&mut self, text: &str, cx: &mut Context<Self>) {
+        let at = self.cursor_offset();
+        self.content = (self.content[..at].to_owned() + text + &self.content[at..]).into();
+        let caret = at + text.len();
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.last_shape = None;
+        self.last_bounds = None;
+        self.is_selecting = false;
+        let text = self.content.to_string();
+        cx.emit(TextInputEvent::Changed { text, caret });
+        cx.notify();
     }
 
     /// Replaces the text, moving the caret to the end. Unlike
@@ -309,6 +370,7 @@ impl TextInput {
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        self.suggest = None;
         cx.emit(TextInputEvent::Cancelled);
     }
 
@@ -489,6 +551,12 @@ impl TextInput {
     }
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+        if self.suggest.is_some() {
+            // A suggestion is up: Enter accepts it instead of sending
+            // (m12 F10).
+            self.accept_suggestion(cx);
+            return;
+        }
         // Enter during IME composition commits the composition, never the
         // message; whitespace-only content is not a message either (the
         // send path trims, an empty command would still hit the server).
@@ -497,7 +565,67 @@ impl TextInput {
         }
     }
 
+    /// Replaces the token with the selected suggestion (m12 F10).
+    pub(crate) fn accept_suggestion(&mut self, cx: &mut Context<Self>) {
+        let Some(suggest) = self.suggest.take() else {
+            return;
+        };
+        let Some(item) = suggest.items.get(suggest.selected) else {
+            return;
+        };
+        let replacement = if suggest.emoji {
+            format!(":{item}: ")
+        } else {
+            format!("{item} ")
+        };
+        let caret = suggest.token_start + replacement.len();
+        self.content = (self.content[..suggest.token_start].to_owned()
+            + &replacement
+            + &self.content[suggest.caret.min(self.content.len())..])
+            .into();
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.last_shape = None;
+        self.last_bounds = None;
+        self.is_selecting = false;
+        let text = self.content.to_string();
+        cx.emit(TextInputEvent::Changed { text, caret });
+        cx.notify();
+    }
+
+    /// Clicks a popup chip: select it, then accept (m12 F10).
+    pub(crate) fn pick_suggestion(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(suggest) = &mut self.suggest {
+            suggest.selected = index.min(suggest.items.len().saturating_sub(1));
+        }
+        self.accept_suggestion(cx);
+    }
+
+    fn accept_action(&mut self, _: &AcceptSuggestion, _: &mut Window, cx: &mut Context<Self>) {
+        if self.suggest.is_some() {
+            self.accept_suggestion(cx);
+        }
+    }
+
+    fn suggest_next(&mut self, _: &SuggestNext, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(suggest) = &mut self.suggest {
+            suggest.selected = (suggest.selected + 1).min(suggest.items.len().saturating_sub(1));
+            cx.emit(TextInputEvent::SuggestMoved);
+            cx.notify();
+        }
+    }
+
+    fn suggest_prev(&mut self, _: &SuggestPrev, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(suggest) = &mut self.suggest {
+            suggest.selected = suggest.selected.saturating_sub(1);
+            cx.emit(TextInputEvent::SuggestMoved);
+            cx.notify();
+        }
+    }
+
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
+        self.suggest = None;
         self.content = "".into();
         self.selected_range = 0..0;
         self.selection_reversed = false;
@@ -569,6 +697,9 @@ impl EntityInputHandler for TextInput {
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        let text = self.content.to_string();
+        let caret = self.selected_range.end;
+        cx.emit(TextInputEvent::Changed { text, caret });
         cx.notify();
     }
 
@@ -1131,6 +1262,9 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::wrap_strike))
             .on_action(cx.listener(Self::wrap_code))
             .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::accept_action))
+            .on_action(cx.listener(Self::suggest_next))
+            .on_action(cx.listener(Self::suggest_prev))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

@@ -7,6 +7,92 @@
 //! look-ahead closers, and the renderer stays flat. Code spans win over
 //! markers inside them; unclosed markers stay literal.
 
+/// Rocket.Chat-style unicode shortcodes → glyphs (m12 F9): the send
+/// path resolves `:name:` through this table and the picker serves the
+/// same glyphs.
+pub static SHORTCODES: &[(&str, &str)] = &[
+    ("+1", "👍"),
+    ("-1", "👎"),
+    ("smile", "😄"),
+    ("smiley", "😃"),
+    ("grin", "😁"),
+    ("laughing", "😆"),
+    ("joy", "😂"),
+    ("wink", "😉"),
+    ("blush", "😊"),
+    ("relieved", "😌"),
+    ("heart", "❤️"),
+    ("tada", "🎉"),
+    ("fire", "🔥"),
+    ("rocket", "🚀"),
+    ("eyes", "👀"),
+    ("thinking", "🤔"),
+    ("wave", "👋"),
+    ("pray", "🙏"),
+    ("muscle", "💪"),
+    ("clap", "👏"),
+    ("ok_hand", "👌"),
+    ("raised_hands", "🙌"),
+    ("cry", "😢"),
+    ("sob", "😭"),
+    ("scream", "😱"),
+    ("angry", "😠"),
+    ("sweat_smile", "😅"),
+    ("cold_sweat", "😰"),
+    ("flushed", "😳"),
+    ("sunglasses", "😎"),
+    ("star", "⭐"),
+    ("sparkles", "✨"),
+    ("zap", "⚡"),
+    ("bulb", "💡"),
+    ("white_check_mark", "✅"),
+    ("x", "❌"),
+    ("warning", "⚠️"),
+    ("question", "❓"),
+    ("coffee", "☕"),
+    ("pizza", "🍕"),
+    ("cake", "🍰"),
+    ("gift", "🎁"),
+    ("bug", "🐛"),
+    ("memo", "📝"),
+    ("dart", "🎯"),
+];
+
+/// The glyph for a shortcode name, if known (m12 F9).
+pub fn shortcode_glyph(name: &str) -> Option<&'static str> {
+    SHORTCODES
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, glyph)| *glyph)
+}
+
+/// Resolves `:name:` tokens to unicode glyphs on the wire; unknown
+/// names stay literal for the server's custom emoji (m12 F9).
+pub fn resolve_shortcodes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < text.len() {
+        if text.as_bytes()[index] == b':'
+            && let Some(end) = text[index + 1..].find(':')
+        {
+            let name = &text[index + 1..index + 1 + end];
+            let token_ok = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+'));
+            if token_ok && let Some(glyph) = shortcode_glyph(name) {
+                out.push_str(glyph);
+                index += 1 + end + 1;
+                continue;
+            }
+        }
+        let character = text[index..].chars().next().unwrap_or(':');
+        out.push(character);
+        index += character.len_utf8();
+    }
+    out
+}
+
 /// One renderable piece of a message line.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Span {
@@ -458,5 +544,21 @@ mod tests {
         let segments = split_fences("```code```");
         assert_eq!(segments.len(), 1);
         assert!(matches!(segments[0], Segment::Prose("```code```")));
+    }
+
+    #[test]
+    fn shortcodes_resolve_and_unknowns_stay() {
+        assert_eq!(resolve_shortcodes("hi :smile:"), "hi 😄");
+        assert_eq!(resolve_shortcodes(":nope: stays"), ":nope: stays");
+        assert_eq!(resolve_shortcodes(":+1: :fire:"), "👍 🔥");
+        assert_eq!(resolve_shortcodes("a: b"), "a: b", "a lone colon stays");
+        assert_eq!(resolve_shortcodes(":smile"), ":smile", "unclosed stays");
+    }
+
+    #[test]
+    fn picker_table_serves_glyphs() {
+        assert!(SHORTCODES.len() >= 40, "the picker needs a real set");
+        assert!(shortcode_glyph("tada").is_some());
+        assert_eq!(shortcode_glyph("nope"), None);
     }
 }
