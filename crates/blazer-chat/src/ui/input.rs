@@ -48,6 +48,10 @@ actions!(
         Right,
         SelectLeft,
         SelectRight,
+        MoveLeftWord,
+        MoveRightWord,
+        SelectLeftWord,
+        SelectRightWord,
         SelectAll,
         Home,
         End,
@@ -73,6 +77,12 @@ pub(crate) enum TextInputEvent {
     Submitted,
     /// Escape pressed: the host decides what backs out (m12 F12).
     Cancelled,
+    /// ArrowUp fell through — caret at offset 0, no popup: the host
+    /// walks to the previous own editable message (m14 P0).
+    EditPrevious,
+    /// ArrowDown fell through — caret at the very end, no popup: the
+    /// host walks forward or exits the edit (m14 P0).
+    EditNext,
     /// An image rode the clipboard: bytes plus the file extension
     /// (m12 F14).
     ImagePasted {
@@ -279,6 +289,76 @@ impl TextInput {
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.selected_range.end), cx);
+    }
+
+    fn left_word(&mut self, _: &MoveLeftWord, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.previous_word_boundary(self.cursor_offset()), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx)
+        }
+    }
+
+    fn right_word(&mut self, _: &MoveRightWord, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.next_word_boundary(self.selected_range.end), cx);
+        } else {
+            self.move_to(self.selected_range.end, cx)
+        }
+    }
+
+    fn select_left_word(&mut self, _: &SelectLeftWord, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_word_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_right_word(&mut self, _: &SelectRightWord, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_word_boundary(self.selected_range.end), cx);
+    }
+
+    /// Start of the word before `from`: word runs are alphanumeric
+    /// plus underscore; skip the trailing gap, then the run.
+    fn previous_word_boundary(&self, from: usize) -> usize {
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let chars: Vec<(usize, char)> = self
+            .content
+            .char_indices()
+            .take_while(|(index, _)| *index < from)
+            .collect();
+        let mut position = chars.len();
+        while position > 0 && !is_word(chars[position - 1].1) {
+            position -= 1;
+        }
+        while position > 0 && is_word(chars[position - 1].1) {
+            position -= 1;
+        }
+        chars.get(position).map(|(offset, _)| *offset).unwrap_or(0)
+    }
+
+    /// End of the word after `from`: skip the leading gap, then the
+    /// run (DOM-textarea Ctrl+Right convention).
+    fn next_word_boundary(&self, from: usize) -> usize {
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let chars: Vec<(usize, char)> = self
+            .content
+            .char_indices()
+            .skip_while(|(index, _)| *index < from)
+            .collect();
+        let mut taken = 0;
+        while taken < chars.len() && !is_word(chars[taken].1) {
+            taken += 1;
+        }
+        while taken < chars.len() && is_word(chars[taken].1) {
+            taken += 1;
+        }
+        chars
+            .get(taken)
+            .map(|(offset, _)| *offset)
+            .unwrap_or(self.content.len())
+    }
+
+    /// Caret to offset 0 (the ArrowDown edit walk lands here).
+    pub(crate) fn caret_to_start(&mut self, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -614,17 +694,36 @@ impl TextInput {
 
     fn suggest_next(&mut self, _: &SuggestNext, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(suggest) = &mut self.suggest {
-            suggest.selected = (suggest.selected + 1).min(suggest.items.len().saturating_sub(1));
+            // Wrap-around, like the original's popup
+            // (useComposerBoxPopup): first -> last, no clamping.
+            suggest.selected = if suggest.items.is_empty() {
+                0
+            } else {
+                (suggest.selected + 1) % suggest.items.len()
+            };
             cx.emit(TextInputEvent::SuggestMoved);
             cx.notify();
+        } else if self.selected_range.is_empty() && self.cursor_offset() == self.content.len() {
+            // No popup and the caret sits at the very end: walk the
+            // own messages forward (RC MessageBox ArrowDown).
+            cx.emit(TextInputEvent::EditNext);
         }
     }
 
     fn suggest_prev(&mut self, _: &SuggestPrev, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(suggest) = &mut self.suggest {
-            suggest.selected = suggest.selected.saturating_sub(1);
+            // Wrap-around: last -> first.
+            suggest.selected = if suggest.items.is_empty() {
+                0
+            } else {
+                (suggest.selected + suggest.items.len() - 1) % suggest.items.len()
+            };
             cx.emit(TextInputEvent::SuggestMoved);
             cx.notify();
+        } else if self.selected_range.is_empty() && self.cursor_offset() == 0 {
+            // No popup and the caret sits at the very start: edit the
+            // previous own message (RC MessageBox ArrowUp).
+            cx.emit(TextInputEvent::EditPrevious);
         }
     }
 
@@ -1252,6 +1351,10 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::left_word))
+            .on_action(cx.listener(Self::right_word))
+            .on_action(cx.listener(Self::select_left_word))
+            .on_action(cx.listener(Self::select_right_word))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))

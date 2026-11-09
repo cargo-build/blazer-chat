@@ -14,8 +14,8 @@ use gpui_platform::current_platform;
 
 use crate::rc::RcSettings;
 use input::{
-    Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
-    SelectRight, ShowCharacterPalette,
+    Backspace, Copy, Cut, Delete, End, Home, Left, MoveLeftWord, MoveRightWord, Paste, Right,
+    SelectAll, SelectLeft, SelectLeftWord, SelectRight, SelectRightWord, ShowCharacterPalette,
 };
 
 actions!(zoom, [ZoomIn, ZoomOut, ZoomReset]);
@@ -42,6 +42,12 @@ pub fn run(settings: RcSettings) {
             gpui::KeyBinding::new("right", Right, None),
             gpui::KeyBinding::new("shift-left", SelectLeft, None),
             gpui::KeyBinding::new("shift-right", SelectRight, None),
+            // Word motion: the DOM-textarea Ctrl+arrow convention the
+            // operator flagged missing (m14 P0).
+            gpui::KeyBinding::new("ctrl-left", MoveLeftWord, None),
+            gpui::KeyBinding::new("ctrl-right", MoveRightWord, None),
+            gpui::KeyBinding::new("ctrl-shift-left", SelectLeftWord, None),
+            gpui::KeyBinding::new("ctrl-shift-right", SelectRightWord, None),
             gpui::KeyBinding::new("ctrl-a", SelectAll, None),
             gpui::KeyBinding::new("ctrl-v", Paste, None),
             gpui::KeyBinding::new("ctrl-c", Copy, None),

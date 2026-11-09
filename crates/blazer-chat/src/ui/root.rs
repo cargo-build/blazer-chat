@@ -112,17 +112,25 @@ impl ChatRoot {
 
         let composer = cx.new(|cx| TextInput::new("Message…", cx));
         let search_rooms = Vec::new();
-        cx.subscribe(&composer, |chat, _, event, cx| match event {
-            TextInputEvent::Submitted => chat.send_message(cx),
-            TextInputEvent::Cancelled => chat.cancel_editing(cx),
-            TextInputEvent::ImagePasted { bytes, ext } => {
-                chat.upload_clipboard_image(bytes, ext, cx);
-            }
-            TextInputEvent::Changed { text, caret } => {
-                chat.update_suggestions(text, *caret, cx);
-            }
-            TextInputEvent::SuggestMoved => cx.notify(),
-        })
+        // Edit walking needs the window (begin_edit focuses the
+        // composer): subscribe_in, same as the pane (m13 S2b).
+        cx.subscribe_in(
+            &composer,
+            window,
+            |chat, _, event, window, cx| match event {
+                TextInputEvent::Submitted => chat.send_message(cx),
+                TextInputEvent::Cancelled => chat.cancel_editing(cx),
+                TextInputEvent::ImagePasted { bytes, ext } => {
+                    chat.upload_clipboard_image(bytes, ext, cx);
+                }
+                TextInputEvent::Changed { text, caret } => {
+                    chat.update_suggestions(text, *caret, cx);
+                }
+                TextInputEvent::SuggestMoved => cx.notify(),
+                TextInputEvent::EditPrevious => chat.edit_walk(true, window, cx),
+                TextInputEvent::EditNext => chat.edit_walk(false, window, cx),
+            },
+        )
         .detach();
         let search = cx.new(|cx| TextInput::new("Search…", cx));
         let pane = cx.new(MessagePane::new);
@@ -137,7 +145,9 @@ impl ChatRoot {
             TextInputEvent::Cancelled
             | TextInputEvent::ImagePasted { .. }
             | TextInputEvent::Changed { .. }
-            | TextInputEvent::SuggestMoved => {}
+            | TextInputEvent::SuggestMoved
+            | TextInputEvent::EditPrevious
+            | TextInputEvent::EditNext => {}
         })
         .detach();
         Self {
@@ -256,7 +266,7 @@ impl ChatRoot {
     /// holds the lock only for the store, never across a frame.
     fn mirror(&self, cx: &App) {
         let mut snapshot = UiSnapshot::from_state(&self.state);
-        snapshot.pane_rebuilds = self.pane.read(cx).pane_rebuilds;
+        snapshot.pane_rebuilds = self.pane.read(cx).rebuilds();
         snapshot.build_profile = if cfg!(debug_assertions) {
             "debug"
         } else {
@@ -340,6 +350,67 @@ impl ChatRoot {
             self.send_command(ChatCommand::Search(String::new()));
         }
         cx.notify();
+    }
+
+    /// ArrowUp/ArrowDown edit walk (m14 P0, RC ChatMessages
+    /// contract subset): previous walks to the older own editable
+    /// message (caret at end; from a fresh composer, to the newest
+    /// own); next walks forward (caret at start) and exits the edit
+    /// at the newest, restoring the room draft. The in-progress text
+    /// is saved to the room draft before every hop.
+    fn edit_walk(&mut self, previous: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(room) = self.state.active_room.clone() else {
+            return;
+        };
+        let Some(me) = self.state.username.as_deref() else {
+            return;
+        };
+        if !previous && self.editing.is_none() {
+            return; // ArrowDown outside an edit does nothing (RC).
+        }
+        // Own, non-system messages of the room, oldest first.
+        let own: Vec<(String, String)> = self
+            .state
+            .messages
+            .get(&room)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .filter(|message| message.sender == me && !message.system)
+                    .map(|message| (message.id.clone(), message.text.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if own.is_empty() {
+            return;
+        }
+        // The in-progress text becomes the room draft before the hop.
+        let draft = self.composer.read(cx).content().to_owned();
+        self.state.drafts.insert(room.clone(), draft);
+        let position = self
+            .editing
+            .as_ref()
+            .and_then(|(_, current)| own.iter().position(|(id, _)| id == current));
+        let target = match (previous, position) {
+            (true, None) => Some(own.len() - 1),
+            (true, Some(index)) if index > 0 => Some(index - 1),
+            (true, Some(_)) => return, // oldest own reached: stay
+            (false, Some(index)) if index + 1 < own.len() => Some(index + 1),
+            (false, Some(_)) => {
+                // Newest own reached: exit the edit, draft restored.
+                self.cancel_editing(cx);
+                return;
+            }
+            (false, None) => return,
+        };
+        let Some((msg_id, text)) = target.map(|index| own[index].clone()) else {
+            return;
+        };
+        self.begin_edit(room, msg_id, text, window, cx);
+        if !previous {
+            self.composer
+                .update(cx, |composer, cx| composer.caret_to_start(cx));
+        }
     }
 
     /// Recomputes the completion popup from the text around the caret
