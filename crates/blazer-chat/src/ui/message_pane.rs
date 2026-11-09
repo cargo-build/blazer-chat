@@ -1,16 +1,18 @@
-//! The message pane's row model and pure helpers: render views, the
-//! row enum, grouping and display shared by the main pane and the
-//! thread and pinned slots.
+//! The message pane's row model, pure helpers and the [`MessagePane`]
+//! entity that owns the pane state; ChatRoot drives it per event and
+//! per frame.
 
 use gpui::{
-    Anchor, ClipboardItem, Entity, FontWeight, Hsla, SharedString, Window, anchored, deferred, div,
-    hsla, img, prelude::*, px, rems, rgb, white,
+    Anchor, AnyElement, ClipboardItem, Context, Entity, FollowMode, FontWeight, Hsla,
+    ListAlignment, ListOffset, ListState, Role, SharedString, Window, anchored, deferred, div,
+    hsla, img, list, prelude::*, px, rems, rgb, white,
 };
 
 use super::input::{ACCENT, BORDER, MUTED, PANEL, ROW_HOVER, TEXT};
-use super::markdown::Span;
+use super::markdown::{self, Span};
 use super::root::ChatRoot;
-use crate::app::ChatCommand;
+use crate::app::{ChatCommand, ChatState};
+use crate::rc::Msg;
 
 /// One precomputed message row of the active room: the pane renders
 /// these without re-parsing markdown per frame.
@@ -724,6 +726,705 @@ impl gpui::Render for ReactionTooltip {
             .text_color(rgb(TEXT))
             .max_w(px(280.0))
             .child(self.text.clone())
+    }
+}
+
+/// Parent→pane render inputs, built per frame in `ChatRoot::render`
+/// and captured by the list closure as an owned snapshot (2.4(7): the
+/// closure must be 'static, so small clones replace today's borrows).
+#[derive(Clone)]
+pub(crate) struct PaneInputs {
+    pub(crate) editing: Option<(String, String)>,
+    pub(crate) user_card: Option<String>,
+    pub(crate) open_menu: Option<(String, String)>,
+    pub(crate) me: Option<String>,
+    pub(crate) emoji: std::collections::BTreeMap<String, String>,
+    /// `(sender, info)` of the open user card, when one is open.
+    pub(crate) user_card_info: Option<(String, crate::rc::UserInfo)>,
+    /// The active room supports permalinks (channels/groups; not DMs).
+    pub(crate) link_ready: bool,
+}
+
+/// The virtualized message pane: owns the row model, the list state
+/// and the parse cache (m13 S2a). ChatRoot folds events, then drives
+/// `sync`; render calls `element`/`poll_paging`.
+pub(crate) struct MessagePane {
+    /// This entity's own handle, read by the list closure.
+    entity: Entity<Self>,
+    /// TEMPORARY (s2a): row closures dispatch through the root's
+    /// existing methods; s2b replaces this with PaneEvent emissions.
+    parent: Entity<ChatRoot>,
+    /// Real pane rebuilds (version-guard misses); served over /state
+    /// as the runtime half of the S5 regression guard.
+    pub(crate) pane_rebuilds: u64,
+    /// Render views of the active room's messages, rebuilt on events.
+    views: Vec<MessageView>,
+    /// The pane's rows: messages interleaved with day separators.
+    rows: Vec<PaneRow>,
+    /// The pane's virtualized list state; follows the tail on new
+    /// messages and stops when the operator scrolls up (m10 S4).
+    messages_list: ListState,
+    /// Parsed markdown per (message id, text): rebuilds reuse it instead
+    /// of re-parsing every message on every event.
+    parsed: std::collections::HashMap<(String, String), std::sync::Arc<Vec<Vec<markdown::Span>>>>,
+    /// The state versions the views were built from (skip no-op
+    /// rebuilds).
+    views_room: Option<String>,
+    views_room_version: u64,
+    views_emoji_version: u64,
+    views_avatars_version: u64,
+    /// An older-slice fetch is in flight (one at a time per pane).
+    loading_older: bool,
+    /// One older-slice fetch per visit to the pane's top edge.
+    paged_since_top: bool,
+    /// Room whose messages the scroll handle last re-pinned.
+    pinned_room: Option<String>,
+}
+
+impl MessagePane {
+    pub(crate) fn new(parent: Entity<ChatRoot>, cx: &mut Context<Self>) -> Self {
+        Self {
+            entity: cx.entity(),
+            parent,
+            pane_rebuilds: 0,
+            views: Vec::new(),
+            rows: Vec::new(),
+            messages_list: {
+                let state = ListState::new(0, ListAlignment::Bottom, px(400.))
+                    .with_uniform_item_height(px(52.));
+                state.set_follow_mode(FollowMode::Tail);
+                state
+            },
+            parsed: Default::default(),
+            views_room: None,
+            views_room_version: u64::MAX,
+            views_emoji_version: u64::MAX,
+            views_avatars_version: u64::MAX,
+            loading_older: false,
+            paged_since_top: false,
+            pinned_room: None,
+        }
+    }
+
+    /// An older slice landed: the fetch slot frees up.
+    pub(crate) fn clear_loading_older(&mut self) {
+        self.loading_older = false;
+    }
+
+    /// Re-parses the active room's messages into render views (markdown
+    /// spans with emoji paths resolved).
+    pub(crate) fn sync(&mut self, state: &ChatState) {
+        let switched = self.pinned_room.as_deref() != state.active_room.as_deref();
+        // Nothing visible changed (badge/event churn): keep the views.
+        let room_version = state
+            .active_room
+            .as_deref()
+            .and_then(|room| state.message_versions.get(room).copied())
+            .unwrap_or(0);
+        if !switched
+            && self.views_room == state.active_room
+            && self.views_room_version == room_version
+            && self.views_emoji_version == state.emoji_version
+            && self.views_avatars_version == state.avatars_version
+        {
+            return;
+        }
+        let anchor = self.messages_list.logical_scroll_top();
+        let tail = self.messages_list.is_following_tail();
+        let old_rows_len = self.rows.len();
+        let old_first = self.views.first().map(|view| view.id.clone());
+        let old_last = self.views.last().map(|view| view.id.clone());
+        // The one anchor: the first message row at-or-below the
+        // viewport top, with its sub-row offset. Restore it if the
+        // rebuild reshapes the rows (deletes, edits that rewrap);
+        // splice arms keep it natively.
+        let restore = (!tail && !switched).then(|| {
+            let id = self
+                .rows
+                .iter()
+                .skip(anchor.item_ix)
+                .find_map(|row| match row {
+                    PaneRow::Message { view_index, .. } => Some(self.views[*view_index].id.clone()),
+                    _ => None,
+                });
+            id.map(|id| (id, anchor.offset_in_item))
+        });
+        let messages = state.active_messages().to_vec();
+        self.views = messages
+            .iter()
+            .map(|message| self.message_view(state, message))
+            .collect();
+        // Interleave day separators; the pane renders them between
+        // messages. The first-unread boundary draws a divider before
+        // its message (m12 F1).
+        let boundary = state
+            .first_unread
+            .get(state.active_room.as_deref().unwrap_or_default())
+            .cloned();
+        self.rows = Vec::with_capacity(self.views.len() + 8);
+        let mut previous_day: Option<String> = None;
+        for (view_index, view) in self.views.iter().enumerate() {
+            if previous_day.as_deref() != Some(view.day.as_str()) {
+                self.rows.push(PaneRow::Separator {
+                    day_ts: view.ts_raw.clone(),
+                });
+                previous_day = Some(view.day.clone());
+            }
+            if boundary.as_deref() == Some(view.id.as_str()) {
+                self.rows.push(PaneRow::UnreadMarker { view_index });
+            }
+            let grouped = view_index > 0 && adjacent_grouped(&self.views[view_index - 1], view);
+            self.rows.push(PaneRow::Message {
+                view_index,
+                grouped,
+            });
+        }
+        if switched {
+            // Jump to the unread divider when the room opened with
+            // unreads; otherwise land at the newest message. While
+            // following, the list's Tail mode re-pins by itself.
+            match self
+                .rows
+                .iter()
+                .position(|row| matches!(row, PaneRow::UnreadMarker { .. }))
+            {
+                Some(index) => self.messages_list.scroll_to_reveal_item(index),
+                None => self.messages_list.scroll_to_end(),
+            }
+            self.pinned_room = state.active_room.clone();
+        }
+        // Splice preserves the anchor and scroll fill for append-only
+        // (new message) and prepend-only (load-older) growth; reset is
+        // the general fallback (drops one wheel frame, list.rs:907).
+        let new_first = self.views.first().map(|view| view.id.clone());
+        let new_last = self.views.last().map(|view| view.id.clone());
+        match classify_row_change(
+            old_rows_len,
+            old_first.as_deref(),
+            old_last.as_deref(),
+            self.rows.len(),
+            new_first.as_deref(),
+            new_last.as_deref(),
+        ) {
+            RowChange::Same => {}
+            RowChange::Appended(added) => {
+                self.messages_list.splice(old_rows_len..old_rows_len, added);
+            }
+            RowChange::Prepended(added) => {
+                self.messages_list.splice(0..0, added);
+            }
+            RowChange::Reshaped => {
+                self.messages_list.reset(self.rows.len());
+                let restored = restore.flatten().and_then(|(id, offset)| {
+                    self.rows
+                        .iter()
+                        .position(|row| {
+                            matches!(row, PaneRow::Message { view_index, .. }
+                                if self.views[*view_index].id == id)
+                        })
+                        .map(|index| ListOffset {
+                            item_ix: index,
+                            offset_in_item: offset,
+                        })
+                });
+                match restored {
+                    Some(offset) => self.messages_list.scroll_to(offset),
+                    None if !tail => self.messages_list.scroll_to(anchor),
+                    None => {}
+                }
+            }
+        }
+        self.pane_rebuilds += 1;
+        self.views_room = state.active_room.clone();
+        self.views_room_version = room_version;
+        self.views_emoji_version = state.emoji_version;
+        self.views_avatars_version = state.avatars_version;
+    }
+
+    /// Builds the render view for one message: markdown parsed through
+    /// the shared cache, emoji/avatars resolved, attachments carried.
+    pub(crate) fn message_view(&mut self, state: &ChatState, message: &Msg) -> MessageView {
+        MessageView {
+            id: message.id.clone(),
+            system: message.system,
+            room_id: message.room_id.clone(),
+            starred: message.starred_by_me,
+            ts: pretty_time(&message.ts),
+            sender: message.sender.clone(),
+            text: message.text.clone(),
+            lines: {
+                let key = (message.id.clone(), message.text.clone());
+                match self.parsed.get(&key) {
+                    Some(lines) => lines.clone(),
+                    None => {
+                        if self.parsed.len() > 4000 {
+                            self.parsed.clear();
+                        }
+                        let parsed = std::sync::Arc::new(
+                            markdown::split_fences(&message.text)
+                                .iter()
+                                .flat_map(|segment| match segment {
+                                    markdown::Segment::Prose(line) => {
+                                        vec![markdown::parse(line, &|name| {
+                                            state.emoji.get(name).cloned()
+                                        })]
+                                    }
+                                    markdown::Segment::Fence { body } => {
+                                        vec![vec![markdown::Span::CodeBlock { body: body.clone() }]]
+                                    }
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                        self.parsed.insert(key, parsed.clone());
+                        parsed
+                    }
+                }
+            },
+            day: local_day(&message.ts),
+            ts_raw: message.ts.clone(),
+            reactions: message
+                .reactions
+                .iter()
+                .map(|(name, reaction)| (name.clone(), reaction.clone()))
+                .collect(),
+            file: message
+                .file
+                .as_ref()
+                .map(|file| (file.name.clone(), file.url.clone(), file.size)),
+            image_path: message
+                .file
+                .as_ref()
+                .and_then(|file| file.image_path.clone()),
+            avatar: state.avatars.get(&message.sender).cloned(),
+            thread: message
+                .tcount
+                .map(|count| (count, pretty_time(message.tlm.as_deref().unwrap_or("")))),
+        }
+    }
+
+    /// The accent divider marking the first unread message (m12 F1).
+    fn unread_marker(&self, _view_index: usize) -> AnyElement {
+        let label = "Unread messages";
+        div()
+            .id("unread-divider")
+            .aria_label(label)
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .child(div().flex_1().h(px(1.0)).bg(rgb(ACCENT)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(rgb(ACCENT))
+                    .child(label),
+            )
+            .child(div().flex_1().h(px(1.0)).bg(rgb(ACCENT)))
+            .into_any_element()
+    }
+
+    /// A centered day divider between messages of different dates.
+    fn day_separator(&self, day_ts: &str) -> AnyElement {
+        div()
+            .id(SharedString::from(format!("day-{day_ts}")))
+            .role(Role::Heading)
+            .aria_label(format!("Messages from {}", pretty_day(day_ts)))
+            .flex_none()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .child(div().flex_1().h(px(1.0)).bg(rgb(BORDER)))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(SharedString::from(pretty_day(day_ts))),
+            )
+            .child(div().flex_1().h(px(1.0)).bg(rgb(BORDER)))
+            .into_any_element()
+    }
+
+    /// One message row; consecutive same-sender rows within five
+    /// minutes group (avatar and header hidden), like the original.
+    fn message_row(&self, index: usize, grouped: bool, inputs: &PaneInputs) -> AnyElement {
+        self.message_row_view(&self.views[index], grouped, inputs)
+    }
+
+    /// The full row builder for any message view (main pane and
+    /// threads render the same way).
+    pub(crate) fn message_row_view(
+        &self,
+        view: &MessageView,
+        grouped: bool,
+        inputs: &PaneInputs,
+    ) -> AnyElement {
+        let room_id = view.room_id.clone();
+        let msg_id = view.id.clone();
+        let edit_text = view.text.clone();
+        let editing_this = matches!(
+            inputs.editing.as_ref(),
+            Some((room, msg)) if *room == room_id && *msg == msg_id
+        );
+        let emoji = &inputs.emoji;
+        let me = inputs.me.clone();
+        let badges = div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .children(view.reactions.iter().map(|(name, reaction)| {
+                let mine = me.as_deref().is_some_and(|me| reaction.has(me));
+                let count = reaction.count();
+                let names = reaction.usernames.join(", ");
+                let pill = div()
+                    .id(SharedString::from(format!("react-{msg_id}-{name}")))
+                    .role(Role::Button)
+                    .aria_label(format!(
+                        "React {name} — {count} so far: {names}",
+                        count = reaction.count()
+                    ))
+                    .px_1p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(if mine { ACCENT } else { BORDER }))
+                    .bg(rgb(if mine { ROW_HOVER } else { PANEL }))
+                    .text_xs()
+                    .text_color(rgb(TEXT))
+                    .cursor_pointer()
+                    .tooltip(move |_, app| {
+                        app.new(|_| ReactionTooltip {
+                            text: SharedString::from(names.clone()),
+                        })
+                        .into()
+                    })
+                    .on_click({
+                        let this = self.parent.clone();
+                        let room_id = room_id.clone();
+                        let msg_id = msg_id.clone();
+                        let name = name.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |chat, cx| {
+                                chat.toggle_reaction(&room_id, &msg_id, &name, cx)
+                            });
+                        }
+                    });
+                match emoji.get(name) {
+                    Some(path) => pill.flex().gap_1().items_center().child(
+                        img(std::path::PathBuf::from(path))
+                            .h(rems(0.875))
+                            .w(rems(0.875)),
+                    ),
+                    None => pill,
+                }
+                .child(SharedString::from(format!(
+                    "{} ×{count}",
+                    display_emoji(name)
+                )))
+            }));
+        let thread_pill = view.thread.as_ref().map(|(count, last)| {
+            let this = self.parent.clone();
+            let tmid = msg_id.clone();
+            div()
+                .id(SharedString::from(format!("thread-{msg_id}")))
+                .role(Role::Button)
+                .aria_label(format!(
+                    "Open thread — {count} {}",
+                    if count == &1 { "reply" } else { "replies" }
+                ))
+                .mt_0p5()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .bg(rgb(PANEL))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(ROW_HOVER)))
+                .on_click(move |_, _, cx| {
+                    this.update(cx, |chat, cx| {
+                        chat.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
+                        cx.notify();
+                    });
+                })
+                .child(SharedString::from(format!(
+                    "View thread · {count} {} · {last}",
+                    if *count == 1 { "reply" } else { "replies" }
+                )))
+        });
+        if view.system {
+            // Service notice (join/leave): compact muted line, not a
+            // chat row — no avatar, no toolbar, no grouping (m12 F2).
+            return div()
+                .id(SharedString::from(format!("sys-{msg_id}")))
+                .role(Role::ListItem)
+                .aria_label(SharedString::from(view.text.clone()))
+                .flex()
+                .justify_center()
+                .py_0p5()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(SharedString::from(view.text.clone())),
+                )
+                .into_any_element();
+        }
+        // The user card opens from the avatar, the sender name or a
+        // mention pill (m12 D3/F8); unknown users fetch their card
+        // data on the first open.
+        let card_open = inputs.user_card.as_deref() == Some(view.sender.as_str());
+        let lead = if grouped {
+            div().flex_none().w(px(32.0)).into_any_element()
+        } else {
+            div()
+                .id(SharedString::from(format!("card-{msg_id}")))
+                .role(Role::Button)
+                .aria_label(format!("Open user card for {}", view.sender))
+                .flex_none()
+                .cursor_pointer()
+                .on_click(card_opener(self.parent.clone(), view.sender.clone()))
+                .child(match view.avatar.as_deref() {
+                    Some(path) => img(std::path::PathBuf::from(path))
+                        .flex_none()
+                        .size(rems(2.0))
+                        .rounded_full()
+                        .into_any_element(),
+                    None => avatar(&view.sender).into_any_element(),
+                })
+                .into_any_element()
+        };
+        div()
+            .id(SharedString::from(format!("msg-{msg_id}")))
+            .role(Role::ListItem)
+            .aria_label(format!(
+                "{} at {}, {}",
+                view.sender,
+                view.ts,
+                if view.text.is_empty() {
+                    "attachment".to_owned()
+                } else {
+                    view.text.replace('\n', " ")
+                }
+            ))
+            .group("msg")
+            .flex()
+            .gap_2()
+            .items_start()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .hover(|style| style.bg(rgb(ROW_HOVER)))
+            .child(lead)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .when(!grouped, |column| {
+                        column.child(
+                            div()
+                                .flex()
+                                .items_baseline()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("cardname-{msg_id}")))
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(TEXT))
+                                        .cursor_pointer()
+                                        .hover(|style| style.text_color(rgb(ACCENT)))
+                                        .on_click(card_opener(
+                                            self.parent.clone(),
+                                            view.sender.clone(),
+                                        ))
+                                        .child(SharedString::from(view.sender.clone())),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(SharedString::from(view.ts.clone())),
+                                ),
+                        )
+                    })
+                    .child(message_element(view, inputs.me.as_deref(), &self.parent))
+                    .children(thread_pill)
+                    .children(view.file.as_ref().map(|(name, url, size)| {
+                        attachment_card(&msg_id, name, url, *size, view.image_path.as_deref())
+                    }))
+                    .child(badges),
+            )
+            .when(card_open, |row| {
+                let info = inputs
+                    .user_card_info
+                    .as_ref()
+                    .filter(|(name, _)| *name == view.sender)
+                    .map(|(_, info)| info);
+                let name = info
+                    .and_then(|info| info.name.clone())
+                    .unwrap_or_else(|| view.sender.clone());
+                let status = info
+                    .and_then(|info| info.status.clone())
+                    .unwrap_or_else(|| "…".to_owned());
+                let is_me = inputs.me.as_deref() == Some(view.sender.as_str());
+                let this = self.parent.clone();
+                let sender = view.sender.clone();
+                row.child(deferred(
+                    anchored().anchor(Anchor::TopLeft).child(
+                        div()
+                            .occlude()
+                            .flex()
+                            .flex_col()
+                            .min_w(px(170.0))
+                            .p_2()
+                            .gap_1()
+                            .bg(rgb(PANEL))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .rounded_md()
+                            .shadow_lg()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(avatar(&view.sender))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .child(SharedString::from(name)),
+                                            )
+                                            .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                                SharedString::from(format!(
+                                                    "@{} · {status}",
+                                                    view.sender
+                                                )),
+                                            )),
+                                    ),
+                            )
+                            .when(!is_me, |card| {
+                                card.child(
+                                    div()
+                                        .id("card-dm")
+                                        .role(Role::Button)
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_xs()
+                                        .text_xs()
+                                        .text_color(rgb(TEXT))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(ROW_HOVER)))
+                                        .child("✉ Send DM")
+                                        .on_click({
+                                            let this = this.clone();
+                                            let sender = sender.clone();
+                                            move |_, _, cx| {
+                                                this.update(cx, |chat, cx| {
+                                                    chat.user_card = None;
+                                                    chat.send_command(ChatCommand::OpenDm {
+                                                        username: sender.clone(),
+                                                    });
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("card-close")
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(rgb(TEXT)))
+                                    .child("✕ close")
+                                    .on_click(move |_, _, cx| {
+                                        this.update(cx, |chat, cx| {
+                                            chat.user_card = None;
+                                            cx.notify();
+                                        });
+                                    }),
+                            ),
+                    ),
+                ))
+            })
+            .child(action_strip(ActionContext {
+                this: self.parent.clone(),
+                link_ready: inputs.link_ready,
+                menu_open: inputs.open_menu.as_ref() == Some(&(room_id.clone(), msg_id.clone())),
+                room_id,
+                msg_id,
+                edit_text,
+                editing_this,
+                starred: view.starred,
+            }))
+            .into_any_element()
+    }
+
+    /// The virtualized list element; the closure reads only this
+    /// entity, never the root (m13 S2a).
+    pub(crate) fn element(&self, inputs: &PaneInputs) -> AnyElement {
+        let entity = self.entity.clone();
+        let inputs = std::rc::Rc::new(inputs.clone());
+        list(self.messages_list.clone(), move |ix, _window, cx| {
+            let pane = entity.read(cx);
+            match pane.rows.get(ix) {
+                Some(PaneRow::Separator { day_ts }) => pane.day_separator(day_ts),
+                Some(PaneRow::UnreadMarker { view_index }) => pane.unread_marker(*view_index),
+                Some(PaneRow::Message {
+                    view_index,
+                    grouped,
+                }) => pane.message_row(*view_index, *grouped, &inputs),
+                None => div().into_any_element(),
+            }
+        })
+        .flex_1()
+        .min_h_0()
+        .into_any_element()
+    }
+
+    /// The paging trigger as a pure query: flips the edge flags and
+    /// returns the fetch command; render only forwards it.
+    pub(crate) fn poll_paging(&mut self, state: &ChatState) -> Option<ChatCommand> {
+        let at_top = self.messages_list.logical_scroll_top().item_ix == 0;
+        if !at_top {
+            self.paged_since_top = false;
+        }
+        let filled = state
+            .active_room
+            .as_deref()
+            .is_some_and(|room| state.at_cache_cap(room));
+        if at_top
+            && !self.paged_since_top
+            && !self.loading_older
+            && !filled
+            && let Some(room) = state.active_room.clone()
+            && !state.older_exhausted.contains(&room)
+        {
+            self.paged_since_top = true;
+            self.loading_older = true;
+            return Some(ChatCommand::FetchOlder { room_id: room });
+        }
+        None
+    }
+
+    /// A pane view by message id, for the composer's quote card.
+    pub(crate) fn view(&self, msg_id: &str) -> Option<&MessageView> {
+        self.views.iter().find(|view| view.id == msg_id)
     }
 }
 
