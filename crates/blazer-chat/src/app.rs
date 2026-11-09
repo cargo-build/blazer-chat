@@ -1128,9 +1128,14 @@ async fn execute<T: Transport>(
         ChatCommand::RefreshRoom { room_id } => match client.history(&room_id).await {
             Ok(mut messages) => {
                 // Server-side read receipt: the unread stream stops
-                // counting this room. Cosmetic — a refusal is logged, not
-                // banner-worthy.
+                // counting this room. A 401 here is a dead session — it
+                // must invalidate like every other call instead of
+                // sinking into a log line (m8 sec-flow #11); any other
+                // refusal is cosmetic and stays logged.
                 if let Err(error) = client.mark_read(&room_id).await {
+                    if let Some(event) = session_expired(store, client, &error) {
+                        return event;
+                    }
                     eprintln!("blazer-chat: mark read: {error}");
                 }
                 if let Some(store) = store
@@ -1918,6 +1923,34 @@ mod tests {
         assert_eq!(slash_command_name("/"), None);
         assert_eq!(slash_command_name("//not-a-command"), None);
         assert_eq!(slash_command_name("plain text"), None);
+    }
+
+    #[test]
+    fn mark_read_401_expires_the_session() {
+        // The read receipt rides the refresh: a 401 on it is a dead
+        // session and must surface as SessionExpired, not a log line
+        // (m8 sec-flow #11).
+        let history = r#"{"messages":[{"_id":"m1","rid":"GENERAL","msg":"hi","ts":"2026-01-01T00:00:00.000Z","u":{"username":"tester"}}],"success":true}"#;
+        let login = r#"{"status":"success","data":{"userId":"u1","authToken":"tok","me":{"username":"tester","name":"Tester","emails":null}}}"#;
+        let transport = FakeTransport::answering(&[
+            ("login", 200, login),
+            ("channels.history", 200, history),
+            ("subscriptions.read", 401, r#"{"error":"unauthorized"}"#),
+        ]);
+        let mut rc = client(transport);
+        futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+        let event = futures_lite::future::block_on(execute(
+            &mut rc,
+            None,
+            &mut std::collections::HashMap::new(),
+            ChatCommand::RefreshRoom {
+                room_id: "GENERAL".to_owned(),
+            },
+        ));
+        assert!(
+            matches!(&event, ChatEvent::SessionExpired { .. }),
+            "a 401 on mark_read must expire the session, got a non-expiry event"
+        );
     }
 
     #[test]
