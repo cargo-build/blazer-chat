@@ -58,6 +58,30 @@ pub(crate) struct ChatRoot {
     /// Colors for the window's current appearance; the m9 appearance
     /// observer swaps it and re-renders on a live switch.
     palette: Palette,
+    /// Frame-interval telemetry (m13): the previous render's start
+    /// plus the last 10 frame intervals in ms. An off-view window
+    /// produces no frames and no samples — throttled intervals do
+    /// not represent render cost; the in-view tile stays the m10
+    /// gold standard.
+    last_frame_start: Option<std::time::Instant>,
+    frame_ms: std::collections::VecDeque<f64>,
+}
+
+/// Frame-interval sampling (m13 telemetry): the interval between
+/// consecutive render starts enters a 10-slot ring; the very first
+/// frame has no predecessor and samples nothing.
+fn record_frame(
+    last: &mut Option<std::time::Instant>,
+    ring: &mut std::collections::VecDeque<f64>,
+    now: std::time::Instant,
+) {
+    if let Some(start) = *last {
+        ring.push_back(now.duration_since(start).as_secs_f64() * 1000.0);
+        while ring.len() > 10 {
+            ring.pop_front();
+        }
+    }
+    *last = Some(now);
 }
 
 impl ChatRoot {
@@ -170,6 +194,8 @@ impl ChatRoot {
             commands,
             snapshot,
             composer,
+            last_frame_start: None,
+            frame_ms: std::collections::VecDeque::new(),
             search_rooms,
             focus: cx.focus_handle(),
             search,
@@ -283,6 +309,11 @@ impl ChatRoot {
     fn mirror(&self, cx: &App) {
         let mut snapshot = UiSnapshot::from_state(&self.state);
         snapshot.pane_rebuilds = self.pane.read(cx).rebuilds();
+        if !self.frame_ms.is_empty() {
+            let count = self.frame_ms.len() as f64;
+            snapshot.frame_ms_avg = Some(self.frame_ms.iter().sum::<f64>() / count);
+            snapshot.frame_ms_max = Some(self.frame_ms.iter().cloned().fold(0.0, f64::max));
+        }
         snapshot.build_profile = if cfg!(debug_assertions) {
             "debug"
         } else {
@@ -821,6 +852,11 @@ fn panel(
 
 impl gpui::Render for ChatRoot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        record_frame(
+            &mut self.last_frame_start,
+            &mut self.frame_ms,
+            std::time::Instant::now(),
+        );
         let p = self.palette;
         let who = self
             .state
@@ -2130,6 +2166,25 @@ fn completion_token(text: &str, caret: usize) -> Option<(usize, char, String)> {
 #[allow(clippy::unwrap_used)] // tests assert the expected path
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn frame_ring_samples_real_frames_only() {
+        let mut last = None;
+        let mut ring = std::collections::VecDeque::new();
+        let start = std::time::Instant::now();
+        record_frame(&mut last, &mut ring, start);
+        assert!(ring.is_empty(), "the first frame has no predecessor");
+        for step in 1..=15 {
+            record_frame(
+                &mut last,
+                &mut ring,
+                start + Duration::from_millis(step * 8),
+            );
+        }
+        assert_eq!(ring.len(), 10, "the ring keeps the last 10 intervals");
+        assert!(ring.iter().all(|ms| (8.0..16.6).contains(ms)));
+    }
 
     #[test]
     fn room_hits_match_names_case_insensitively() {

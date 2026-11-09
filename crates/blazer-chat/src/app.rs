@@ -795,6 +795,15 @@ pub struct UiSnapshot {
     /// How many times the pane actually rebuilt (the S4 regression
     /// guard's runtime half: background traffic must not move this).
     pub pane_rebuilds: u64,
+    /// Mean of the last 10 frame intervals, ms (`None` until two
+    /// frames have rendered). Off-view throttle caveat lives on
+    /// ChatRoot's telemetry fields.
+    pub frame_ms_avg: Option<f64>,
+    /// Max of the same window.
+    pub frame_ms_max: Option<f64>,
+    /// Rows in the active room: bench sizing for the 20/100/400
+    /// frame-time budgets (m10).
+    pub active_room_messages: usize,
 }
 
 impl UiSnapshot {
@@ -812,6 +821,13 @@ impl UiSnapshot {
                 "release"
             },
             pane_rebuilds: 0,
+            frame_ms_avg: None,
+            frame_ms_max: None,
+            active_room_messages: state
+                .active_room
+                .as_deref()
+                .and_then(|room| state.messages.get(room))
+                .map_or(0, Vec::len),
             rooms: state
                 .rooms
                 .iter()
