@@ -317,6 +317,7 @@ mod tests {
             lm: None,
             preview: None,
             topic: None,
+            mentions: 0,
         }];
         store.save_rooms(&rooms).unwrap();
         assert_eq!(store.load_rooms().unwrap(), rooms);

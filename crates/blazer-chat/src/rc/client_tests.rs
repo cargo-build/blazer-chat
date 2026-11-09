@@ -97,7 +97,7 @@ impl Transport for FakeTransport {
 
 const LOGIN_BODY: &str = r#"{"status":"success","data":{"userId":"u1","authToken":"tok","me":{"username":"tester","name":"Tester","emails":null}}}"#;
 const ROOMS_BODY: &str = r#"{"update":[
-    {"_id":"GENERAL","name":"general","t":"c","lastMessage":{}},
+    {"_id":"GENERAL","name":"general","t":"c","lastMessage":{},"userMentions":2},
     {"_id":"priv1","name":"secret","t":"p"},
     {"_id":"dm1","t":"d","usernames":["tester","alice"]},
     {"_id":"selfdm","t":"d","usernames":["tester"]}
@@ -605,5 +605,76 @@ fn history_decodes_system_notices() {
     assert!(
         messages.last().unwrap().system,
         "`uj` decodes as a service notice"
+    );
+}
+
+#[test]
+fn rooms_decode_mention_counts() {
+    let transport = FakeTransport::answering(&authenticated_routes());
+    let mut rc = client(transport);
+
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    let rooms = futures_lite::future::block_on(rc.rooms()).unwrap();
+
+    let general = rooms.iter().find(|room| room.id == "GENERAL").unwrap();
+    assert_eq!(general.mentions, 2, "userMentions decodes into the room");
+    let dm = rooms.iter().find(|room| room.id == "dm1").unwrap();
+    assert_eq!(dm.mentions, 0, "no userMentions field decodes as zero");
+}
+
+#[test]
+fn mark_room_unread_posts_the_unread_flag() {
+    let transport = FakeTransport::answering(&[
+        ("login", 200, LOGIN_BODY),
+        ("subscriptions.read", 200, r#"{"success":true}"#),
+    ]);
+    let mut rc = client(transport.clone());
+
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    futures_lite::future::block_on(rc.mark_room_unread("dm1")).unwrap();
+
+    let request = transport.last_request();
+    assert!(request.contains("POST /api/v1/subscriptions.read"));
+    assert!(
+        request.contains(r#""unread":true"#),
+        "the unread flag rides the body"
+    );
+}
+
+#[test]
+fn hide_room_deletes_the_subscription() {
+    let transport = FakeTransport::answering(&[
+        ("login", 200, LOGIN_BODY),
+        ("subscriptions.delete", 200, r#"{"success":true}"#),
+    ]);
+    let mut rc = client(transport.clone());
+
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    futures_lite::future::block_on(rc.hide_room("dm1")).unwrap();
+
+    let request = transport.last_request();
+    assert!(request.contains("DELETE /api/v1/subscriptions.delete"));
+    assert!(request.contains("roomId=dm1"));
+}
+
+#[test]
+fn send_quoted_posts_the_quote_attachment() {
+    let transport =
+        FakeTransport::answering(&[("login", 200, LOGIN_BODY), ("sendMessage", 200, SEND_BODY)]);
+    let mut rc = client(transport.clone());
+
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    let sent =
+        futures_lite::future::block_on(rc.send_quoted("GENERAL", "see this", "root-msg")).unwrap();
+    assert_eq!(sent.id, "m3", "the echo decodes like a plain send");
+
+    let request = transport.last_request();
+    assert!(
+        request.contains(r#""type":"quote""#),
+        "the quote attachment rides the body"
+    );
+    assert!(
+        request.contains("root-msg"),
+        "the quoted message id rides the body"
     );
 }

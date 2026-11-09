@@ -53,6 +53,10 @@ pub struct WireRoom {
     pub topic: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Direct-mention count — the badge turns mention-aware on it
+    /// (m12 F4).
+    #[serde(rename = "userMentions", default)]
+    pub user_mentions: Option<u32>,
 }
 
 /// The sidebar preview source (wire `lastMessage`).

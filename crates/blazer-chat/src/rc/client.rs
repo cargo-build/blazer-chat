@@ -264,6 +264,7 @@ impl<T: Transport> RcClient<T> {
                     unread: 0,
                     lm: room.lm,
                     topic: room.topic.or(room.description),
+                    mentions: room.user_mentions.unwrap_or_default(),
                     preview: room.last_message.and_then(|last| {
                         // Markdown markers are noise in a one-line
                         // preview; the symbols carry no formatting here.
@@ -464,6 +465,59 @@ impl<T: Transport> RcClient<T> {
                 "subscriptions.read answered success=false".to_owned(),
             )),
         }
+    }
+
+    /// Flags a room unread server-side (`subscriptions.read` with the
+    /// unread flag) — the sidebar context menu's Mark-unread (m12 F5).
+    pub async fn mark_room_unread(&self, room_id: &str) -> Result<(), RcError> {
+        let body = serde_json::json!({ "rid": room_id, "unread": true }).to_string();
+        let body = self
+            .call("POST", "/api/v1/subscriptions.read", Some(body), true)
+            .await?;
+        match Self::parse::<SuccessResponse>(&body, "subscriptions.read")?.success {
+            true => Ok(()),
+            false => Err(RcError::Refused(
+                "subscriptions.read answered success=false".to_owned(),
+            )),
+        }
+    }
+
+    /// Hides a room for this account (`subscriptions.delete`) — the
+    /// sidebar context menu's Hide (m12 F5).
+    pub async fn hide_room(&self, room_id: &str) -> Result<(), RcError> {
+        let path = format!("/api/v1/subscriptions.delete?roomId={room_id}");
+        let body = self.call("DELETE", &path, None, true).await?;
+        match Self::parse::<SuccessResponse>(&body, "subscriptions.delete")?.success {
+            true => Ok(()),
+            false => Err(RcError::Refused(
+                "subscriptions.delete answered success=false".to_owned(),
+            )),
+        }
+    }
+
+    /// Sends a message quoting another one: the quote rides as a
+    /// `quote` attachment the server resolves (m12 F6).
+    pub async fn send_quoted(
+        &self,
+        room_id: &str,
+        text: &str,
+        quote_msg_id: &str,
+    ) -> Result<Msg, RcError> {
+        let body = serde_json::json!({
+            "message": {
+                "rid": room_id,
+                "msg": text,
+                "attachments": [
+                    { "type": "quote", "message_id": quote_msg_id }
+                ]
+            }
+        })
+        .to_string();
+        let body = self
+            .call("POST", "/api/v1/chat.sendMessage", Some(body), true)
+            .await?;
+        let parsed: SendMessageResponse = Self::parse(&body, "chat.sendMessage")?;
+        Ok(self.message_into_msg(parsed.message))
     }
 
     /// Uploads a file and posts it as a message: the two-phase

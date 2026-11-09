@@ -34,6 +34,9 @@ pub enum ChatCommand {
     Send {
         room_id: String,
         text: String,
+        /// The pending quote card's message id; `None` is a plain send
+        /// (m12 F6).
+        quote_msg_id: Option<String>,
     },
     EditMessage {
         room_id: String,
@@ -97,6 +100,16 @@ pub enum ChatCommand {
         room_id: String,
         tmid: String,
         text: String,
+    },
+    /// Flags a room unread (`subscriptions.read` unread flag) — the
+    /// sidebar context menu's Mark-unread (m12 F5).
+    MarkRoomUnread {
+        room_id: String,
+    },
+    /// Hides the room for this account (`subscriptions.delete`) — the
+    /// sidebar context menu's Hide (m12 F5).
+    HideRoom {
+        room_id: String,
     },
 }
 
@@ -166,6 +179,15 @@ pub enum ChatEvent {
     /// The server accepted the presence change.
     PresenceSet {
         status: String,
+    },
+    /// The server flagged the room unread: the sidebar badge returns
+    /// (m12 F5).
+    RoomMarkedUnread {
+        room_id: String,
+    },
+    /// The server hid the room: the sidebar drops it (m12 F5).
+    RoomHidden {
+        room_id: String,
     },
     /// The user's `subscriptions-changed` stream reported a room's
     /// unread count (initial burst + every new message).
@@ -237,6 +259,9 @@ pub struct ChatState {
     pub avatars_version: u64,
     /// Bumped when custom emoji arrive.
     pub emoji_version: u64,
+    /// The pending quote card `(room_id, msg_id)`: a room switch or a
+    /// send consumes it (m12 F6).
+    pub quote: Option<(String, String)>,
 }
 
 /// One local-search hit.
@@ -369,6 +394,8 @@ impl ChatState {
             }
             ChatEvent::Sent { message } => {
                 self.messages_version += 1;
+                // The quote card is consumed by its send (m12 F6).
+                self.quote = None;
                 self.bump_room_activity(&message.room_id, message.ts.clone());
                 match message.tmid.clone() {
                     // Thread replies surface in their thread view only.
@@ -470,6 +497,21 @@ impl ChatState {
                 }
                 None
             }
+            ChatEvent::RoomMarkedUnread { room_id } => {
+                if let Some(room) = self.rooms.iter_mut().find(|room| room.id == room_id) {
+                    // The badge must show: at least one unread even if
+                    // the stale stream count was zero.
+                    room.unread = room.unread.max(1);
+                }
+                None
+            }
+            ChatEvent::RoomHidden { room_id } => {
+                self.rooms.retain(|room| room.id != room_id);
+                if self.active_room.as_deref() == Some(room_id.as_str()) {
+                    self.active_room = None;
+                }
+                None
+            }
             ChatEvent::SearchQuery(query) => {
                 self.search_query = (!query.is_empty()).then_some(query);
                 None
@@ -505,6 +547,8 @@ impl ChatState {
             }
             ChatEvent::CachedMessages { room_id, messages } => {
                 self.messages_version += 1;
+                // A room switch drops an unconsumed quote card (m12 F6).
+                self.quote = None;
                 // The store snapshot is older than live state: merge
                 // only rows the in-memory slice does not know yet.
                 let entry = self.messages.entry(room_id.clone()).or_default();
@@ -1033,7 +1077,11 @@ async fn execute<T: Transport>(
                 }
             }
         }
-        ChatCommand::Send { room_id, text } => {
+        ChatCommand::Send {
+            room_id,
+            text,
+            quote_msg_id,
+        } => {
             // Slash commands are server-side methods, never chat text:
             // posting one raw would drop `/msg bob look here` into the
             // channel (m12 D1). No command registry exists yet, so
@@ -1043,7 +1091,12 @@ async fn execute<T: Transport>(
                     "slash command /{name} is not supported here yet — nothing was sent"
                 ));
             }
-            match client.send(&room_id, &text).await {
+            let sent = match quote_msg_id {
+                // A quoted send rides the quote attachment (m12 F6).
+                Some(quote) => client.send_quoted(&room_id, &text, &quote).await,
+                None => client.send(&room_id, &text).await,
+            };
+            match sent {
                 Ok(message) => ChatEvent::Sent { message },
                 Err(error) => session_expired(store, client, &error)
                     .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
@@ -1200,6 +1253,16 @@ async fn execute<T: Transport>(
             Err(error) => session_expired(store, client, &error)
                 .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
+        ChatCommand::MarkRoomUnread { room_id } => match client.mark_room_unread(&room_id).await {
+            Ok(()) => ChatEvent::RoomMarkedUnread { room_id },
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
+        },
+        ChatCommand::HideRoom { room_id } => match client.hide_room(&room_id).await {
+            Ok(()) => ChatEvent::RoomHidden { room_id },
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
+        },
     }
 }
 
@@ -1218,6 +1281,7 @@ mod tests {
             lm: None,
             preview: None,
             topic: None,
+            mentions: 0,
         }
     }
 
@@ -1735,6 +1799,7 @@ mod tests {
             ChatCommand::Send {
                 room_id: "GENERAL".to_owned(),
                 text: "/leave now".to_owned(),
+                quote_msg_id: None,
             },
         ));
         match &event {
@@ -1751,6 +1816,76 @@ mod tests {
         assert!(
             !probe.made_request(),
             "a slash command must never hit the wire as chat text"
+        );
+    }
+
+    #[test]
+    fn quoted_send_rides_the_quote_attachment() {
+        let body = r#"{"message":{"_id":"m3","rid":"GENERAL","msg":"see this","ts":"2026-11-08T05:00:00Z","u":{"username":"tester"}},"success":true}"#;
+        let login = r#"{"status":"success","data":{"userId":"u1","authToken":"tok","me":{"username":"tester","name":"Tester","emails":null}}}"#;
+        let transport =
+            FakeTransport::answering(&[("login", 200, login), ("sendMessage", 200, body)]);
+        let probe = transport.clone();
+        let mut rc = client(transport);
+        futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+        let event = futures_lite::future::block_on(execute(
+            &mut rc,
+            None,
+            &mut std::collections::HashMap::new(),
+            ChatCommand::Send {
+                room_id: "GENERAL".to_owned(),
+                text: "see this".to_owned(),
+                quote_msg_id: Some("root-msg".to_owned()),
+            },
+        ));
+        match &event {
+            ChatEvent::Sent { .. } => {}
+            ChatEvent::Failed(reason) => panic!("the send failed: {reason}"),
+            _ => panic!("expected a Sent event"),
+        }
+        let request = probe.last_request();
+        assert!(
+            request.contains(r#""type":"quote""#),
+            "the quote attachment rides the body: {request}"
+        );
+        assert!(request.contains("root-msg"), "the quoted id rides the body");
+    }
+
+    #[test]
+    fn mark_unread_folds_a_visible_badge() {
+        let mut state = ChatState {
+            rooms: vec![room("GENERAL", "general")],
+            ..ChatState::default()
+        };
+        state.apply(ChatEvent::RoomMarkedUnread {
+            room_id: "GENERAL".to_owned(),
+        });
+        assert_eq!(state.rooms[0].unread, 1, "a flagged room shows a badge");
+        state.rooms[0].unread = 0;
+        state.apply(ChatEvent::RoomMarkedUnread {
+            room_id: "GENERAL".to_owned(),
+        });
+        assert_eq!(state.rooms[0].unread, 1, "the badge never stays hidden");
+    }
+
+    #[test]
+    fn hidden_room_leaves_the_sidebar_and_closes_the_pane() {
+        let mut state = ChatState {
+            rooms: vec![room("GENERAL", "general"), room("priv1", "secret")],
+            active_room: Some("GENERAL".to_owned()),
+            ..ChatState::default()
+        };
+        state.apply(ChatEvent::RoomHidden {
+            room_id: "GENERAL".to_owned(),
+        });
+        assert!(
+            state.rooms.iter().all(|room| room.id != "GENERAL"),
+            "the hidden room leaves the list"
+        );
+        assert_eq!(state.active_room, None, "hiding the open room closes it");
+        assert!(
+            state.rooms.iter().any(|room| room.id == "priv1"),
+            "other rooms stay"
         );
     }
 }

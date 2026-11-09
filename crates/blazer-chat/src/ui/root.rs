@@ -4,8 +4,8 @@
 
 use gpui::{
     Anchor, AnyElement, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    Pixels, Role, ScrollHandle, SharedString, Window, anchored, deferred, div, hsla, img,
-    prelude::*, px, rems, rgb, uniform_list, white,
+    MouseButton, Pixels, Role, ScrollHandle, SharedString, Window, anchored, deferred, div, hsla,
+    img, prelude::*, px, rems, rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
@@ -58,6 +58,8 @@ pub(crate) struct ChatRoot {
     handle: Entity<ChatRoot>,
     /// The row whose labeled action menu is open `(room_id, msg_id)`.
     open_menu: Option<(String, String)>,
+    /// The room whose right-click context menu is open (m12 F5).
+    room_menu: Option<String>,
     /// The top-bar avatar menu is open.
     user_menu_open: bool,
     /// An older-slice fetch is in flight (one at a time per pane).
@@ -189,6 +191,7 @@ impl ChatRoot {
             pinned_room: None,
             pick_tx,
             open_menu: None,
+            room_menu: None,
             user_menu_open: false,
             loading_older: false,
             parsed: Default::default(),
@@ -405,10 +408,21 @@ impl ChatRoot {
                     tmid,
                     text: text.clone(),
                 },
-                None => ChatCommand::Send {
-                    room_id: room_id.clone(),
-                    text: text.clone(),
-                },
+                None => {
+                    // A pending quote card for this room rides the send
+                    // (m12 F6); the Sent fold consumes it.
+                    let quote = self
+                        .state
+                        .quote
+                        .as_ref()
+                        .filter(|(quote_room, _)| quote_room == &room_id)
+                        .map(|(_, msg_id)| msg_id.clone());
+                    ChatCommand::Send {
+                        room_id: room_id.clone(),
+                        text: text.clone(),
+                        quote_msg_id: quote,
+                    }
+                }
             },
         };
         self.drafts.remove(&room_id);
@@ -828,6 +842,64 @@ impl ChatRoot {
     }
 }
 
+/// One sidebar row: a section header or a room (m12 F4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SideEntry {
+    Section(&'static str),
+    Room(usize),
+}
+
+/// Sidebar entries in the original client's order: Unread first, then
+/// Channels, Private Groups, Direct Messages. A room with a badge
+/// belongs to Unread only; empty sections drop out; each section
+/// keeps the newest-activity order of the source list.
+fn side_entries(rooms: &[Room]) -> Vec<SideEntry> {
+    let mut entries = Vec::new();
+    let mut push = |label: &'static str, pick: fn(&Room) -> bool| {
+        let picked: Vec<usize> = rooms
+            .iter()
+            .enumerate()
+            .filter(|(_, room)| pick(room))
+            .map(|(index, _)| index)
+            .collect();
+        if !picked.is_empty() {
+            entries.push(SideEntry::Section(label));
+            entries.extend(picked.into_iter().map(SideEntry::Room));
+        }
+    };
+    push("UNREAD", |room| room.unread > 0);
+    push("CHANNELS", |room| room.kind == 'c' && room.unread == 0);
+    push("PRIVATE GROUPS", |room| {
+        room.kind == 'p' && room.unread == 0
+    });
+    push("DIRECT MESSAGES", |room| {
+        room.kind == 'd' && room.unread == 0
+    });
+    entries
+}
+
+/// One sidebar section header. uniform_list stretches every row to
+/// the tallest, so the header rides the same 48 px row the rooms use
+/// — the label sits at its bottom edge like the original's sticky
+/// headers.
+fn section_row(label: &'static str) -> AnyElement {
+    div()
+        .h(px(48.0))
+        .flex()
+        .flex_col()
+        .justify_end()
+        .px_2()
+        .pb_1()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(MUTED))
+                .child(label),
+        )
+        .into_any_element()
+}
+
 fn panel(
     title: &str,
     subtitle: Option<&str>,
@@ -889,87 +961,189 @@ impl gpui::Render for ChatRoot {
         });
 
         // uniform_list materializes only the visible rows — the room list
-        // runs into the hundreds on real servers.
+        // runs into the hundreds on real servers. Sections read like the
+        // original client (m12 F4).
         let this = cx.entity();
         let active = self.state.active_room.clone();
-        let room_count = self.state.rooms.len();
+        let entries = side_entries(&self.state.rooms);
+        let room_count = entries.len();
         let rooms = uniform_list("rooms", room_count, move |range, _window, cx| {
             let root = this.read(cx);
 
             range
-                .map(|index| {
-                    let room = &root.state.rooms[index];
-                    let room_id = room.id.clone();
-                    let selected = active.as_deref() == Some(room.id.as_str());
-                    let unread = room.unread;
-                    let this = this.clone();
-                    div()
-                        .id(SharedString::from(room.id.clone()))
-                        .role(Role::ListItem)
-                        .aria_label(match room.unread {
-                            0 => room.name.clone(),
-                            unread => format!("{} — {} unread", room.name, unread),
-                        })
-                        .px_2()
-                        .py_1()
-                        .h(px(48.0))
-                        .rounded_sm()
-                        .text_sm()
-                        .overflow_hidden()
-                        .cursor_pointer()
-                        .when(selected, |row| row.bg(rgb(ACCENT)))
-                        .when(selected, |row| row.aria_selected(true))
-                        .hover(|style| style.bg(rgb(BORDER)))
-                        .on_click(move |_, _, cx| {
-                            this.update(cx, |chat, cx| chat.open_room(room_id.clone(), cx));
-                        })
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .gap_0p5()
-                                .child(
+                .map(|index| match entries[index] {
+                    SideEntry::Section(label) => section_row(label),
+                    SideEntry::Room(room_index) => {
+                        let room = &root.state.rooms[room_index];
+                        let room_id = room.id.clone();
+                        let selected = active.as_deref() == Some(room.id.as_str());
+                        let unread = room.unread;
+                        let this = this.clone();
+                        let menu_open = root.room_menu.as_deref() == Some(room.id.as_str());
+                        let room_menu = menu_open.then(|| {
+                            let item = |label: &'static str, suffix: &'static str| {
+                                div()
+                                    .id(SharedString::from(format!("{suffix}-{}", room.id)))
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_xs()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(ROW_HOVER)))
+                                    .child(label)
+                            };
+                            deferred(
+                                anchored().anchor(Anchor::TopLeft).child(
                                     div()
+                                        .occlude()
                                         .flex()
-                                        .gap_1()
-                                        .items_baseline()
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex_1()
-                                                .overflow_hidden()
-                                                .child(SharedString::from(room.name.clone())),
-                                        )
-                                        .children(room.lm.as_ref().map(|ts| {
-                                            div()
-                                                .flex_none()
-                                                .text_xs()
-                                                .text_color(rgb(MUTED))
-                                                .child(SharedString::from(pretty_time(ts)))
+                                        .flex_col()
+                                        .min_w(px(150.0))
+                                        .p_1()
+                                        .gap_0p5()
+                                        .bg(rgb(PANEL))
+                                        .border_1()
+                                        .border_color(rgb(BORDER))
+                                        .rounded_md()
+                                        .shadow_lg()
+                                        .child(item("🚩 Mark Unread", "r-unread").on_click({
+                                            let this = this.clone();
+                                            let room_id = room_id.clone();
+                                            move |_, _, cx| {
+                                                this.update(cx, |chat, cx| {
+                                                    chat.room_menu = None;
+                                                    let _ = chat.commands.try_send(
+                                                        ChatCommand::MarkRoomUnread {
+                                                            room_id: room_id.clone(),
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            }
                                         }))
-                                        .when(unread > 0, |line| {
-                                            line.child(
+                                        .child(item("✂️ Hide", "r-hide").on_click({
+                                            let this = this.clone();
+                                            let room_id = room_id.clone();
+                                            move |_, _, cx| {
+                                                this.update(cx, |chat, cx| {
+                                                    chat.room_menu = None;
+                                                    let _ = chat.commands.try_send(
+                                                        ChatCommand::HideRoom {
+                                                            room_id: room_id.clone(),
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            }
+                                        })),
+                                ),
+                            )
+                        });
+                        div()
+                            .id(SharedString::from(room.id.clone()))
+                            .role(Role::ListItem)
+                            .aria_label(match room.unread {
+                                0 => room.name.clone(),
+                                unread => format!("{} — {} unread", room.name, unread),
+                            })
+                            .px_2()
+                            .py_1()
+                            .h(px(48.0))
+                            .rounded_sm()
+                            .text_sm()
+                            .overflow_hidden()
+                            .cursor_pointer()
+                            .when(selected, |row| row.bg(rgb(ACCENT)))
+                            .when(selected, |row| row.aria_selected(true))
+                            .hover(|style| style.bg(rgb(BORDER)))
+                            .on_click({
+                                let this = this.clone();
+                                let room_id = room_id.clone();
+                                move |_, _, cx| {
+                                    this.update(cx, |chat, cx| {
+                                        chat.room_menu = None;
+                                        chat.open_room(room_id.clone(), cx);
+                                    });
+                                }
+                            })
+                            .on_mouse_down(MouseButton::Right, {
+                                let this = this.clone();
+                                let room_id = room_id.clone();
+                                move |_, _, cx| {
+                                    this.update(cx, |chat, cx| {
+                                        chat.room_menu = Some(room_id.clone());
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap_1()
+                                            .items_baseline()
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .child(SharedString::from(room.name.clone())),
+                                            )
+                                            .children(room.lm.as_ref().map(|ts| {
                                                 div()
                                                     .flex_none()
-                                                    .px_1()
-                                                    .rounded_xs()
-                                                    .bg(rgb(ACCENT))
                                                     .text_xs()
-                                                    .child(SharedString::from(unread.to_string())),
-                                            )
-                                        }),
-                                )
-                                .children(room.preview.as_ref().map(|(sender, text)| {
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child(SharedString::from(format!("{sender}: {text}")))
-                                })),
-                        )
+                                                    .text_color(rgb(MUTED))
+                                                    .child(SharedString::from(pretty_time(ts)))
+                                            }))
+                                            .when(unread > 0, |line| {
+                                                line.child(
+                                                    div()
+                                                        .flex_none()
+                                                        .px_1()
+                                                        .rounded_xs()
+                                                        .bg(rgb(ACCENT))
+                                                        .text_xs()
+                                                        .child(SharedString::from(
+                                                            unread.to_string(),
+                                                        )),
+                                                )
+                                            })
+                                            .when(room.mentions > 0, |line| {
+                                                line.child(
+                                                    div()
+                                                        .flex_none()
+                                                        .px_1()
+                                                        .rounded_xs()
+                                                        .bg(gpui::red())
+                                                        .text_xs()
+                                                        .text_color(white())
+                                                        .child(SharedString::from(format!(
+                                                            "@{}",
+                                                            room.mentions
+                                                        ))),
+                                                )
+                                            }),
+                                    )
+                                    .children(room.preview.as_ref().map(|(sender, text)| {
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED))
+                                            .child(SharedString::from(format!("{sender}: {text}")))
+                                    })),
+                            )
+                            .children(room_menu)
+                            .into_any_element()
+                    }
                 })
                 .collect::<Vec<_>>()
         })
@@ -1497,6 +1671,89 @@ impl gpui::Render for ChatRoot {
             )
             .children(user_menu);
 
+        // The pending quote card rides above the composer; a foreign
+        // room's quote never shows (m12 F6).
+        let quote_card = self
+            .state
+            .quote
+            .as_ref()
+            .and_then(|(quote_room, quote_msg)| {
+                let visible = self.state.active_room.as_deref() == Some(quote_room.as_str());
+                visible.then(|| {
+                    let known = self
+                        .views
+                        .iter()
+                        .find(|view| view.id == *quote_msg)
+                        .map(|view| (view.sender.clone(), view.text.clone()))
+                        .or_else(|| {
+                            self.state.messages.get(quote_room).and_then(|messages| {
+                                messages
+                                    .iter()
+                                    .find(|message| message.id == *quote_msg)
+                                    .map(|message| (message.sender.clone(), message.text.clone()))
+                            })
+                        });
+                    let (sender, snippet) = known
+                        .map(|(sender, text)| {
+                            let line = text.lines().next().unwrap_or_default();
+                            let short: String = line.chars().take(80).collect();
+                            (sender, short)
+                        })
+                        .unwrap_or_else(|| ("message".to_owned(), String::new()));
+                    let label = match snippet.is_empty() {
+                        true => format!("Quoting {sender}"),
+                        false => format!("Quoting {sender}: {snippet}"),
+                    };
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .bg(rgb(PANEL))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .rounded_md()
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_sm()
+                                .text_color(rgb(ACCENT))
+                                .child("↩"),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(SharedString::from(label)),
+                        )
+                        .child(
+                            div()
+                                .id("quote-clear")
+                                .flex_none()
+                                .px_1()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(rgb(TEXT)))
+                                .child("✕")
+                                .on_click({
+                                    let this = cx.entity();
+                                    move |_, _, cx| {
+                                        this.update(cx, |chat, cx| {
+                                            chat.state.quote = None;
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        )
+                })
+            });
+
         div()
             .flex()
             .flex_col()
@@ -1535,57 +1792,65 @@ impl gpui::Render for ChatRoot {
             .child(
                 div()
                     .flex()
+                    .flex_col()
                     .flex_none()
-                    .gap_2()
+                    .gap_1()
+                    .children(quote_card)
                     .child(
                         div()
-                            .id("attach")
-                            .role(Role::Button)
-                            .aria_label("Attach a file")
+                            .flex()
                             .flex_none()
-                            .px_2()
-                            .py_1()
-                            .bg(rgb(PANEL))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .rounded_md()
-                            .text_sm()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(ACCENT)))
-                            .child("📎")
-                            .on_click(cx.listener(|chat, _, _, _cx| {
-                                let tx = chat.pick_tx.clone();
-                                std::thread::spawn(move || {
-                                    let picked = rfd::FileDialog::new()
-                                        .set_title("Attach a file")
-                                        .pick_file();
-                                    let _ = tx.send_blocking(picked);
-                                });
-                            })),
-                    )
-                    .child(div().flex_1().child(self.composer.clone()))
-                    .child(
-                        div()
-                            .id("send")
-                            .role(Role::Button)
-                            .aria_label(match self.editing.is_some() {
-                                true => "Save edited message",
-                                false => "Send message",
-                            })
-                            .px_3()
-                            .py_1()
-                            .bg(rgb(PANEL))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(ACCENT)))
-                            .active(|style| style.opacity(0.85))
-                            .on_click(cx.listener(|chat, _, _, cx| chat.send_message(cx)))
-                            .child(match self.editing.is_some() {
-                                true => "save",
-                                false => "send",
-                            }),
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("attach")
+                                    .role(Role::Button)
+                                    .aria_label("Attach a file")
+                                    .flex_none()
+                                    .px_2()
+                                    .py_1()
+                                    .bg(rgb(PANEL))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .rounded_md()
+                                    .text_sm()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(ACCENT)))
+                                    .child("📎")
+                                    .on_click(cx.listener(|chat, _, _, _cx| {
+                                        let tx = chat.pick_tx.clone();
+                                        std::thread::spawn(move || {
+                                            let picked = rfd::FileDialog::new()
+                                                .set_title("Attach a file")
+                                                .pick_file();
+                                            let _ = tx.send_blocking(picked);
+                                        });
+                                    })),
+                            )
+                            .child(div().flex_1().child(self.composer.clone()))
+                            .child(
+                                div()
+                                    .id("send")
+                                    .role(Role::Button)
+                                    .aria_label(match self.editing.is_some() {
+                                        true => "Save edited message",
+                                        false => "Send message",
+                                    })
+                                    .px_3()
+                                    .py_1()
+                                    .bg(rgb(PANEL))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(ACCENT)))
+                                    .active(|style| style.opacity(0.85))
+                                    .on_click(cx.listener(|chat, _, _, cx| chat.send_message(cx)))
+                                    .child(match self.editing.is_some() {
+                                        true => "save",
+                                        false => "send",
+                                    }),
+                            ),
                     ),
             )
     }
@@ -2023,6 +2288,18 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
                             });
                         }
                     }))
+                    .child(item("↩ Quote", "m-quote").on_click({
+                        let this = this.clone();
+                        let room_id = room_id.clone();
+                        let msg_id = msg_id.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |chat, cx| {
+                                chat.open_menu = None;
+                                chat.state.quote = Some((room_id.clone(), msg_id.clone()));
+                                cx.notify();
+                            });
+                        }
+                    }))
                     .child(item(star_label, "m-star").on_click({
                         let this = this.clone();
                         let msg_id = msg_id.clone();
@@ -2165,6 +2442,7 @@ mod tests {
                 lm: None,
                 preview: None,
                 topic: None,
+                mentions: 0,
             },
             Room {
                 id: "d1".to_owned(),
@@ -2174,6 +2452,7 @@ mod tests {
                 lm: None,
                 preview: None,
                 topic: None,
+                mentions: 0,
             },
         ];
         assert!(
@@ -2194,6 +2473,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["d1"],
             "matching is case-insensitive"
+        );
+    }
+
+    fn sroom(id: &str, kind: char, unread: u32) -> Room {
+        Room {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            kind,
+            unread,
+            lm: None,
+            preview: None,
+            topic: None,
+            mentions: 0,
+        }
+    }
+
+    #[test]
+    fn side_entries_group_the_original_sections() {
+        let mut hot = sroom("hot", 'c', 2);
+        hot.mentions = 1;
+        let rooms = vec![
+            sroom("d1", 'd', 0),
+            hot,
+            sroom("p1", 'p', 0),
+            sroom("g1", 'c', 0),
+            sroom("quiet-dm", 'd', 0),
+        ];
+        assert_eq!(
+            side_entries(&rooms),
+            vec![
+                SideEntry::Section("UNREAD"),
+                SideEntry::Room(1),
+                SideEntry::Section("CHANNELS"),
+                SideEntry::Room(3),
+                SideEntry::Section("PRIVATE GROUPS"),
+                SideEntry::Room(2),
+                SideEntry::Section("DIRECT MESSAGES"),
+                SideEntry::Room(0),
+                SideEntry::Room(4),
+            ],
+            "unread leads; sections regroup by kind in source order"
+        );
+        assert!(
+            side_entries(&[sroom("g1", 'c', 0)]).len() == 2,
+            "empty sections drop out"
         );
     }
 }

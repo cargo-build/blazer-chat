@@ -91,6 +91,7 @@ pub async fn serve(
                     None => ChatCommand::Send {
                         room_id: body.room,
                         text: body.text,
+                        quote_msg_id: None,
                     },
                 };
                 if enqueue(&self_commands, command) {

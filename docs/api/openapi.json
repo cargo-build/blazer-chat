@@ -431,12 +431,59 @@
         "properties": {
          "rid": {
           "type": "string"
+         },
+         "unread": {
+          "type": "boolean",
+          "description": "Set true to flag the room unread instead of read."
          }
         }
        }
       }
      }
     },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "success": {
+           "type": "boolean"
+          }
+         },
+         "additionalProperties": true
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/subscriptions.delete": {
+   "delete": {
+    "tags": [
+     "rooms"
+    ],
+    "summary": "Hide room",
+    "description": "Removes the room from the account's subscription list (sidebar Hide).",
+    "security": [
+     {
+      "authToken": [],
+      "userId": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "roomId",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "description": "OK",

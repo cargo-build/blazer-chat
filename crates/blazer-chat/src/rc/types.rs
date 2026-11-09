@@ -92,6 +92,10 @@ pub struct Room {
     pub preview: Option<(String, String)>,
     /// Header subtitle: the topic, or the description when no topic.
     pub topic: Option<String>,
+    /// Direct-mention count from `rooms.get` (`userMentions`): a
+    /// positive value turns the unread badge mention-aware (m12 F4).
+    #[serde(default)]
+    pub mentions: u32,
 }
 
 /// Wire `t` values that mark service notices rather than chat text.
