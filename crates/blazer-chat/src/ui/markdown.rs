@@ -156,6 +156,11 @@ impl Style {
     }
 }
 
+/// The deepest style stack the parser builds: past this, further
+/// openers stay literal — a pathological `_~*_...` line cannot grow
+/// the run unbounded (m10, sec-flow #8).
+pub(super) const MAX_STYLE_DEPTH: usize = 32;
+
 /// The emphasis markers, closest first.
 const MARKERS: [OpenMarker; 4] = [
     OpenMarker {
@@ -321,7 +326,7 @@ pub fn parse(text: &str, emoji_path: &dyn Fn(&str) -> Option<String>) -> Vec<Spa
                 rest = after;
                 continue 'scan;
             }
-            if has_closer && (!effective.code || open.code) {
+            if has_closer && (!effective.code || open.code) && stack.len() < MAX_STYLE_DEPTH {
                 flush_plain(&mut plain, &mut spans, Some(style_of(&stack)));
                 stack.push(open);
                 rest = after;
@@ -560,5 +565,18 @@ mod tests {
         assert!(SHORTCODES.len() >= 40, "the picker needs a real set");
         assert!(shortcode_glyph("tada").is_some());
         assert_eq!(shortcode_glyph("nope"), None);
+    }
+
+    #[test]
+    fn style_stack_caps_at_max_depth() {
+        // Alternating distinct markers deepen the stack; past the cap
+        // further openers stay literal and the output stays bounded.
+        let text = "*_`~".repeat(64);
+        let spans = parse(&text, &no_emoji);
+        assert!(
+            spans.len() <= MAX_STYLE_DEPTH + 2,
+            "the cap bounds the span list: {}",
+            spans.len()
+        );
     }
 }

@@ -80,6 +80,23 @@ impl RcClient<HttpTransport> {
     }
 }
 
+/// Percent-encodes a query value: unreserved ASCII stays, everything
+/// else goes byte-wise `%XX` — room ids are safe, but usernames on
+/// this deployment are email-like (`@`) and cursor timestamps carry
+/// punctuation (m10 wire hygiene).
+pub(super) fn encode_query_param(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 impl<T: Transport> RcClient<T> {
     /// The image bytes of a custom emoji (`/emoji-custom/{name}.{ext}`).
     pub async fn emoji_image(&self, name: &str, extension: &str) -> Result<Vec<u8>, RcError> {
@@ -92,7 +109,10 @@ impl<T: Transport> RcClient<T> {
     pub async fn avatar_bytes(&self, username: &str) -> Result<Vec<u8>, RcError> {
         let headers = self.auth_headers()?;
         self.transport
-            .get_bytes_with_headers(&format!("/avatar/{username}"), &headers)
+            .get_bytes_with_headers(
+                &format!("/avatar/{}", encode_query_param(username)),
+                &headers,
+            )
             .await
             .map_err(RcError::Io)
     }
@@ -335,9 +355,12 @@ impl<T: Transport> RcClient<T> {
             'd' => "im.history",
             _ => "channels.history",
         };
-        let mut path = format!("/api/v1/{endpoint}?roomId={room_id}&count=50");
+        let mut path = format!(
+            "/api/v1/{endpoint}?roomId={}&count=50",
+            encode_query_param(room_id)
+        );
         if let Some(cursor) = cursor {
-            path.push_str(&format!("&latest={cursor}"));
+            path.push_str(&format!("&latest={}", encode_query_param(cursor)));
         }
         let body = self.call("GET", &path, None, true).await?;
         let parsed: HistoryResponse = Self::parse(&body, endpoint)?;
@@ -428,8 +451,10 @@ impl<T: Transport> RcClient<T> {
 
     /// One thread's messages, oldest first (`chat.getThreadMessages`).
     pub async fn thread_messages(&mut self, tmid: &str) -> Result<Vec<Msg>, RcError> {
-        let path =
-            format!("/api/v1/chat.getThreadMessages?tmid={tmid}&count=50&sort=%7B%22ts%22%3A-1%7D");
+        let path = format!(
+            "/api/v1/chat.getThreadMessages?tmid={}&count=50&sort=%7B%22ts%22%3A-1%7D",
+            encode_query_param(tmid)
+        );
         let body = self.call("GET", &path, None, true).await?;
         let parsed: HistoryResponse = Self::parse(&body, "chat.getThreadMessages")?;
         Ok(parsed
@@ -486,7 +511,10 @@ impl<T: Transport> RcClient<T> {
     /// Hides a room for this account (`subscriptions.delete`) — the
     /// sidebar context menu's Hide (m12 F5).
     pub async fn hide_room(&self, room_id: &str) -> Result<(), RcError> {
-        let path = format!("/api/v1/subscriptions.delete?roomId={room_id}");
+        let path = format!(
+            "/api/v1/subscriptions.delete?roomId={}",
+            encode_query_param(room_id)
+        );
         let body = self.call("DELETE", &path, None, true).await?;
         match Self::parse::<SuccessResponse>(&body, "subscriptions.delete")?.success {
             true => Ok(()),
@@ -524,7 +552,10 @@ impl<T: Transport> RcClient<T> {
     /// One room's pinned messages, oldest first
     /// (`chat.pinnedMessages`) — the read-only pinned tab (m12 F7).
     pub async fn pinned_messages(&mut self, room_id: &str) -> Result<Vec<Msg>, RcError> {
-        let path = format!("/api/v1/chat.pinnedMessages?roomId={room_id}&count=50");
+        let path = format!(
+            "/api/v1/chat.pinnedMessages?roomId={}&count=50",
+            encode_query_param(room_id)
+        );
         let body = self.call("GET", &path, None, true).await?;
         let parsed: HistoryResponse = Self::parse(&body, "chat.pinnedMessages")?;
         Ok(parsed
@@ -549,7 +580,10 @@ impl<T: Transport> RcClient<T> {
     /// One user's card data (`users.info`): name and presence
     /// status (m12 F8).
     pub async fn user_info(&mut self, username: &str) -> Result<UserInfo, RcError> {
-        let path = format!("/api/v1/users.info?username={username}");
+        let path = format!(
+            "/api/v1/users.info?username={}",
+            encode_query_param(username)
+        );
         let body = self.call("GET", &path, None, true).await?;
         let parsed: UserInfoResponse = Self::parse(&body, "users.info")?;
         Ok(UserInfo {
@@ -727,6 +761,10 @@ pub(super) fn multipart_body(
     bytes: &[u8],
     msg: &str,
 ) -> Vec<u8> {
+    // A filename rides a quoted content-disposition parameter: a quote
+    // would close it early and CR/LF would inject headers — flatten
+    // both (m10 wire hygiene).
+    let filename = filename.replace(['\r', '\n'], " ").replace('"', "'");
     let mut body = Vec::new();
     let push = |body: &mut Vec<u8>, part: &str| body.extend_from_slice(part.as_bytes());
     push(&mut body, &format!("--{boundary}\r\n"));

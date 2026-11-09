@@ -436,8 +436,8 @@ fn history_page_passes_the_paging_cursor() {
     assert!(
         requests
             .last_request()
-            .contains("latest=2026-01-01T00:00:00Z"),
-        "the oldest cached timestamp pages the next slice"
+            .contains("latest=2026-01-01T00%3A00%3A00Z"),
+        "the oldest cached timestamp pages the next slice, percent-encoded"
     );
 }
 
@@ -728,4 +728,40 @@ fn user_info_decodes_name_and_status() {
     assert_eq!(info.name.as_deref(), Some("Bob"));
     assert_eq!(info.status.as_deref(), Some("online"));
     assert!(transport.last_request().contains("users.info?username=bob"));
+}
+
+#[test]
+fn query_values_percent_encode() {
+    use super::client::encode_query_param;
+    assert_eq!(encode_query_param("GENERAL"), "GENERAL");
+    assert_eq!(
+        encode_query_param("rorikstr@student.21-school.ru"),
+        "rorikstr%40student.21-school.ru",
+        "the @ of email-like usernames rides encoded"
+    );
+    assert_eq!(
+        encode_query_param("2026-11-08T15:00:00Z"),
+        "2026-11-08T15%3A00%3A00Z"
+    );
+    assert_eq!(encode_query_param("a/b"), "a%2Fb");
+}
+
+#[test]
+fn multipart_filename_cannot_inject() {
+    let body = super::client::multipart_body(
+        "BOUND",
+        "evil\r\nx-injected: \"1\".png",
+        "image/png",
+        b"hi",
+        "",
+    );
+    let text = String::from_utf8(body).unwrap();
+    assert!(
+        !text.contains("\r\nx-injected"),
+        "no header injection through the filename"
+    );
+    assert!(
+        text.contains("filename=\"evil  x-injected: '1'.png\""),
+        "quotes flatten, the disposition stays one line"
+    );
 }

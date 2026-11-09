@@ -168,6 +168,12 @@ pub fn spawn_emoji(
             }
         };
         for emoji in &merged {
+            // A logout mid-run invalidates the session: stop burning
+            // requests for an account that is gone (m10, sec-flow #9).
+            if store.load_session().is_none() {
+                eprintln!("blazer-chat: emoji cache: session gone, stopping");
+                return;
+            }
             // Server-supplied name/extension join into a filesystem
             // path: without sanitizing, a `../../.bashrc` name would
             // overwrite arbitrary user files (audit sec-flow #1 /
