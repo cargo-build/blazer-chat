@@ -33,7 +33,7 @@ clippy:
     cargo clippy --workspace --all-targets -j 2 -- -D warnings
 
 # Everything a change must pass before it lands.
-gate: fmt-check clippy test api-check pins-check
+gate: fmt-check clippy test api-check pins-check boundary-check
     @echo "gate green"
 
 # Fail the gate if client code calls an endpoint missing from the API
@@ -95,3 +95,8 @@ pins-check:
     if drifted or len(distinct) > 1:
         sys.exit(f"bezel-gpui family drifted: {drifted or dict(versions)}")
     print(f"pins ok: {len(versions)} bezel crates at {sorted(distinct)[0]}")
+
+# Fail the gate if the pane module reaches back into the root
+# (m13 S3): the prose decoupling rule becomes a CI check.
+boundary-check:
+    ! rg -n 'Entity<ChatRoot>|use (crate|super)::root|crate::ui::root' crates/blazer-chat/src/ui/message_pane.rs
