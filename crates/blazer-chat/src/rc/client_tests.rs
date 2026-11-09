@@ -119,6 +119,13 @@ const FILE_HISTORY_BODY: &str = r#"{"messages":[
     {"_id":"f1","rid":"GENERAL","msg":"caption","ts":"2026-11-07T15:00:05Z","u":{"username":"tester"},
      "file":{"_id":"abc123","name":"probe image.png","size":42,"type":"image/png","typeGroup":"image"}}
 ],"success":true,"unreadNotLoaded":0}"#;
+const DM_BODY: &str = r#"{"room":{"_id":"dmX"},"success":true}"#;
+const USER_BODY: &str =
+    r#"{"user":{"username":"bob","name":"Bob","status":"online"},"success":true}"#;
+const PINNED_BODY: &str = r#"{"messages":[
+    {"_id":"p2","rid":"GENERAL","msg":"newer pin","ts":"2026-11-08T16:00:00Z","u":{"username":"alice"}},
+    {"_id":"p1","rid":"GENERAL","msg":"older pin","ts":"2026-11-08T15:00:00Z","u":{"username":"bob"}}
+],"success":true}"#;
 const THREAD_BODY: &str = r#"{"messages":[{"_id":"r1","rid":"GENERAL","msg":"reply","tmid":"root","u":{"username":"tester"}}],"success":true}"#;
 const NOT_ALLOWED_BODY: &str =
     r#"{"success":false,"error":"Not allowed [error-action-not-allowed]"}"#;
@@ -677,4 +684,48 @@ fn send_quoted_posts_the_quote_attachment() {
         request.contains("root-msg"),
         "the quoted message id rides the body"
     );
+}
+
+#[test]
+fn pinned_messages_decode_oldest_first() {
+    let transport = FakeTransport::answering(&[
+        ("login", 200, LOGIN_BODY),
+        ("chat.pinnedMessages", 200, PINNED_BODY),
+    ]);
+    let mut rc = client(transport.clone());
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    let pins = futures_lite::future::block_on(rc.pinned_messages("GENERAL")).unwrap();
+    assert_eq!(pins.len(), 2, "both pins decode");
+    assert_eq!(pins[0].id, "p1", "the list is oldest first");
+    assert_eq!(pins[1].id, "p2");
+    assert!(
+        transport.last_request().contains("roomId=GENERAL"),
+        "the room rides the query"
+    );
+}
+
+#[test]
+fn create_dm_posts_the_username_and_returns_the_room() {
+    let transport =
+        FakeTransport::answering(&[("login", 200, LOGIN_BODY), ("im.create", 200, DM_BODY)]);
+    let mut rc = client(transport.clone());
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    let room_id = futures_lite::future::block_on(rc.create_dm("bob")).unwrap();
+    assert_eq!(room_id, "dmX", "the created room id comes back");
+    let request = transport.last_request();
+    assert!(request.contains("POST /api/v1/im.create"));
+    assert!(request.contains(r#""username":"bob""#));
+}
+
+#[test]
+fn user_info_decodes_name_and_status() {
+    let transport =
+        FakeTransport::answering(&[("login", 200, LOGIN_BODY), ("users.info", 200, USER_BODY)]);
+    let mut rc = client(transport.clone());
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    let info = futures_lite::future::block_on(rc.user_info("bob")).unwrap();
+    assert_eq!(info.username, "bob");
+    assert_eq!(info.name.as_deref(), Some("Bob"));
+    assert_eq!(info.status.as_deref(), Some("online"));
+    assert!(transport.last_request().contains("users.info?username=bob"));
 }

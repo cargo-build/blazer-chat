@@ -74,6 +74,33 @@ pub struct HistoryResponse {
 }
 
 #[derive(Deserialize)]
+pub struct CreateDmResponse {
+    pub room: CreateDmRoom,
+}
+
+#[derive(Deserialize)]
+pub struct CreateDmRoom {
+    #[serde(rename = "_id")]
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+pub struct UserInfoResponse {
+    pub user: WireUserCard,
+}
+
+/// The `users.info` user shape — the user card's identity plus
+/// presence (m12 F8).
+#[derive(Deserialize)]
+pub struct WireUserCard {
+    pub username: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct SendMessageResponse {
     pub message: WireMessage,
 }

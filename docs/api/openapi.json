@@ -504,6 +504,175 @@
     }
    }
   },
+  "/api/v1/chat.pinnedMessages": {
+   "get": {
+    "tags": [
+     "history"
+    ],
+    "summary": "Pinned messages",
+    "description": "The room's pinned messages, newest slice first; the read-only pinned tab.",
+    "security": [
+     {
+      "authToken": [],
+      "userId": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "roomId",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "count",
+      "in": "query",
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "success": {
+           "type": "boolean"
+          },
+          "messages": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/Message"
+           }
+          }
+         },
+         "additionalProperties": true
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/im.create": {
+   "post": {
+    "tags": [
+     "rooms"
+    ],
+    "summary": "Open a direct message",
+    "description": "Creates (or returns) the DM room with a user; the user card's Send DM.",
+    "security": [
+     {
+      "authToken": [],
+      "userId": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "username"
+        ],
+        "properties": {
+         "username": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "room": {
+           "type": "object",
+           "properties": {
+            "_id": {
+             "type": "string"
+            }
+           },
+           "additionalProperties": true
+          }
+         },
+         "additionalProperties": true
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/v1/users.info": {
+   "get": {
+    "tags": [
+     "auth"
+    ],
+    "summary": "User card data",
+    "description": "One user's identity and presence status.",
+    "security": [
+     {
+      "authToken": [],
+      "userId": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "username",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "OK",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "user": {
+           "type": "object",
+           "properties": {
+            "username": {
+             "type": "string"
+            },
+            "name": {
+             "type": "string"
+            },
+            "status": {
+             "type": "string",
+             "description": "online / away / busy / offline"
+            }
+           },
+           "additionalProperties": true
+          }
+         },
+         "additionalProperties": true
+        }
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/v1/channels.history": {
    "get": {
     "tags": [

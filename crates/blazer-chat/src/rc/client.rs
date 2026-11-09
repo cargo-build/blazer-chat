@@ -25,11 +25,12 @@ use serde::Deserialize;
 use crate::http::{HttpTransport, Request, Transport};
 use crate::rc::types::{
     AttachedFile, CustomEmoji, Msg, RcError, RcSettings, Room, SYSTEM_MESSAGE_TYPES, Session,
+    UserInfo,
 };
 use crate::rc::wire::{
-    EmojiListResponse, HistoryResponse, LoginResponse, MediaUploadResponse, RoomsGetResponse,
-    SendMessageResponse, SubscriptionsGetResponse, SuccessResponse, UpdateMessageResponse,
-    WireMessage,
+    CreateDmResponse, EmojiListResponse, HistoryResponse, LoginResponse, MediaUploadResponse,
+    RoomsGetResponse, SendMessageResponse, SubscriptionsGetResponse, SuccessResponse,
+    UpdateMessageResponse, UserInfoResponse, WireMessage,
 };
 
 /// The typed client: one session, typed results out.
@@ -518,6 +519,44 @@ impl<T: Transport> RcClient<T> {
             .await?;
         let parsed: SendMessageResponse = Self::parse(&body, "chat.sendMessage")?;
         Ok(self.message_into_msg(parsed.message))
+    }
+
+    /// One room's pinned messages, oldest first
+    /// (`chat.pinnedMessages`) — the read-only pinned tab (m12 F7).
+    pub async fn pinned_messages(&mut self, room_id: &str) -> Result<Vec<Msg>, RcError> {
+        let path = format!("/api/v1/chat.pinnedMessages?roomId={room_id}&count=50");
+        let body = self.call("GET", &path, None, true).await?;
+        let parsed: HistoryResponse = Self::parse(&body, "chat.pinnedMessages")?;
+        Ok(parsed
+            .messages
+            .into_iter()
+            .map(|message| self.message_into_msg(message))
+            .rev()
+            .collect())
+    }
+
+    /// Opens (or returns) a direct-message room with a user
+    /// (`im.create`) — the user card's Send DM (m12 F8).
+    pub async fn create_dm(&mut self, username: &str) -> Result<String, RcError> {
+        let body = serde_json::json!({ "username": username }).to_string();
+        let body = self
+            .call("POST", "/api/v1/im.create", Some(body), true)
+            .await?;
+        let parsed: CreateDmResponse = Self::parse(&body, "im.create")?;
+        Ok(parsed.room.id)
+    }
+
+    /// One user's card data (`users.info`): name and presence
+    /// status (m12 F8).
+    pub async fn user_info(&mut self, username: &str) -> Result<UserInfo, RcError> {
+        let path = format!("/api/v1/users.info?username={username}");
+        let body = self.call("GET", &path, None, true).await?;
+        let parsed: UserInfoResponse = Self::parse(&body, "users.info")?;
+        Ok(UserInfo {
+            username: parsed.user.username,
+            name: parsed.user.name,
+            status: parsed.user.status,
+        })
     }
 
     /// Uploads a file and posts it as a message: the two-phase

@@ -271,3 +271,11 @@ mod tests {
         assert!(!attachment("application/pdf").is_image());
     }
 }
+
+/// What a user card shows: identity plus presence (m12 F8).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UserInfo {
+    pub username: String,
+    pub name: Option<String>,
+    pub status: Option<String>,
+}

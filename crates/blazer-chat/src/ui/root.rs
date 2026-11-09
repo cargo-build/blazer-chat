@@ -60,6 +60,10 @@ pub(crate) struct ChatRoot {
     open_menu: Option<(String, String)>,
     /// The room whose right-click context menu is open (m12 F5).
     room_menu: Option<String>,
+    /// The room-info panel toggle (header ℹ️, m12 F7).
+    show_info: bool,
+    /// The username whose user card is open (m12 F8).
+    user_card: Option<String>,
     /// The top-bar avatar menu is open.
     user_menu_open: bool,
     /// An older-slice fetch is in flight (one at a time per pane).
@@ -192,6 +196,8 @@ impl ChatRoot {
             pick_tx,
             open_menu: None,
             room_menu: None,
+            show_info: false,
+            user_card: None,
             user_menu_open: false,
             loading_older: false,
             parsed: Default::default(),
@@ -376,6 +382,9 @@ impl ChatRoot {
             self.drafts.insert(previous, draft);
         }
         self.editing = None;
+        // Panels and cards belong to the room they opened in.
+        self.show_info = false;
+        self.user_card = None;
         let restored = self.drafts.get(&room_id).cloned().unwrap_or_default();
         self.composer
             .update(cx, |composer, cx| composer.set_content(&restored, cx));
@@ -759,17 +768,42 @@ impl ChatRoot {
                 )
                 .into_any_element();
         }
+        // The user card opens from the avatar or the sender name (m12
+        // F8); unknown users fetch their card data on the first open.
+        let card_open = self.user_card.as_deref() == Some(view.sender.as_str());
+        let card_click = |sender: String| {
+            let this = self.handle.clone();
+            move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+                this.update(cx, |chat, cx| {
+                    chat.user_card = Some(sender.clone());
+                    if !chat.state.user_info.contains_key(&sender) {
+                        let _ = chat.commands.try_send(ChatCommand::UserInfo {
+                            username: sender.clone(),
+                        });
+                    }
+                    cx.notify();
+                });
+            }
+        };
         let lead = if grouped {
             div().flex_none().w(px(32.0)).into_any_element()
         } else {
-            match view.avatar.as_deref() {
-                Some(path) => img(std::path::PathBuf::from(path))
-                    .flex_none()
-                    .size(rems(2.0))
-                    .rounded_full()
-                    .into_any_element(),
-                None => avatar(&view.sender).into_any_element(),
-            }
+            div()
+                .id(SharedString::from(format!("card-{msg_id}")))
+                .role(Role::Button)
+                .aria_label(format!("Open user card for {}", view.sender))
+                .flex_none()
+                .cursor_pointer()
+                .on_click(card_click(view.sender.clone()))
+                .child(match view.avatar.as_deref() {
+                    Some(path) => img(std::path::PathBuf::from(path))
+                        .flex_none()
+                        .size(rems(2.0))
+                        .rounded_full()
+                        .into_any_element(),
+                    None => avatar(&view.sender).into_any_element(),
+                })
+                .into_any_element()
         };
         div()
             .id(SharedString::from(format!("msg-{msg_id}")))
@@ -808,9 +842,13 @@ impl ChatRoot {
                                 .gap_2()
                                 .child(
                                     div()
+                                        .id(SharedString::from(format!("cardname-{msg_id}")))
                                         .text_sm()
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(rgb(TEXT))
+                                        .cursor_pointer()
+                                        .hover(|style| style.text_color(rgb(ACCENT)))
+                                        .on_click(card_click(view.sender.clone()))
                                         .child(SharedString::from(view.sender.clone())),
                                 )
                                 .child(
@@ -828,6 +866,103 @@ impl ChatRoot {
                     }))
                     .child(badges),
             )
+            .when(card_open, |row| {
+                let info = self.state.user_info.get(&view.sender);
+                let name = info
+                    .and_then(|info| info.name.clone())
+                    .unwrap_or_else(|| view.sender.clone());
+                let status = info
+                    .and_then(|info| info.status.clone())
+                    .unwrap_or_else(|| "…".to_owned());
+                let is_me = self.state.username.as_deref() == Some(view.sender.as_str());
+                let this = self.handle.clone();
+                let sender = view.sender.clone();
+                row.child(deferred(
+                    anchored().anchor(Anchor::TopLeft).child(
+                        div()
+                            .occlude()
+                            .flex()
+                            .flex_col()
+                            .min_w(px(170.0))
+                            .p_2()
+                            .gap_1()
+                            .bg(rgb(PANEL))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .rounded_md()
+                            .shadow_lg()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(avatar(&view.sender))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .child(SharedString::from(name)),
+                                            )
+                                            .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                                SharedString::from(format!(
+                                                    "@{} · {status}",
+                                                    view.sender
+                                                )),
+                                            )),
+                                    ),
+                            )
+                            .when(!is_me, |card| {
+                                card.child(
+                                    div()
+                                        .id("card-dm")
+                                        .role(Role::Button)
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_xs()
+                                        .text_xs()
+                                        .text_color(rgb(TEXT))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(ROW_HOVER)))
+                                        .child("✉ Send DM")
+                                        .on_click({
+                                            let this = this.clone();
+                                            let sender = sender.clone();
+                                            move |_, _, cx| {
+                                                this.update(cx, |chat, cx| {
+                                                    chat.user_card = None;
+                                                    let _ = chat.commands.try_send(
+                                                        ChatCommand::OpenDm {
+                                                            username: sender.clone(),
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            }
+                                        }),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("card-close")
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(rgb(TEXT)))
+                                    .child("✕ close")
+                                    .on_click(move |_, _, cx| {
+                                        this.update(cx, |chat, cx| {
+                                            chat.user_card = None;
+                                            cx.notify();
+                                        });
+                                    }),
+                            ),
+                    ),
+                ))
+            })
             .child(action_strip(ActionContext {
                 this: self.handle.clone(),
                 link_ready: self.permalink(&room_id, "").is_some(),
@@ -1473,6 +1608,140 @@ impl gpui::Render for ChatRoot {
                 .track_scroll(&self.results_scroll)
                 .children(results)
                 .into_any_element()
+        } else if let Some((_room_id, pinned)) = self.state.pinned.clone() {
+            // Read-only pinned tab (m12 F7): the same full rows as the
+            // main pane.
+            let this = search_this.clone();
+            let mut rows: Vec<gpui::AnyElement> = pinned
+                .iter()
+                .map(|message| {
+                    let view = self.message_view(message);
+                    self.message_row_view(&view)
+                })
+                .collect();
+            if rows.is_empty() {
+                rows.push(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(MUTED))
+                        .child("Nothing pinned in this room yet.")
+                        .into_any_element(),
+                );
+            }
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .gap_1()
+                .child(
+                    div()
+                        .id("pinned-back")
+                        .flex_none()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_xs()
+                        .text_sm()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(BORDER)))
+                        .child("← 📌 Pinned messages")
+                        .on_click({
+                            let this = this.clone();
+                            move |_, _, cx| {
+                                this.update(cx, |chat, cx| {
+                                    chat.state.pinned = None;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .id("pinned-scroll")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .gap_1()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.thread_scroll)
+                        .children(rows),
+                )
+                .into_any_element()
+        } else if self.show_info {
+            // Room info panel (m12 F7), reachable from the header.
+            let room = self
+                .state
+                .rooms
+                .iter()
+                .find(|room| Some(room.id.as_str()) == self.state.active_room.as_deref());
+            let kind_label = match room.map(|room| room.kind) {
+                Some('p') => "private group",
+                Some('d') => "direct message",
+                _ => "channel",
+            };
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .gap_1()
+                .child(
+                    div()
+                        .id("info-back")
+                        .flex_none()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_xs()
+                        .text_sm()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(BORDER)))
+                        .child("← ℹ️ Room info")
+                        .on_click({
+                            let this = search_this.clone();
+                            move |_, _, cx| {
+                                this.update(cx, |chat, cx| {
+                                    chat.show_info = false;
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .bg(rgb(PANEL))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .rounded_md()
+                        .child(
+                            div().text_sm().font_weight(FontWeight::MEDIUM).child(
+                                SharedString::from(
+                                    room.map(|room| room.name.clone())
+                                        .unwrap_or_else(|| "no room".to_owned()),
+                                ),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(SharedString::from(kind_label)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(TEXT))
+                                .child(SharedString::from(
+                                    room.and_then(|room| room.topic.clone())
+                                        .unwrap_or_else(|| "No topic set.".to_owned()),
+                                )),
+                        ),
+                )
+                .into_any_element()
         } else {
             messages.into_any_element()
         };
@@ -1646,6 +1915,71 @@ impl gpui::Render for ChatRoot {
                     .child(div().flex_1())
                     .child(div().flex_none().flex().w(px(480.0)).child(search_strip))
                     .child(div().flex_1())
+                    .when_some(self.state.active_room.clone(), |bar, room_id| {
+                        bar.child(
+                            div()
+                                .id("pins-tab")
+                                .role(Role::Button)
+                                .aria_label("Pinned messages")
+                                .flex_none()
+                                .px_2()
+                                .py_1()
+                                .rounded_xs()
+                                .text_sm()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(BORDER)))
+                                .child("📌")
+                                .on_click({
+                                    let this = this_bar.clone();
+                                    let room_id = room_id.clone();
+                                    move |_, _, cx| {
+                                        this.update(cx, |chat, cx| {
+                                            chat.show_info = false;
+                                            let open = match chat.state.pinned.take() {
+                                                // Same room's tab open → close it.
+                                                Some((rid, _)) if rid == room_id => false,
+                                                // No tab or another room's tab → open here.
+                                                _ => {
+                                                    let _ = chat.commands.try_send(
+                                                        ChatCommand::PinnedMessages {
+                                                            room_id: room_id.clone(),
+                                                        },
+                                                    );
+                                                    true
+                                                }
+                                            };
+                                            chat.state.pinned =
+                                                open.then(|| (room_id.clone(), Vec::new()));
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("room-info")
+                                .role(Role::Button)
+                                .aria_label("Room info")
+                                .flex_none()
+                                .px_2()
+                                .py_1()
+                                .rounded_xs()
+                                .text_sm()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(BORDER)))
+                                .child("ℹ️")
+                                .on_click({
+                                    let this = this_bar.clone();
+                                    move |_, _, cx| {
+                                        this.update(cx, |chat, cx| {
+                                            chat.state.pinned = None;
+                                            chat.show_info = !chat.show_info;
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        )
+                    })
                     .child(
                         div()
                             .text_xs()

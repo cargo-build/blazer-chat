@@ -10,6 +10,7 @@ pub use client::RcClient;
 pub use live::{DdpLive, LiveCommand, LiveEvent, websocket_url};
 pub use types::{
     AttachedFile, CustomEmoji, Msg, Notification, RcError, RcSettings, Reaction, Room, Session,
+    UserInfo,
 };
 
 #[cfg(test)]

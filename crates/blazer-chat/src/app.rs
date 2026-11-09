@@ -16,12 +16,12 @@ use serde::Serialize;
 
 use crate::control;
 use crate::http::Transport;
-use crate::rc::{AttachedFile, LiveCommand, Msg, RcClient, RcError, RcSettings, Room};
+use crate::rc::{AttachedFile, LiveCommand, Msg, RcClient, RcError, RcSettings, Room, UserInfo};
 use crate::store::Store;
 use crate::tasks::{spawn_emoji, spawn_live};
 
 /// What the UI (or the control socket) asks the application to do.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ChatCommand {
     Login {
         user: String,
@@ -111,6 +111,20 @@ pub enum ChatCommand {
     HideRoom {
         room_id: String,
     },
+    /// Fetches the room's pinned messages — the read-only pinned tab
+    /// (m12 F7).
+    PinnedMessages {
+        room_id: String,
+    },
+    /// Opens (or returns) a DM with a user — the user card's Send DM
+    /// (m12 F8).
+    OpenDm {
+        username: String,
+    },
+    /// Fetches a user's card data (m12 F8).
+    UserInfo {
+        username: String,
+    },
 }
 
 /// What the application reports back; the UI folds these into [`ChatState`].
@@ -189,6 +203,21 @@ pub enum ChatEvent {
     RoomHidden {
         room_id: String,
     },
+    /// The room's pinned messages arrived (m12 F7).
+    PinnedMessages {
+        room_id: String,
+        messages: Vec<Msg>,
+    },
+    /// The DM room is ready: the sidebar gains it and the pane opens
+    /// (m12 F8).
+    DmOpened {
+        room_id: String,
+        username: String,
+    },
+    /// A user's card data arrived (m12 F8).
+    UserInfo {
+        info: UserInfo,
+    },
     /// The user's `subscriptions-changed` stream reported a room's
     /// unread count (initial burst + every new message).
     UnreadCount {
@@ -262,6 +291,11 @@ pub struct ChatState {
     /// The pending quote card `(room_id, msg_id)`: a room switch or a
     /// send consumes it (m12 F6).
     pub quote: Option<(String, String)>,
+    /// The open room's pinned messages (the read-only tab, m12 F7).
+    pub pinned: Option<(String, Vec<Msg>)>,
+    /// User-card data by username; missing entries fetch on demand
+    /// (m12 F8).
+    pub user_info: std::collections::HashMap<String, UserInfo>,
 }
 
 /// One local-search hit.
@@ -321,7 +355,14 @@ impl ChatState {
                         room.unread = unread;
                     }
                 }
-                None
+                // The own avatar used to wait for a room with own
+                // messages: fetch it right away so the top bar shows
+                // the photo from the first minute.
+                self.username
+                    .as_deref()
+                    .map(|me| ChatCommand::FetchAvatars {
+                        usernames: vec![me.to_owned()],
+                    })
             }
             ChatEvent::Messages { room_id, messages } => {
                 self.messages_version += 1;
@@ -510,6 +551,33 @@ impl ChatState {
                 if self.active_room.as_deref() == Some(room_id.as_str()) {
                     self.active_room = None;
                 }
+                None
+            }
+            ChatEvent::PinnedMessages { room_id, messages } => {
+                self.pinned = Some((room_id, messages));
+                None
+            }
+            ChatEvent::DmOpened { room_id, username } => {
+                // A brand-new DM has no sidebar row yet: upsert one so
+                // the pane has a room to sit on, then pull history.
+                if !self.rooms.iter().any(|room| room.id == room_id) {
+                    self.rooms.push(Room {
+                        id: room_id.clone(),
+                        name: username,
+                        kind: 'd',
+                        unread: 0,
+                        lm: None,
+                        preview: None,
+                        topic: None,
+                        mentions: 0,
+                    });
+                }
+                self.active_room = Some(room_id.clone());
+                self.open_thread = None;
+                Some(ChatCommand::RefreshRoom { room_id })
+            }
+            ChatEvent::UserInfo { info } => {
+                self.user_info.insert(info.username.clone(), info);
                 None
             }
             ChatEvent::SearchQuery(query) => {
@@ -1263,6 +1331,21 @@ async fn execute<T: Transport>(
             Err(error) => session_expired(store, client, &error)
                 .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
+        ChatCommand::PinnedMessages { room_id } => match client.pinned_messages(&room_id).await {
+            Ok(messages) => ChatEvent::PinnedMessages { room_id, messages },
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
+        },
+        ChatCommand::OpenDm { username } => match client.create_dm(&username).await {
+            Ok(room_id) => ChatEvent::DmOpened { room_id, username },
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
+        },
+        ChatCommand::UserInfo { username } => match client.user_info(&username).await {
+            Ok(info) => ChatEvent::UserInfo { info },
+            Err(error) => session_expired(store, client, &error)
+                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
+        },
     }
 }
 
@@ -1866,6 +1949,67 @@ mod tests {
             room_id: "GENERAL".to_owned(),
         });
         assert_eq!(state.rooms[0].unread, 1, "the badge never stays hidden");
+    }
+
+    #[test]
+    fn room_list_fetches_the_own_avatar() {
+        let mut state = ChatState {
+            username: Some("tester".to_owned()),
+            ..ChatState::default()
+        };
+        let follow = state.apply(ChatEvent::Rooms { rooms: Vec::new() });
+        assert_eq!(
+            follow,
+            Some(ChatCommand::FetchAvatars {
+                usernames: vec!["tester".to_owned()],
+            }),
+            "the own avatar loads from the first minute, not after opening a posted room"
+        );
+    }
+
+    #[test]
+    fn dm_opened_upserts_the_room_and_chains_refresh() {
+        let mut state = ChatState {
+            open_thread: Some(("GENERAL".to_owned(), "root".to_owned())),
+            ..ChatState::default()
+        };
+        let follow = state.apply(ChatEvent::DmOpened {
+            room_id: "dmX".to_owned(),
+            username: "bob".to_owned(),
+        });
+        assert_eq!(
+            follow,
+            Some(ChatCommand::RefreshRoom {
+                room_id: "dmX".to_owned()
+            }),
+            "the fresh DM pulls history right away"
+        );
+        assert_eq!(state.active_room.as_deref(), Some("dmX"));
+        assert_eq!(state.open_thread, None, "navigation leaves the thread");
+        let room = state.rooms.iter().find(|room| room.id == "dmX").unwrap();
+        assert_eq!(room.name, "bob");
+        assert_eq!(room.kind, 'd');
+        state.apply(ChatEvent::DmOpened {
+            room_id: "dmX".to_owned(),
+            username: "bob".to_owned(),
+        });
+        assert_eq!(
+            state.rooms.iter().filter(|room| room.id == "dmX").count(),
+            1,
+            "a repeat visit must not duplicate the row"
+        );
+    }
+
+    #[test]
+    fn pinned_messages_fold_stores_the_tab() {
+        let mut state = ChatState::default();
+        state.apply(ChatEvent::PinnedMessages {
+            room_id: "GENERAL".to_owned(),
+            messages: vec![message("p1", "alice", "pinned!")],
+        });
+        let pinned = state.pinned.expect("the tab stores");
+        assert_eq!(pinned.0, "GENERAL");
+        assert_eq!(pinned.1[0].id, "p1");
     }
 
     #[test]
