@@ -603,7 +603,10 @@ impl<T: Transport> RcClient<T> {
         path: &str,
         msg: &str,
     ) -> Result<Msg, RcError> {
-        let bytes = std::fs::read(path)
+        // compio::fs: the read sits on the runtime thread — a
+        // blocking std read would stall every other task (m10).
+        let bytes = compio::fs::read(path)
+            .await
             .map_err(|error| RcError::Config(format!("read {}: {error}", path)))?;
         let filename = std::path::Path::new(path)
             .file_name()

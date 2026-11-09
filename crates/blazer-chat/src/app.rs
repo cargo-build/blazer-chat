@@ -11,7 +11,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use async_channel::{Receiver, Sender, unbounded};
+use async_channel::{Receiver, Sender};
 use serde::Serialize;
 
 use crate::control;
@@ -883,8 +883,13 @@ fn ensure_live(
 
 /// Spawns the compio thread and returns its UI-facing handles.
 pub fn spawn(settings: RcSettings) -> ChatService {
-    let (events, event_rx) = unbounded();
-    let (command_tx, commands) = unbounded();
+    // Bounded channels with a per-stream policy (m10): UI→compio
+    // commands are tiny user actions — a full queue is a bug-scale
+    // backlog, so callers try_send and every drop logs loudly;
+    // compio→UI events carry chat content — sends await
+    // (backpressure) and nothing drops.
+    let (events, event_rx) = async_channel::bounded(512);
+    let (command_tx, commands) = async_channel::bounded(128);
     let snapshot = Arc::new(Mutex::new(None));
     let thread_snapshot = Arc::clone(&snapshot);
     let thread_commands = command_tx.clone();
@@ -977,8 +982,11 @@ async fn drive(
 
     // Convenience: credentials from the environment log in at startup.
     if let (Ok(user), Ok(password)) = (std::env::var("RCHAT_USER"), std::env::var("RCHAT_PASSWORD"))
+        && self_commands
+            .try_send(ChatCommand::Login { user, password })
+            .is_err()
     {
-        let _ = self_commands.try_send(ChatCommand::Login { user, password });
+        eprintln!("blazer-chat: env login dropped — command queue full");
     }
 
     while let Ok(command) = commands.recv().await {

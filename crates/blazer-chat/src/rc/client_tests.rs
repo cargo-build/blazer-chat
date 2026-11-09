@@ -351,24 +351,29 @@ fn mark_read_posts_the_rid() {
 
 #[test]
 fn upload_runs_the_two_phase_media_flow() {
-    let transport = FakeTransport::answering(&authenticated_routes());
-    let mut rc = client(transport.clone());
-    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    // compio::fs reads the file on the runtime (m10): the test needs
+    // a driver under the future.
+    let runtime = compio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        // Plain awaits: a nested futures_lite block_on would park the
+        // thread the compio driver needs (deadlock).
+        let transport = FakeTransport::answering(&authenticated_routes());
+        let mut rc = client(transport.clone());
+        rc.login("tester", "secret").await.unwrap();
 
-    let mut file = std::env::temp_dir();
-    file.push("rchat-upload-probe.txt");
-    std::fs::write(&file, b"probe bytes").unwrap();
+        let mut file = std::env::temp_dir();
+        file.push("rchat-upload-probe.txt");
+        std::fs::write(&file, b"probe bytes").unwrap();
 
-    let message = futures_lite::future::block_on(rc.upload_file(
-        "GENERAL",
-        file.to_str().unwrap(),
-        "caption",
-    ))
-    .unwrap();
-    assert_eq!(message.id, "m3", "the confirm answers the full message");
-    let request = transport.last_request();
-    assert!(request.contains("POST /api/v1/rooms.mediaConfirm/GENERAL/f1"));
-    assert!(request.contains(r#""msg":"caption""#));
+        let message = rc
+            .upload_file("GENERAL", file.to_str().unwrap(), "caption")
+            .await
+            .unwrap();
+        assert_eq!(message.id, "m3", "the confirm answers the full message");
+        let request = transport.last_request();
+        assert!(request.contains("POST /api/v1/rooms.mediaConfirm/GENERAL/f1"));
+        assert!(request.contains(r#""msg":"caption""#));
+    });
 }
 
 #[test]

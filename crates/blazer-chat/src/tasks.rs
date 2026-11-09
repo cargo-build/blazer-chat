@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use async_channel::Sender;
 
+use compio::buf::BufResult;
+
 use crate::app::ChatEvent;
 use crate::http::HttpTransport;
 use crate::rc::{DdpLive, LiveCommand, LiveEvent, RcClient, RcSettings, Session, websocket_url};
@@ -27,12 +29,16 @@ pub fn spawn_live(
     session: Session,
     events: Sender<ChatEvent>,
 ) -> Sender<LiveCommand> {
-    let (commands, receiver) = async_channel::unbounded();
+    // LiveCommand is advisory (Watch/Unwatch): a full queue drops the
+    // newest watch hint, loud at the caller (m10 policy).
+    let (commands, receiver) = async_channel::bounded(16);
     compio::runtime::spawn(async move {
         let url = websocket_url(&settings);
         // The protocol layer emits raw live updates; the application
         // boundary wraps them into chat events.
-        let (updates, update_rx) = async_channel::unbounded();
+        // Live updates carry chat content: bounded with blocking
+        // sends — backpressure, never drops (m10 policy).
+        let (updates, update_rx) = async_channel::bounded(256);
         {
             let events = events.clone();
             compio::runtime::spawn(async move {
@@ -185,7 +191,10 @@ pub fn spawn_emoji(
             }
             match client.emoji_image(&emoji.name, &emoji.extension).await {
                 Ok(bytes) => {
-                    if let Err(error) = std::fs::write(&path, bytes) {
+                    // compio::fs::write takes the buffer and hands it
+                    // back inside the BufResult (m10).
+                    let BufResult(result, _) = compio::fs::write(&path, bytes).await;
+                    if let Err(error) = result {
                         eprintln!("blazer-chat: emoji image {}: {error}", path.display());
                     }
                 }

@@ -147,7 +147,7 @@ impl ChatRoot {
                 if root
                     .update(cx, |chat, cx| {
                         if let Some(room_id) = chat.state.active_room.clone() {
-                            let _ = chat.commands.try_send(ChatCommand::UploadFile {
+                            chat.send_command(ChatCommand::UploadFile {
                                 room_id,
                                 path: path.display().to_string(),
                                 msg: String::new(),
@@ -234,7 +234,7 @@ impl ChatRoot {
         };
         let follow_up = self.state.apply(event);
         if let Some(command) = follow_up {
-            let _ = self.commands.try_send(command);
+            self.send_command(command);
         }
         // Render data derives in the entity, never in render: the pane only
         // maps the precomputed spans to elements.
@@ -391,7 +391,7 @@ impl ChatRoot {
         if let Some(previous) = self.state.active_room.clone() {
             let draft = self.composer.read(cx).content().to_owned();
             self.state.drafts.insert(previous.clone(), draft.clone());
-            let _ = self.commands.try_send(ChatCommand::SaveDraft {
+            self.send_command(ChatCommand::SaveDraft {
                 room_id: previous,
                 text: draft,
             });
@@ -418,10 +418,18 @@ impl ChatRoot {
         self.composer.update(cx, |composer, cx| {
             composer.set_placeholder(&placeholder, cx)
         });
-        let _ = self.commands.try_send(ChatCommand::OpenRoom {
+        self.send_command(ChatCommand::OpenRoom {
             room_id: room_id.clone(),
         });
         cx.notify();
+    }
+
+    /// Queues a command; a full queue is a bug-scale backlog, so the
+    /// drop is loud (m10 bounded-channel policy).
+    fn send_command(&self, command: ChatCommand) {
+        if let Err(error) = self.commands.try_send(command) {
+            eprintln!("blazer-chat: command queue full, dropped: {error}");
+        }
     }
 
     /// Escape: an edit backs out to the room's draft; with no edit an
@@ -443,7 +451,7 @@ impl ChatRoot {
             .is_some_and(|query| !query.is_empty())
         {
             self.search.update(cx, |box_, cx| box_.set_content("", cx));
-            let _ = self.commands.try_send(ChatCommand::Search(String::new()));
+            self.send_command(ChatCommand::Search(String::new()));
         }
         cx.notify();
     }
@@ -514,7 +522,7 @@ impl ChatRoot {
         let path = std::env::temp_dir().join(format!("blazer-chat-paste-{stamp}.{ext}"));
         match std::fs::write(&path, bytes) {
             Ok(()) => {
-                let _ = self.commands.try_send(ChatCommand::UploadFile {
+                self.send_command(ChatCommand::UploadFile {
                     room_id,
                     path: path.display().to_string(),
                     msg: String::new(),
@@ -572,11 +580,11 @@ impl ChatRoot {
             },
         };
         self.state.drafts.remove(&room_id);
-        let _ = self.commands.try_send(ChatCommand::SaveDraft {
+        self.send_command(ChatCommand::SaveDraft {
             room_id: room_id.clone(),
             text: String::new(),
         });
-        let _ = self.commands.try_send(command);
+        self.send_command(command);
         cx.notify();
     }
 }
@@ -598,7 +606,7 @@ impl ChatRoot {
     /// Stars or unstars a message through the server; the fold applies
     /// the flip locally.
     fn toggle_star(&mut self, msg_id: String, starred: bool, cx: &mut Context<Self>) {
-        let _ = self.commands.try_send(ChatCommand::StarMessage {
+        self.send_command(ChatCommand::StarMessage {
             msg_id,
             star: !starred,
         });
@@ -622,7 +630,7 @@ impl ChatRoot {
 
     /// Logs out: the server session dies, the UI resets to logged-out.
     fn logout(&mut self, cx: &mut Context<Self>) {
-        let _ = self.commands.try_send(ChatCommand::Logout);
+        self.send_command(ChatCommand::Logout);
         self.user_menu_open = false;
         cx.notify();
     }
@@ -651,7 +659,7 @@ impl ChatRoot {
         emoji: &str,
         cx: &mut Context<Self>,
     ) {
-        let _ = self.commands.try_send(ChatCommand::React {
+        self.send_command(ChatCommand::React {
             room_id: room_id.to_owned(),
             msg_id: msg_id.to_owned(),
             emoji: emoji.to_owned(),
@@ -681,7 +689,7 @@ impl ChatRoot {
     fn run_search(&mut self, cx: &mut Context<Self>) {
         let query = self.search.read(cx).content().trim().to_owned();
         self.search_rooms = room_hits(&query, &self.state.rooms);
-        let _ = self.commands.try_send(ChatCommand::Search(query.clone()));
+        self.send_command(ChatCommand::Search(query.clone()));
         cx.notify();
     }
 
@@ -698,7 +706,7 @@ impl ChatRoot {
     }
 
     fn delete_message(&mut self, room_id: &str, msg_id: &str, cx: &mut Context<Self>) {
-        let _ = self.commands.try_send(ChatCommand::DeleteMessage {
+        self.send_command(ChatCommand::DeleteMessage {
             room_id: room_id.to_owned(),
             msg_id: msg_id.to_owned(),
         });
@@ -880,9 +888,7 @@ impl ChatRoot {
                 .hover(|style| style.bg(rgb(ROW_HOVER)))
                 .on_click(move |_, _, cx| {
                     this.update(cx, |chat, cx| {
-                        let _ = chat
-                            .commands
-                            .try_send(ChatCommand::OpenThread { tmid: tmid.clone() });
+                        chat.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
                         cx.notify();
                     });
                 })
@@ -1069,11 +1075,9 @@ impl ChatRoot {
                                             move |_, _, cx| {
                                                 this.update(cx, |chat, cx| {
                                                     chat.user_card = None;
-                                                    let _ = chat.commands.try_send(
-                                                        ChatCommand::OpenDm {
-                                                            username: sender.clone(),
-                                                        },
-                                                    );
+                                                    chat.send_command(ChatCommand::OpenDm {
+                                                        username: sender.clone(),
+                                                    });
                                                     cx.notify();
                                                 });
                                             }
@@ -1283,7 +1287,7 @@ impl gpui::Render for ChatRoot {
                                             move |_, _, cx| {
                                                 this.update(cx, |chat, cx| {
                                                     chat.room_menu = None;
-                                                    let _ = chat.commands.try_send(
+                                                    chat.send_command(
                                                         ChatCommand::MarkRoomUnread {
                                                             room_id: room_id.clone(),
                                                         },
@@ -1298,11 +1302,9 @@ impl gpui::Render for ChatRoot {
                                             move |_, _, cx| {
                                                 this.update(cx, |chat, cx| {
                                                     chat.room_menu = None;
-                                                    let _ = chat.commands.try_send(
-                                                        ChatCommand::HideRoom {
-                                                            room_id: room_id.clone(),
-                                                        },
-                                                    );
+                                                    chat.send_command(ChatCommand::HideRoom {
+                                                        room_id: room_id.clone(),
+                                                    });
                                                     cx.notify();
                                                 });
                                             }
@@ -1420,10 +1422,12 @@ impl gpui::Render for ChatRoot {
         .flex_1()
         .min_h_0();
 
-        // Plain scrollable rows — proven to paint on both stacks. The
-        // virtualizing list() reproduces the empty-pane symptom on the
-        // migrated stack as well; that investigation continues with a
-        // fixed-height probe on a branch.
+        // DECIDED (m10): plain scrollable rows for the pane,
+        // uniform_list for the sidebar. list() on the migrated
+        // bezel-gpui stack paints an empty pane even with a fixed
+        // height (feat/list-probe 81ace8a3, negative), and momentum
+        // glide stays operator-rejected. Revisit only on an upstream
+        // list() fix, with frame-time numbers from a visible window.
         let mut rows: Vec<AnyElement> = Vec::with_capacity(self.rows.len());
         for row in &self.rows {
             match row {
@@ -1575,9 +1579,7 @@ impl gpui::Render for ChatRoot {
         {
             self.paged_since_top = true;
             self.loading_older = true;
-            let _ = self
-                .commands
-                .try_send(ChatCommand::FetchOlder { room_id: room });
+            self.send_command(ChatCommand::FetchOlder { room_id: room });
         }
 
         let pane_title = self
@@ -1620,7 +1622,7 @@ impl gpui::Render for ChatRoot {
                         .child("← thread")
                         .on_click(move |_, _, cx| {
                             this.update(cx, |chat, cx| {
-                                let _ = chat.commands.try_send(ChatCommand::CloseThread);
+                                chat.send_command(ChatCommand::CloseThread);
                                 let _room_id = room_id.clone();
                                 cx.notify();
                             });
@@ -1663,7 +1665,7 @@ impl gpui::Render for ChatRoot {
                                 chat.search.update(cx, |box_, cx| {
                                     box_.set_content("", cx);
                                 });
-                                let _ = chat.commands.try_send(ChatCommand::Search(String::new()));
+                                chat.send_command(ChatCommand::Search(String::new()));
                                 cx.notify();
                             });
                         })
@@ -1704,7 +1706,7 @@ impl gpui::Render for ChatRoot {
                                 // Clearing the box alone leaves the query
                                 // in state: the results pane would keep
                                 // covering the room that was just opened.
-                                let _ = chat.commands.try_send(ChatCommand::Search(String::new()));
+                                chat.send_command(ChatCommand::Search(String::new()));
                                 cx.notify();
                             });
                         })
@@ -1916,7 +1918,7 @@ impl gpui::Render for ChatRoot {
                     .child(label)
                     .on_click(move |_, _, cx| {
                         taken.update(cx, |chat, cx| {
-                            let _ = chat.commands.try_send(ChatCommand::SetStatus {
+                            chat.send_command(ChatCommand::SetStatus {
                                 status: key.to_owned(),
                             });
                             cx.notify();
@@ -2075,7 +2077,7 @@ impl gpui::Render for ChatRoot {
                                                 Some((rid, _)) if rid == room_id => false,
                                                 // No tab or another room's tab → open here.
                                                 _ => {
-                                                    let _ = chat.commands.try_send(
+                                                    chat.send_command(
                                                         ChatCommand::PinnedMessages {
                                                             room_id: room_id.clone(),
                                                         },
@@ -2811,7 +2813,7 @@ fn card_opener(
         this.update(cx, |chat, cx| {
             chat.user_card = Some(name.clone());
             if !chat.state.user_info.contains_key(&name) {
-                let _ = chat.commands.try_send(ChatCommand::UserInfo {
+                chat.send_command(ChatCommand::UserInfo {
                     username: name.clone(),
                 });
             }
@@ -2919,9 +2921,7 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
         let tmid = msg_id.clone();
         move |_, _, cx| {
             this.update(cx, |chat, cx| {
-                let _ = chat
-                    .commands
-                    .try_send(ChatCommand::OpenThread { tmid: tmid.clone() });
+                chat.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
                 cx.notify();
             });
         }
@@ -2989,9 +2989,7 @@ fn action_strip(actions: ActionContext) -> gpui::Div {
                         move |_, _, cx| {
                             this.update(cx, |chat, cx| {
                                 chat.open_menu = None;
-                                let _ = chat
-                                    .commands
-                                    .try_send(ChatCommand::OpenThread { tmid: tmid.clone() });
+                                chat.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
                                 cx.notify();
                             });
                         }
