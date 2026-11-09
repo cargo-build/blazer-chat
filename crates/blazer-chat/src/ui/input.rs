@@ -66,7 +66,6 @@ actions!(
         WrapStrike,
         WrapCode,
         Cancel,
-        AcceptSuggestion,
         SuggestNext,
         SuggestPrev,
     ]
@@ -187,7 +186,6 @@ impl TextInput {
             KeyBinding::new("ctrl-b", WrapBold, Some("TextInput")),
             KeyBinding::new("ctrl-i", WrapItalic, Some("TextInput")),
             KeyBinding::new("escape", Cancel, Some("TextInput")),
-            KeyBinding::new("tab", AcceptSuggestion, Some("TextInput")),
             KeyBinding::new("down", SuggestNext, Some("TextInput")),
             KeyBinding::new("up", SuggestPrev, Some("TextInput")),
         ]);
@@ -459,7 +457,8 @@ impl TextInput {
     }
 
     fn wrap_bold(&mut self, _: &WrapBold, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_wrap("**", cx);
+        // RC bold is a single `*` (markdown.rs) — `**` rendered literally.
+        self.apply_wrap("*", cx);
     }
 
     fn wrap_italic(&mut self, _: &WrapItalic, _: &mut Window, cx: &mut Context<Self>) {
@@ -467,7 +466,8 @@ impl TextInput {
     }
 
     fn wrap_strike(&mut self, _: &WrapStrike, _: &mut Window, cx: &mut Context<Self>) {
-        self.apply_wrap("~~", cx);
+        // RC strike is a single `~` (markdown.rs).
+        self.apply_wrap("~", cx);
     }
 
     fn wrap_code(&mut self, _: &WrapCode, _: &mut Window, cx: &mut Context<Self>) {
@@ -684,12 +684,6 @@ impl TextInput {
             suggest.selected = index.min(suggest.items.len().saturating_sub(1));
         }
         self.accept_suggestion(cx);
-    }
-
-    fn accept_action(&mut self, _: &AcceptSuggestion, _: &mut Window, cx: &mut Context<Self>) {
-        if self.suggest.is_some() {
-            self.accept_suggestion(cx);
-        }
     }
 
     fn suggest_next(&mut self, _: &SuggestNext, _: &mut Window, cx: &mut Context<Self>) {
@@ -1343,6 +1337,20 @@ impl Render for TextInput {
             .flex()
             .w_full()
             .key_context("TextInput")
+            // Tab accepts the focused suggestion only when a popup is
+            // open; otherwise the key falls through to focus
+            // navigation (m14 P0 tail).
+            .on_key_down(
+                cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
+                    if event.keystroke.key == "tab"
+                        && event.keystroke.modifiers == gpui::Modifiers::default()
+                        && this.suggest.is_some()
+                    {
+                        this.accept_suggestion(cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
@@ -1369,7 +1377,6 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::wrap_strike))
             .on_action(cx.listener(Self::wrap_code))
             .on_action(cx.listener(Self::cancel))
-            .on_action(cx.listener(Self::accept_action))
             .on_action(cx.listener(Self::suggest_next))
             .on_action(cx.listener(Self::suggest_prev))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -1411,6 +1418,31 @@ fn wrap_with_marker(text: &str, range: std::ops::Range<usize>, marker: &str) -> 
     while end > start && !text.is_char_boundary(end) {
         end -= 1;
     }
+    // Toggle-off (m14 P1): unwrap when the selection covers or hugs
+    // a full marker pair; keep the selection over the freed text.
+    let selected = &text[start..end];
+    if start >= marker.len()
+        && text.get(start - marker.len()..start) == Some(marker)
+        && text.get(end..end + marker.len()) == Some(marker)
+    {
+        let mut out = String::with_capacity(text.len() - marker.len() * 2);
+        out.push_str(&text[..start - marker.len()]);
+        out.push_str(&text[start..end]);
+        out.push_str(&text[end + marker.len()..]);
+        let caret = start - marker.len() + (end - start);
+        return (out, caret);
+    }
+    if selected.len() >= marker.len() * 2
+        && selected.starts_with(marker)
+        && selected.ends_with(marker)
+    {
+        let mut out = String::with_capacity(text.len() - marker.len() * 2);
+        out.push_str(&text[..start]);
+        out.push_str(&selected[marker.len()..selected.len() - marker.len()]);
+        out.push_str(&text[end..]);
+        let caret = start + selected.len() - marker.len() * 2;
+        return (out, caret);
+    }
     let mut out = String::with_capacity(text.len() + marker.len() * 2);
     out.push_str(&text[..start]);
     out.push_str(marker);
@@ -1432,6 +1464,30 @@ mod tests {
 
     fn line_lens(text: &str) -> Vec<usize> {
         text.split('\n').map(|piece| piece.len()).collect()
+    }
+
+    #[test]
+    fn wrap_with_marker_unwraps_when_already_wrapped() {
+        // The selection covers the whole wrapped span.
+        let (text, caret) = wrap_with_marker("*hello*", 0..7, "*");
+        assert_eq!(text, "hello");
+        assert_eq!(caret, 5);
+        // The selection hugs the inner text; both markers surround it.
+        let (text, caret) = wrap_with_marker("a *b* c", 3..4, "*");
+        assert_eq!(text, "a b c");
+        assert_eq!(caret, 3);
+        // Unwrapped text still wraps (single `*`, RC marker).
+        let (text, _) = wrap_with_marker("*a* b", 4..5, "*");
+        assert_eq!(text, "*a* *b*");
+    }
+
+    #[test]
+    fn wrap_uses_rc_markers() {
+        // Ctrl+B must produce what markdown.rs renders (RC: single `*`).
+        let (text, _) = wrap_with_marker("hello world", 0..11, "*");
+        assert_eq!(text, "*hello world*");
+        let (text, _) = wrap_with_marker("oops", 0..4, "~");
+        assert_eq!(text, "~oops~");
     }
 
     #[test]

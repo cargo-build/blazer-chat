@@ -40,6 +40,9 @@ jiff = "0.2"
 rfd = "0.18"
 
 [dev-dependencies]
+# `#[gpui::test]` fixtures: headless window + TestAppContext (m10 S5
+# / m13 — the pane's regression pins run in `just gate`).
+bezel-gpui = { version = "=0.3.21+zed.f16f96", features = ["test-support"] }
 futures-lite = "2"
 
 [lints]

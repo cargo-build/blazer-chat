@@ -862,6 +862,11 @@ impl MessagePane {
         }
     }
 
+    /// Real rebuild count for the S5 regression guard (/state).
+    pub(crate) fn rebuilds(&self) -> u64 {
+        self.pane_rebuilds
+    }
+
     /// An older slice landed: the fetch slot frees up.
     pub(crate) fn clear_loading_older(&mut self) {
         self.loading_older = false;
@@ -1488,6 +1493,8 @@ impl MessagePane {
 #[allow(clippy::unwrap_used)] // tests assert the expected path
 mod tests {
     use super::*;
+    use crate::rc::{Msg, Room};
+    use gpui::TestAppContext;
 
     #[test]
     fn row_change_classifies_by_boundary_identity() {
@@ -1596,5 +1603,146 @@ mod tests {
         assert_eq!(pretty_time_in("2026-11-07T20:32:00.514Z", &msk), "11:32 PM");
         assert_eq!(pretty_time_in("2026-11-07T00:05:00Z", &utc), "12:05 AM");
         assert_eq!(pretty_time_in("not-a-stamp", &utc), "not-a-stamp");
+    }
+
+    const ROOM: &str = "room-a";
+
+    /// Alternating senders: `adjacent_grouped` never fires, so rows
+    /// are one message each and the splice arithmetic stays exact.
+    fn msg(index: usize) -> Msg {
+        Msg {
+            id: format!("m{index:04}"),
+            room_id: ROOM.to_owned(),
+            sender: format!("user{}", index % 2),
+            text: format!("message {index}"),
+            ts: format!(
+                "2026-11-09T10:{:02}:{:02}.000Z",
+                (index / 60) % 60,
+                index % 60
+            ),
+            tmid: None,
+            tcount: None,
+            tlm: None,
+            file: None,
+            reactions: Default::default(),
+            starred_by_me: false,
+            system: false,
+        }
+    }
+
+    fn seeded(count: usize) -> ChatState {
+        let mut state = ChatState::default();
+        state.rooms = vec![Room {
+            id: ROOM.to_owned(),
+            name: "general".to_owned(),
+            kind: 'c',
+            unread: 0,
+            lm: None,
+            preview: None,
+            topic: None,
+            mentions: 0,
+        }];
+        state.active_room = Some(ROOM.to_owned());
+        state
+            .messages
+            .insert(ROOM.to_owned(), (0..count).map(msg).collect());
+        state.message_versions.insert(ROOM.to_owned(), 1);
+        state
+    }
+
+    fn bump(state: &mut ChatState, room: &str) {
+        *state.message_versions.entry(room.to_owned()).or_default() += 1;
+    }
+
+    #[gpui::test]
+    fn background_traffic_does_not_rebuild_the_pane(cx: &mut TestAppContext) {
+        let pane = cx.new(MessagePane::new);
+        let mut state = seeded(50);
+        pane.update(cx, |pane, _| pane.sync(&state));
+        let after_first = pane.update(cx, |pane, _| pane.rebuilds());
+        assert_eq!(after_first, 1, "the first sync rebuilds once");
+
+        // A bump for another room must not touch this pane.
+        bump(&mut state, "room-b");
+        pane.update(cx, |pane, _| pane.sync(&state));
+        let still = pane.update(cx, |pane, _| pane.rebuilds());
+        assert_eq!(
+            still, after_first,
+            "background traffic rebuilt the pane (S4 regression)"
+        );
+
+        // The active room's own bump does.
+        bump(&mut state, ROOM);
+        pane.update(cx, |pane, _| pane.sync(&state));
+        let now = pane.update(cx, |pane, _| pane.rebuilds());
+        assert_eq!(now, after_first + 1);
+    }
+
+    #[gpui::test]
+    fn tail_follows_appends_and_parking_survives(cx: &mut TestAppContext) {
+        let pane = cx.new(MessagePane::new);
+        let mut state = seeded(100);
+        pane.update(cx, |pane, _| pane.sync(&state));
+        let following = pane.update(cx, |pane, _| pane.messages_list.is_following_tail());
+        assert!(following);
+
+        state.messages.get_mut(ROOM).unwrap().push(msg(100));
+        bump(&mut state, ROOM);
+        pane.update(cx, |pane, _| pane.sync(&state));
+        let following = pane.update(cx, |pane, _| pane.messages_list.is_following_tail());
+        assert!(following, "following must survive an append");
+
+        // Park at the head: the operator scrolled up.
+        pane.update(cx, |pane, _| {
+            pane.messages_list.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            })
+        });
+        let parked = pane.update(cx, |pane, _| pane.messages_list.is_following_tail());
+        assert!(!parked);
+
+        state.messages.get_mut(ROOM).unwrap().push(msg(101));
+        bump(&mut state, ROOM);
+        pane.update(cx, |pane, _| pane.sync(&state));
+        let parked = pane.update(cx, |pane, _| pane.messages_list.is_following_tail());
+        assert!(!parked, "parking must survive appends");
+    }
+
+    #[gpui::test]
+    fn prepend_keeps_the_viewport_anchor(cx: &mut TestAppContext) {
+        let pane = cx.new(MessagePane::new);
+        let mut state = seeded(300);
+        pane.update(cx, |pane, _| pane.sync(&state));
+        pane.update(cx, |pane, _| {
+            pane.messages_list.scroll_to(ListOffset {
+                item_ix: 100,
+                offset_in_item: px(2.),
+            })
+        });
+
+        // 40 older messages, same day: no new separators, so the row
+        // delta is exactly 40 and the anchored row shifts by 40.
+        let older: Vec<Msg> = (0..40)
+            .map(|index| Msg {
+                id: format!("old{index:02}"),
+                ts: format!("2026-11-09T09:{:02}:00.000Z", index),
+                ..msg(0)
+            })
+            .collect();
+        state.messages.get_mut(ROOM).unwrap().splice(0..0, older);
+        bump(&mut state, ROOM);
+        pane.update(cx, |pane, _| pane.sync(&state));
+
+        let top = pane.update(cx, |pane, _| pane.messages_list.logical_scroll_top());
+        assert_eq!(
+            top.item_ix, 140,
+            "the row under the viewport top must not move"
+        );
+        assert_eq!(
+            top.offset_in_item,
+            px(2.),
+            "the sub-row offset must survive the prepend"
+        );
     }
 }
