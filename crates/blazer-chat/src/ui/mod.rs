@@ -85,7 +85,7 @@ pub fn run(settings: RcSettings) {
                     app_id: Some(APP_ID.to_owned()),
                     ..Default::default()
                 },
-                |_, cx| cx.new(|cx| root::ChatRoot::new(service, cx)),
+                |window, cx| cx.new(|cx| root::ChatRoot::new(service, window, cx)),
             )
             .expect("open the chat window");
 

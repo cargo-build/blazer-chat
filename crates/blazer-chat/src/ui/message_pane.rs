@@ -3,14 +3,13 @@
 //! per frame.
 
 use gpui::{
-    Anchor, AnyElement, ClipboardItem, Context, Entity, FollowMode, FontWeight, Hsla,
-    ListAlignment, ListOffset, ListState, Role, SharedString, Window, anchored, deferred, div,
-    hsla, img, list, prelude::*, px, rems, rgb, white,
+    Anchor, AnyElement, Context, Entity, EventEmitter, FollowMode, FontWeight, Hsla, ListAlignment,
+    ListOffset, ListState, Role, SharedString, Window, anchored, deferred, div, hsla, img, list,
+    prelude::*, px, rems, rgb, white,
 };
 
 use super::input::{ACCENT, BORDER, MUTED, PANEL, ROW_HOVER, TEXT};
 use super::markdown::{self, Span};
-use super::root::ChatRoot;
 use crate::app::{ChatCommand, ChatState};
 use crate::rc::Msg;
 
@@ -293,7 +292,7 @@ pub(crate) fn attachment_card(
 pub(crate) fn message_element(
     view: &MessageView,
     me: Option<&str>,
-    this: &Entity<ChatRoot>,
+    this: &Entity<MessagePane>,
 ) -> gpui::Div {
     let lines: Vec<gpui::Div> = view
         .lines
@@ -317,7 +316,7 @@ pub(crate) fn message_element(
 pub(crate) fn span_element(
     span: Span,
     me: Option<&str>,
-    this: &Entity<ChatRoot>,
+    this: &Entity<MessagePane>,
     id: &str,
 ) -> gpui::AnyElement {
     match span {
@@ -404,18 +403,14 @@ pub(crate) fn span_element(
 /// and mention pills (m12 D3/F8); unknown users fetch their card
 /// data on the first open.
 pub(crate) fn card_opener(
-    this: Entity<ChatRoot>,
+    this: Entity<MessagePane>,
     name: String,
 ) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static {
     move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
-        this.update(cx, |chat, cx| {
-            chat.user_card = Some(name.clone());
-            if !chat.state.user_info.contains_key(&name) {
-                chat.send_command(ChatCommand::UserInfo {
-                    username: name.clone(),
-                });
-            }
-            cx.notify();
+        this.update(cx, |_, cx| {
+            cx.emit(PaneEvent::OpenUserCard {
+                username: name.clone(),
+            });
         });
     }
 }
@@ -444,7 +439,7 @@ pub(crate) enum PaneRow {
 }
 
 pub(crate) struct ActionContext {
-    pub(crate) this: Entity<ChatRoot>,
+    pub(crate) this: Entity<MessagePane>,
     pub(crate) room_id: String,
     pub(crate) msg_id: String,
     pub(crate) edit_text: String,
@@ -501,9 +496,13 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
             let msg_id = msg_id.clone();
             let name = *name;
             button(glyph, "react").on_click(move |_, _, cx| {
-                this.update(cx, |chat, cx| {
-                    chat.toggle_reaction(&room_id, &msg_id, name, cx)
-                });
+                this.update(cx, |_, cx| {
+                    cx.emit(PaneEvent::ToggleReaction {
+                        room_id: room_id.clone(),
+                        msg_id: msg_id.clone(),
+                        emoji: name.to_owned(),
+                    });
+                })
             })
         }));
     let edit = button("✏", "edit").on_click({
@@ -511,15 +510,13 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
         let room_id = room_id.clone();
         let msg_id = msg_id.clone();
         let edit_text = edit_text.clone();
-        move |_, window, cx| {
-            this.update(cx, |chat, cx| {
-                chat.begin_edit(
-                    room_id.clone(),
-                    msg_id.clone(),
-                    edit_text.clone(),
-                    window,
-                    cx,
-                );
+        move |_, _, cx| {
+            this.update(cx, |_, cx| {
+                cx.emit(PaneEvent::BeginEdit {
+                    room_id: room_id.clone(),
+                    msg_id: msg_id.clone(),
+                    text: edit_text.clone(),
+                });
             });
         }
     });
@@ -527,9 +524,8 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
         let this = this.clone();
         let tmid = msg_id.clone();
         move |_, _, cx| {
-            this.update(cx, |chat, cx| {
-                chat.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
-                cx.notify();
+            this.update(cx, |_, cx| {
+                cx.emit(PaneEvent::OpenThread { tmid: tmid.clone() });
             });
         }
     });
@@ -538,7 +534,12 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
         let room_id = room_id.clone();
         let msg_id = msg_id.clone();
         move |_, _, cx| {
-            this.update(cx, |chat, cx| chat.delete_message(&room_id, &msg_id, cx));
+            this.update(cx, |_, cx| {
+                cx.emit(PaneEvent::DeleteMessage {
+                    room_id: room_id.clone(),
+                    msg_id: msg_id.clone(),
+                });
+            });
         }
     });
 
@@ -550,8 +551,11 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
         let room_id = room_id.clone();
         let msg_id = msg_id.clone();
         move |_, _, cx| {
-            this.update(cx, |chat, cx| {
-                chat.toggle_menu(room_id.clone(), msg_id.clone(), cx)
+            this.update(cx, |_, cx| {
+                cx.emit(PaneEvent::ToggleMenu {
+                    room_id: room_id.clone(),
+                    msg_id: msg_id.clone(),
+                });
             });
         }
     });
@@ -594,10 +598,9 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
                         let this = this.clone();
                         let tmid = msg_id.clone();
                         move |_, _, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.open_menu = None;
-                                chat.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
-                                cx.notify();
+                            this.update(cx, |_, cx| {
+                                cx.emit(PaneEvent::CloseMenu);
+                                cx.emit(PaneEvent::OpenThread { tmid: tmid.clone() });
                             });
                         }
                     }))
@@ -606,10 +609,12 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
                         let room_id = room_id.clone();
                         let msg_id = msg_id.clone();
                         move |_, _, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.open_menu = None;
-                                chat.state.quote = Some((room_id.clone(), msg_id.clone()));
-                                cx.notify();
+                            this.update(cx, |_, cx| {
+                                cx.emit(PaneEvent::CloseMenu);
+                                cx.emit(PaneEvent::QuoteMessage {
+                                    room_id: room_id.clone(),
+                                    msg_id: msg_id.clone(),
+                                });
                             });
                         }
                     }))
@@ -617,8 +622,11 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
                         let this = this.clone();
                         let msg_id = msg_id.clone();
                         move |_, _, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.toggle_star(msg_id.clone(), starred, cx)
+                            this.update(cx, |_, cx| {
+                                cx.emit(PaneEvent::ToggleStar {
+                                    msg_id: msg_id.clone(),
+                                    starred,
+                                });
                             });
                         }
                     }))
@@ -628,12 +636,12 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
                             let room_id = room_id.clone();
                             let msg_id = msg_id.clone();
                             move |_, _, cx| {
-                                this.update(cx, |chat, cx| {
-                                    chat.open_menu = None;
-                                    if let Some(link) = chat.permalink(&room_id, &msg_id) {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(link));
-                                    }
-                                    cx.notify();
+                                this.update(cx, |_, cx| {
+                                    cx.emit(PaneEvent::CloseMenu);
+                                    cx.emit(PaneEvent::CopyPermalink {
+                                        room_id: room_id.clone(),
+                                        msg_id: msg_id.clone(),
+                                    });
                                 });
                             }
                         }))
@@ -642,10 +650,9 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
                         let this = this.clone();
                         let text = edit_text.clone();
                         move |_, _, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.open_menu = None;
-                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                                cx.notify();
+                            this.update(cx, |_, cx| {
+                                cx.emit(PaneEvent::CloseMenu);
+                                cx.emit(PaneEvent::CopyText { text: text.clone() });
                             });
                         }
                     }))
@@ -654,16 +661,14 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
                         let room_id = room_id.clone();
                         let msg_id = msg_id.clone();
                         let edit_text = edit_text.clone();
-                        move |_, window, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.open_menu = None;
-                                chat.begin_edit(
-                                    room_id.clone(),
-                                    msg_id.clone(),
-                                    edit_text.clone(),
-                                    window,
-                                    cx,
-                                );
+                        move |_, _, cx| {
+                            this.update(cx, |_, cx| {
+                                cx.emit(PaneEvent::CloseMenu);
+                                cx.emit(PaneEvent::BeginEdit {
+                                    room_id: room_id.clone(),
+                                    msg_id: msg_id.clone(),
+                                    text: edit_text.clone(),
+                                });
                             });
                         }
                     })),
@@ -689,9 +694,8 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
             strip.child(button("✖", "cancel").on_click({
                 let this = this.clone();
                 move |_, _, cx| {
-                    this.update(cx, |chat, cx| {
-                        chat.editing = None;
-                        cx.notify();
+                    this.update(cx, |_, cx| {
+                        cx.emit(PaneEvent::CancelEdit);
                     });
                 }
             }))
@@ -745,15 +749,68 @@ pub(crate) struct PaneInputs {
     pub(crate) link_ready: bool,
 }
 
+/// One parent touch per variant: everything a pane row can ask the
+/// root to do (m13 S2b). Emitted by row closures; ChatRoot maps each
+/// to its existing method in `on_pane_event`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PaneEvent {
+    ToggleReaction {
+        room_id: String,
+        msg_id: String,
+        emoji: String,
+    },
+    BeginEdit {
+        room_id: String,
+        msg_id: String,
+        text: String,
+    },
+    CancelEdit,
+    DeleteMessage {
+        room_id: String,
+        msg_id: String,
+    },
+    OpenThread {
+        tmid: String,
+    },
+    QuoteMessage {
+        room_id: String,
+        msg_id: String,
+    },
+    ToggleStar {
+        msg_id: String,
+        starred: bool,
+    },
+    CopyPermalink {
+        room_id: String,
+        msg_id: String,
+    },
+    CopyText {
+        text: String,
+    },
+    ToggleMenu {
+        room_id: String,
+        msg_id: String,
+    },
+    CloseMenu,
+    OpenUserCard {
+        username: String,
+    },
+    CloseUserCard,
+    OpenDm {
+        username: String,
+    },
+}
+
+impl EventEmitter<PaneEvent> for MessagePane {}
+
 /// The virtualized message pane: owns the row model, the list state
 /// and the parse cache (m13 S2a). ChatRoot folds events, then drives
-/// `sync`; render calls `element`/`poll_paging`.
+/// `sync`; render calls `element`/`poll_paging`; row clicks emit
+/// [`PaneEvent`] (m13 S2b).
 pub(crate) struct MessagePane {
-    /// This entity's own handle, read by the list closure.
+    /// This entity's own handle, read by the list closure and used by
+    /// row closures to emit PaneEvent.
     entity: Entity<Self>,
-    /// TEMPORARY (s2a): row closures dispatch through the root's
-    /// existing methods; s2b replaces this with PaneEvent emissions.
-    parent: Entity<ChatRoot>,
     /// Real pane rebuilds (version-guard misses); served over /state
     /// as the runtime half of the S5 regression guard.
     pub(crate) pane_rebuilds: u64,
@@ -782,10 +839,9 @@ pub(crate) struct MessagePane {
 }
 
 impl MessagePane {
-    pub(crate) fn new(parent: Entity<ChatRoot>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         Self {
             entity: cx.entity(),
-            parent,
             pane_rebuilds: 0,
             views: Vec::new(),
             rows: Vec::new(),
@@ -1102,13 +1158,17 @@ impl MessagePane {
                         .into()
                     })
                     .on_click({
-                        let this = self.parent.clone();
+                        let this = self.entity.clone();
                         let room_id = room_id.clone();
                         let msg_id = msg_id.clone();
                         let name = name.clone();
                         move |_, _, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.toggle_reaction(&room_id, &msg_id, &name, cx)
+                            this.update(cx, |_, cx| {
+                                cx.emit(PaneEvent::ToggleReaction {
+                                    room_id: room_id.clone(),
+                                    msg_id: msg_id.clone(),
+                                    emoji: name.clone(),
+                                });
                             });
                         }
                     });
@@ -1126,7 +1186,7 @@ impl MessagePane {
                 )))
             }));
         let thread_pill = view.thread.as_ref().map(|(count, last)| {
-            let this = self.parent.clone();
+            let this = self.entity.clone();
             let tmid = msg_id.clone();
             div()
                 .id(SharedString::from(format!("thread-{msg_id}")))
@@ -1147,9 +1207,8 @@ impl MessagePane {
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(ROW_HOVER)))
                 .on_click(move |_, _, cx| {
-                    this.update(cx, |chat, cx| {
-                        chat.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
-                        cx.notify();
+                    this.update(cx, |_, cx| {
+                        cx.emit(PaneEvent::OpenThread { tmid: tmid.clone() });
                     });
                 })
                 .child(SharedString::from(format!(
@@ -1188,7 +1247,7 @@ impl MessagePane {
                 .aria_label(format!("Open user card for {}", view.sender))
                 .flex_none()
                 .cursor_pointer()
-                .on_click(card_opener(self.parent.clone(), view.sender.clone()))
+                .on_click(card_opener(self.entity.clone(), view.sender.clone()))
                 .child(match view.avatar.as_deref() {
                     Some(path) => img(std::path::PathBuf::from(path))
                         .flex_none()
@@ -1243,7 +1302,7 @@ impl MessagePane {
                                         .cursor_pointer()
                                         .hover(|style| style.text_color(rgb(ACCENT)))
                                         .on_click(card_opener(
-                                            self.parent.clone(),
+                                            self.entity.clone(),
                                             view.sender.clone(),
                                         ))
                                         .child(SharedString::from(view.sender.clone())),
@@ -1256,7 +1315,7 @@ impl MessagePane {
                                 ),
                         )
                     })
-                    .child(message_element(view, inputs.me.as_deref(), &self.parent))
+                    .child(message_element(view, inputs.me.as_deref(), &self.entity))
                     .children(thread_pill)
                     .children(view.file.as_ref().map(|(name, url, size)| {
                         attachment_card(&msg_id, name, url, *size, view.image_path.as_deref())
@@ -1276,7 +1335,7 @@ impl MessagePane {
                     .and_then(|info| info.status.clone())
                     .unwrap_or_else(|| "…".to_owned());
                 let is_me = inputs.me.as_deref() == Some(view.sender.as_str());
-                let this = self.parent.clone();
+                let this = self.entity.clone();
                 let sender = view.sender.clone();
                 row.child(deferred(
                     anchored().anchor(Anchor::TopLeft).child(
@@ -1333,12 +1392,10 @@ impl MessagePane {
                                             let this = this.clone();
                                             let sender = sender.clone();
                                             move |_, _, cx| {
-                                                this.update(cx, |chat, cx| {
-                                                    chat.user_card = None;
-                                                    chat.send_command(ChatCommand::OpenDm {
+                                                this.update(cx, |_, cx| {
+                                                    cx.emit(PaneEvent::OpenDm {
                                                         username: sender.clone(),
                                                     });
-                                                    cx.notify();
                                                 });
                                             }
                                         }),
@@ -1353,9 +1410,8 @@ impl MessagePane {
                                     .hover(|style| style.text_color(rgb(TEXT)))
                                     .child("✕ close")
                                     .on_click(move |_, _, cx| {
-                                        this.update(cx, |chat, cx| {
-                                            chat.user_card = None;
-                                            cx.notify();
+                                        this.update(cx, |_, cx| {
+                                            cx.emit(PaneEvent::CloseUserCard);
                                         });
                                     }),
                             ),
@@ -1363,7 +1419,7 @@ impl MessagePane {
                 ))
             })
             .child(action_strip(ActionContext {
-                this: self.parent.clone(),
+                this: self.entity.clone(),
                 link_ready: inputs.link_ready,
                 menu_open: inputs.open_menu.as_ref() == Some(&(room_id.clone(), msg_id.clone())),
                 room_id,

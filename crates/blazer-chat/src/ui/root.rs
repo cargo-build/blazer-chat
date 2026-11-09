@@ -3,9 +3,9 @@
 //! push commands back.
 
 use gpui::{
-    Anchor, AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, MouseButton,
-    Pixels, Role, ScrollHandle, SharedString, Window, anchored, deferred, div, img, prelude::*, px,
-    rems, rgb, uniform_list, white,
+    Anchor, AnyElement, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight,
+    MouseButton, Pixels, Role, ScrollHandle, SharedString, Window, anchored, deferred, div, img,
+    prelude::*, px, rems, rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +13,7 @@ use async_channel::Sender;
 
 use super::markdown;
 use super::message_pane::{
-    MessagePane, MessageView, PaneInputs, adjacent_grouped, avatar, pretty_time,
+    MessagePane, MessageView, PaneEvent, PaneInputs, adjacent_grouped, avatar, pretty_time,
 };
 use super::{
     ZoomIn, ZoomOut, ZoomReset,
@@ -59,7 +59,7 @@ pub(crate) struct ChatRoot {
 }
 
 impl ChatRoot {
-    pub(crate) fn new(service: ChatService, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(service: ChatService, window: &Window, cx: &mut Context<Self>) -> Self {
         let ChatService {
             events,
             commands,
@@ -110,7 +110,6 @@ impl ChatRoot {
         })
         .detach();
 
-        let handle = cx.entity();
         let composer = cx.new(|cx| TextInput::new("Message…", cx));
         let search_rooms = Vec::new();
         cx.subscribe(&composer, |chat, _, event, cx| match event {
@@ -126,7 +125,13 @@ impl ChatRoot {
         })
         .detach();
         let search = cx.new(|cx| TextInput::new("Search…", cx));
-        let pane = cx.new(|cx| MessagePane::new(handle.clone(), cx));
+        let pane = cx.new(MessagePane::new);
+        // The window routes BeginEdit's composer focus; plain
+        // subscribe has no Window (m13 S2b).
+        cx.subscribe_in(&pane, window, |chat, _, event, window, cx| {
+            chat.on_pane_event(event, window, cx)
+        })
+        .detach();
         cx.subscribe(&search, |chat, _, event, cx| match event {
             TextInputEvent::Submitted => chat.run_search(cx),
             TextInputEvent::Cancelled
@@ -173,6 +178,78 @@ impl ChatRoot {
         self.pane.update(cx, |pane, _| pane.sync(state));
         self.mirror(cx);
         cx.notify();
+    }
+
+    /// Maps pane events back onto the existing methods — the pane
+    /// edge cut (m13 S2b); no ChatRoot method changed its body.
+    fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            PaneEvent::ToggleReaction {
+                room_id,
+                msg_id,
+                emoji,
+            } => self.toggle_reaction(room_id, msg_id, emoji, cx),
+            PaneEvent::BeginEdit {
+                room_id,
+                msg_id,
+                text,
+            } => self.begin_edit(room_id.clone(), msg_id.clone(), text.clone(), window, cx),
+            PaneEvent::CancelEdit => {
+                self.editing = None;
+                cx.notify();
+            }
+            PaneEvent::DeleteMessage { room_id, msg_id } => {
+                self.delete_message(room_id, msg_id, cx)
+            }
+            PaneEvent::OpenThread { tmid } => {
+                self.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
+                cx.notify();
+            }
+            PaneEvent::QuoteMessage { room_id, msg_id } => {
+                self.state.quote = Some((room_id.clone(), msg_id.clone()));
+                cx.notify();
+            }
+            PaneEvent::ToggleStar { msg_id, starred } => {
+                self.toggle_star(msg_id.clone(), *starred, cx);
+            }
+            PaneEvent::CopyPermalink { room_id, msg_id } => {
+                if let Some(link) = self.permalink(room_id, msg_id) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(link));
+                }
+                cx.notify();
+            }
+            PaneEvent::CopyText { text } => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                cx.notify();
+            }
+            PaneEvent::ToggleMenu { room_id, msg_id } => {
+                self.toggle_menu(room_id.clone(), msg_id.clone(), cx);
+            }
+            PaneEvent::CloseMenu => {
+                self.open_menu = None;
+                cx.notify();
+            }
+            PaneEvent::OpenUserCard { username } => {
+                self.user_card = Some(username.clone());
+                if !self.state.user_info.contains_key(username) {
+                    self.send_command(ChatCommand::UserInfo {
+                        username: username.clone(),
+                    });
+                }
+                cx.notify();
+            }
+            PaneEvent::CloseUserCard => {
+                self.user_card = None;
+                cx.notify();
+            }
+            PaneEvent::OpenDm { username } => {
+                self.user_card = None;
+                self.send_command(ChatCommand::OpenDm {
+                    username: username.clone(),
+                });
+                cx.notify();
+            }
+        }
     }
 
     /// Mirrors the entity into the control-socket snapshot. The UI thread
