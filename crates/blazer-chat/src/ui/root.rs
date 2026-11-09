@@ -723,9 +723,19 @@ fn room_hits(query: &str, rooms: &[Room]) -> Vec<(String, String)> {
     }
     rooms
         .iter()
-        .filter(|room| room.name.to_lowercase().contains(&query))
+        .filter(|room| fuzzy_subsequence(&query, &room.name))
         .map(|room| (room.id.clone(), room.name.clone()))
         .collect()
+}
+
+/// Subsequence match — every needle character appears in order in the
+/// haystack (case-insensitive): the spotlight's fuzzy behavior
+/// ("gnrl" finds "general", "cap" finds "capybaras"; m4 search).
+fn fuzzy_subsequence(needle: &str, haystack: &str) -> bool {
+    let needle = needle.to_lowercase();
+    let haystack = haystack.to_lowercase();
+    let mut rest = haystack.chars();
+    needle.chars().all(|c| rest.any(|h| h == c))
 }
 
 impl Focusable for ChatRoot {
@@ -3179,6 +3189,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["d1"],
             "matching is case-insensitive"
+        );
+        assert_eq!(
+            room_hits("gnrl", &rooms)
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["g1"],
+            "fuzzy: subsequence characters in order"
+        );
+        assert!(
+            room_hits("lz", &rooms).is_empty(),
+            "characters must appear in order, not scattered anywhere"
         );
     }
 
