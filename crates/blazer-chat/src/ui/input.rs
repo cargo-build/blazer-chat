@@ -26,15 +26,7 @@ use gpui::{
 };
 use unicode_segmentation::*;
 
-/// Palette shared with the chat view; the values live in
-/// `theme::DARK` (the m9 sweep retires these aliases).
-pub(crate) const PANEL: u32 = super::theme::DARK.panel;
-pub(crate) const TEXT: u32 = super::theme::DARK.text;
-pub(crate) const MUTED: u32 = super::theme::DARK.muted;
-pub(crate) const BORDER: u32 = super::theme::DARK.border;
-pub(crate) const ACCENT: u32 = super::theme::DARK.accent;
-/// One step above the pane background: the hovered message row.
-pub(crate) const ROW_HOVER: u32 = super::theme::DARK.row_hover;
+use super::theme::palette;
 
 /// The composer shows at most this many text rows; longer content stops
 /// growing and scrolls so the cursor stays visible.
@@ -1074,9 +1066,10 @@ impl Element for TextElement {
         let style = window.text_style();
 
         // Placeholder at full opacity but muted: the vendored example's
-        // 20%-black is unreadable on the dark panel (contrast finding).
+        // 20%-black is unreadable on the panel (contrast finding).
+        let p = palette(window.appearance());
         let (display_text, text_color) = if input.content.is_empty() {
-            (input.placeholder.clone(), rgb(MUTED).into())
+            (input.placeholder.clone(), rgb(p.muted).into())
         } else {
             (input.content.clone(), style.color)
         };
@@ -1176,7 +1169,7 @@ impl Element for TextElement {
                     ),
                     size(px(2.), line_height),
                 ),
-                gpui::blue(),
+                rgb(p.accent),
             ));
         }
 
@@ -1333,7 +1326,8 @@ fn selection_quads(
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(window.appearance());
         div()
             .flex()
             .w_full()
@@ -1384,15 +1378,15 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(PANEL))
+            .bg(rgb(p.panel))
             .line_height(px(28.))
             .text_size(px(14.))
-            .text_color(rgb(TEXT))
+            .text_color(rgb(p.text))
             .child(
                 div()
                     .w_full()
                     .p(px(4.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(p.panel))
                     .child(TextElement { input: cx.entity() }),
             )
     }

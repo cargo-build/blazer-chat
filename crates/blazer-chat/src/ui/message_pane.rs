@@ -5,11 +5,11 @@
 use gpui::{
     Anchor, AnyElement, Context, Entity, EventEmitter, FollowMode, FontWeight, Hsla, ListAlignment,
     ListOffset, ListState, Role, SharedString, Window, anchored, deferred, div, hsla, img, list,
-    prelude::*, px, rems, rgb, white,
+    prelude::*, px, rems, rgb,
 };
 
-use super::input::{ACCENT, BORDER, MUTED, PANEL, ROW_HOVER, TEXT};
 use super::markdown::{self, Span};
+use super::theme::Palette;
 use crate::app::{ChatCommand, ChatState};
 use crate::rc::Msg;
 
@@ -169,7 +169,7 @@ pub(crate) fn raw_time(ts: &str) -> String {
 /// emoji images flow with the text.
 /// The sender's initial on a per-user color disc (Rocket.Chat colors
 /// usernames too).
-pub(crate) fn avatar(sender: &str) -> gpui::Div {
+pub(crate) fn avatar(sender: &str, p: Palette) -> gpui::Div {
     let initial = sender
         .chars()
         .next()
@@ -186,7 +186,7 @@ pub(crate) fn avatar(sender: &str) -> gpui::Div {
         .items_center()
         .justify_center()
         .text_sm()
-        .text_color(white())
+        .text_color(rgb(p.accent_fg))
         .child(SharedString::from(initial.to_string()))
 }
 
@@ -220,6 +220,7 @@ pub(crate) fn attachment_card(
     url: &str,
     size: u64,
     image_path: Option<&str>,
+    p: Palette,
 ) -> gpui::Div {
     let extension = name
         .rsplit('.')
@@ -236,9 +237,9 @@ pub(crate) fn attachment_card(
         .gap_1()
         .p_2()
         .rounded_md()
-        .bg(rgb(PANEL))
+        .bg(rgb(p.panel))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(p.border))
         .child(
             div()
                 .flex()
@@ -249,13 +250,13 @@ pub(crate) fn attachment_card(
                         .flex_none()
                         .size(rems(2.5))
                         .rounded_sm()
-                        .bg(rgb(BORDER))
+                        .bg(rgb(p.border))
                         .flex()
                         .items_center()
                         .justify_center()
                         .text_xs()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(p.text))
                         .child(SharedString::from(extension)),
                 )
                 .child(
@@ -268,7 +269,7 @@ pub(crate) fn attachment_card(
                             div()
                                 .id(SharedString::from(format!("file-{msg_id}")))
                                 .text_sm()
-                                .text_color(rgb(ACCENT))
+                                .text_color(rgb(p.accent))
                                 .cursor_pointer()
                                 .hover(|style| style.underline())
                                 .child(SharedString::from(name.to_owned()))
@@ -277,7 +278,7 @@ pub(crate) fn attachment_card(
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(SharedString::from(human_bytes(size))),
                         ),
                 ),
@@ -293,6 +294,7 @@ pub(crate) fn message_element(
     view: &MessageView,
     me: Option<&str>,
     this: &Entity<MessagePane>,
+    p: Palette,
 ) -> gpui::Div {
     let lines: Vec<gpui::Div> = view
         .lines
@@ -302,7 +304,7 @@ pub(crate) fn message_element(
             let mut row = div().flex().flex_wrap().items_center();
             for (span_index, span) in spans.iter().enumerate() {
                 let id = format!("{}-{line_index}-{span_index}", view.id);
-                row = row.child(span_element(span.clone(), me, this, &id));
+                row = row.child(span_element(span.clone(), me, this, &id, p));
             }
             row
         })
@@ -318,6 +320,7 @@ pub(crate) fn span_element(
     me: Option<&str>,
     this: &Entity<MessagePane>,
     id: &str,
+    p: Palette,
 ) -> gpui::AnyElement {
     match span {
         Span::Text {
@@ -340,7 +343,7 @@ pub(crate) fn span_element(
             if code {
                 element = element
                     .font_family("monospace")
-                    .bg(rgb(0x1c2430))
+                    .bg(rgb(p.code_bg))
                     .px_1()
                     .rounded_sm();
             }
@@ -350,9 +353,9 @@ pub(crate) fn span_element(
             .id(SharedString::from(format!("lnk-{id}")))
             .text_sm()
             .underline()
-            .text_color(rgb(ACCENT))
+            .text_color(rgb(p.accent))
             .cursor_pointer()
-            .hover(|style| style.text_color(white()))
+            .hover(|style| style.text_color(rgb(p.accent_fg)))
             .on_click({
                 let url = url.clone();
                 move |_: &gpui::ClickEvent, _: &mut gpui::Window, _: &mut gpui::App| {
@@ -370,9 +373,11 @@ pub(crate) fn span_element(
                 .px_1()
                 .rounded_xs()
                 .cursor_pointer()
-                .when(mine, |pill| pill.bg(rgb(ACCENT)).text_color(white()))
-                .when(!mine, |pill| pill.text_color(rgb(ACCENT)))
-                .hover(|style| style.bg(rgb(ROW_HOVER)))
+                .when(mine, |pill| {
+                    pill.bg(rgb(p.accent)).text_color(rgb(p.accent_fg))
+                })
+                .when(!mine, |pill| pill.text_color(rgb(p.accent)))
+                .hover(|style| style.bg(rgb(p.row_hover)))
                 .on_click(card_opener(this.clone(), name.clone()))
                 .child(SharedString::from(name))
                 .into_any_element()
@@ -387,9 +392,9 @@ pub(crate) fn span_element(
         Span::CodeBlock { body } => div()
             .font_family("monospace")
             .text_sm()
-            .bg(rgb(0x121820))
+            .bg(rgb(p.input_bg))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(p.border))
             .rounded_sm()
             .px_2()
             .py_1()
@@ -455,7 +460,7 @@ pub(crate) struct ActionContext {
 /// The hover-revealed per-message actions: react, edit, delete. The strip
 /// is invisible until its row (`group("msg")`) is hovered; the row being
 /// edited also shows a cancel button.
-pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
+pub(crate) fn action_strip(actions: ActionContext, p: Palette) -> gpui::Div {
     let ActionContext {
         this,
         room_id,
@@ -473,7 +478,7 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
             .px_1()
             .rounded_xs()
             .text_xs()
-            .text_color(rgb(MUTED))
+            .text_color(rgb(p.muted))
             .cursor_pointer()
             .child(label)
     };
@@ -575,9 +580,9 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
                 .py_1()
                 .rounded_xs()
                 .text_xs()
-                .text_color(rgb(TEXT))
+                .text_color(rgb(p.text))
                 .cursor_pointer()
-                .hover(|style| style.bg(rgb(ROW_HOVER)))
+                .hover(|style| style.bg(rgb(p.row_hover)))
                 .child(label)
         };
         deferred(
@@ -589,9 +594,9 @@ pub(crate) fn action_strip(actions: ActionContext) -> gpui::Div {
                     .min_w(px(150.0))
                     .p_1()
                     .gap_0p5()
-                    .bg(rgb(PANEL))
+                    .bg(rgb(p.panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .rounded_md()
                     .shadow_lg()
                     .child(item("💬 Start a Discussion", "m-thread").on_click({
@@ -715,19 +720,23 @@ pub(crate) fn human_bytes(size: u64) -> String {
 /// The hover card over a reaction pill: who reacted.
 pub(crate) struct ReactionTooltip {
     pub(crate) text: SharedString,
+    /// The palette captured at construction (the tooltip re-renders
+    /// with its row's frame, m9).
+    pub(crate) palette: Palette,
 }
 
 impl gpui::Render for ReactionTooltip {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        let p = self.palette;
         div()
             .px_2()
             .py_1()
             .rounded_md()
-            .bg(rgb(PANEL))
+            .bg(rgb(p.panel))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(p.border))
             .text_xs()
-            .text_color(rgb(TEXT))
+            .text_color(rgb(p.text))
             .max_w(px(280.0))
             .child(self.text.clone())
     }
@@ -747,6 +756,8 @@ pub(crate) struct PaneInputs {
     pub(crate) user_card_info: Option<(String, crate::rc::UserInfo)>,
     /// The active room supports permalinks (channels/groups; not DMs).
     pub(crate) link_ready: bool,
+    /// The window's palette for this frame (m9 appearance plumbing).
+    pub(crate) palette: Palette,
 }
 
 /// One parent touch per variant: everything a pane row can ask the
@@ -1064,7 +1075,7 @@ impl MessagePane {
     }
 
     /// The accent divider marking the first unread message (m12 F1).
-    fn unread_marker(&self, _view_index: usize) -> AnyElement {
+    fn unread_marker(&self, _view_index: usize, p: Palette) -> AnyElement {
         let label = "Unread messages";
         div()
             .id("unread-divider")
@@ -1074,20 +1085,20 @@ impl MessagePane {
             .gap_2()
             .px_2()
             .py_1()
-            .child(div().flex_1().h(px(1.0)).bg(rgb(ACCENT)))
+            .child(div().flex_1().h(px(1.0)).bg(rgb(p.accent)))
             .child(
                 div()
                     .flex_none()
                     .text_xs()
-                    .text_color(rgb(ACCENT))
+                    .text_color(rgb(p.accent))
                     .child(label),
             )
-            .child(div().flex_1().h(px(1.0)).bg(rgb(ACCENT)))
+            .child(div().flex_1().h(px(1.0)).bg(rgb(p.accent)))
             .into_any_element()
     }
 
     /// A centered day divider between messages of different dates.
-    fn day_separator(&self, day_ts: &str) -> AnyElement {
+    fn day_separator(&self, day_ts: &str, p: Palette) -> AnyElement {
         div()
             .id(SharedString::from(format!("day-{day_ts}")))
             .role(Role::Heading)
@@ -1099,14 +1110,14 @@ impl MessagePane {
             .gap_2()
             .px_2()
             .py_1()
-            .child(div().flex_1().h(px(1.0)).bg(rgb(BORDER)))
+            .child(div().flex_1().h(px(1.0)).bg(rgb(p.border)))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child(SharedString::from(pretty_day(day_ts))),
             )
-            .child(div().flex_1().h(px(1.0)).bg(rgb(BORDER)))
+            .child(div().flex_1().h(px(1.0)).bg(rgb(p.border)))
             .into_any_element()
     }
 
@@ -1124,6 +1135,7 @@ impl MessagePane {
         grouped: bool,
         inputs: &PaneInputs,
     ) -> AnyElement {
+        let p = inputs.palette;
         let room_id = view.room_id.clone();
         let msg_id = view.id.clone();
         let edit_text = view.text.clone();
@@ -1151,14 +1163,15 @@ impl MessagePane {
                     .px_1p5()
                     .rounded_full()
                     .border_1()
-                    .border_color(rgb(if mine { ACCENT } else { BORDER }))
-                    .bg(rgb(if mine { ROW_HOVER } else { PANEL }))
+                    .border_color(rgb(if mine { p.accent } else { p.border }))
+                    .bg(rgb(if mine { p.row_hover } else { p.panel }))
                     .text_xs()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .cursor_pointer()
                     .tooltip(move |_, app| {
                         app.new(|_| ReactionTooltip {
                             text: SharedString::from(names.clone()),
+                            palette: p,
                         })
                         .into()
                     })
@@ -1204,13 +1217,13 @@ impl MessagePane {
                 .px_2()
                 .py_0p5()
                 .rounded_md()
-                .bg(rgb(PANEL))
+                .bg(rgb(p.panel))
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(p.border))
                 .text_xs()
-                .text_color(rgb(MUTED))
+                .text_color(rgb(p.muted))
                 .cursor_pointer()
-                .hover(|style| style.bg(rgb(ROW_HOVER)))
+                .hover(|style| style.bg(rgb(p.row_hover)))
                 .on_click(move |_, _, cx| {
                     this.update(cx, |_, cx| {
                         cx.emit(PaneEvent::OpenThread { tmid: tmid.clone() });
@@ -1234,7 +1247,7 @@ impl MessagePane {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(p.muted))
                         .child(SharedString::from(view.text.clone())),
                 )
                 .into_any_element();
@@ -1259,7 +1272,7 @@ impl MessagePane {
                         .size(rems(2.0))
                         .rounded_full()
                         .into_any_element(),
-                    None => avatar(&view.sender).into_any_element(),
+                    None => avatar(&view.sender, p).into_any_element(),
                 })
                 .into_any_element()
         };
@@ -1283,7 +1296,7 @@ impl MessagePane {
             .px_2()
             .py_1()
             .rounded_md()
-            .hover(|style| style.bg(rgb(ROW_HOVER)))
+            .hover(|style| style.bg(rgb(p.row_hover)))
             .child(lead)
             .child(
                 div()
@@ -1303,9 +1316,9 @@ impl MessagePane {
                                         .id(SharedString::from(format!("cardname-{msg_id}")))
                                         .text_sm()
                                         .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(p.text))
                                         .cursor_pointer()
-                                        .hover(|style| style.text_color(rgb(ACCENT)))
+                                        .hover(|style| style.text_color(rgb(p.accent)))
                                         .on_click(card_opener(
                                             self.entity.clone(),
                                             view.sender.clone(),
@@ -1315,15 +1328,15 @@ impl MessagePane {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(p.muted))
                                         .child(SharedString::from(view.ts.clone())),
                                 ),
                         )
                     })
-                    .child(message_element(view, inputs.me.as_deref(), &self.entity))
+                    .child(message_element(view, inputs.me.as_deref(), &self.entity, p))
                     .children(thread_pill)
                     .children(view.file.as_ref().map(|(name, url, size)| {
-                        attachment_card(&msg_id, name, url, *size, view.image_path.as_deref())
+                        attachment_card(&msg_id, name, url, *size, view.image_path.as_deref(), p)
                     }))
                     .child(badges),
             )
@@ -1351,9 +1364,9 @@ impl MessagePane {
                             .min_w(px(170.0))
                             .p_2()
                             .gap_1()
-                            .bg(rgb(PANEL))
+                            .bg(rgb(p.panel))
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(p.border))
                             .rounded_md()
                             .shadow_lg()
                             .child(
@@ -1361,7 +1374,7 @@ impl MessagePane {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(avatar(&view.sender))
+                                    .child(avatar(&view.sender, p))
                                     .child(
                                         div()
                                             .flex()
@@ -1372,7 +1385,7 @@ impl MessagePane {
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .child(SharedString::from(name)),
                                             )
-                                            .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                            .child(div().text_xs().text_color(rgb(p.muted)).child(
                                                 SharedString::from(format!(
                                                     "@{} · {status}",
                                                     view.sender
@@ -1389,9 +1402,9 @@ impl MessagePane {
                                         .py_1()
                                         .rounded_xs()
                                         .text_xs()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(p.text))
                                         .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(ROW_HOVER)))
+                                        .hover(|style| style.bg(rgb(p.row_hover)))
                                         .child("✉ Send DM")
                                         .on_click({
                                             let this = this.clone();
@@ -1410,9 +1423,9 @@ impl MessagePane {
                                 div()
                                     .id("card-close")
                                     .text_xs()
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(p.muted))
                                     .cursor_pointer()
-                                    .hover(|style| style.text_color(rgb(TEXT)))
+                                    .hover(|style| style.text_color(rgb(p.text)))
                                     .child("✕ close")
                                     .on_click(move |_, _, cx| {
                                         this.update(cx, |_, cx| {
@@ -1423,16 +1436,20 @@ impl MessagePane {
                     ),
                 ))
             })
-            .child(action_strip(ActionContext {
-                this: self.entity.clone(),
-                link_ready: inputs.link_ready,
-                menu_open: inputs.open_menu.as_ref() == Some(&(room_id.clone(), msg_id.clone())),
-                room_id,
-                msg_id,
-                edit_text,
-                editing_this,
-                starred: view.starred,
-            }))
+            .child(action_strip(
+                ActionContext {
+                    this: self.entity.clone(),
+                    link_ready: inputs.link_ready,
+                    menu_open: inputs.open_menu.as_ref()
+                        == Some(&(room_id.clone(), msg_id.clone())),
+                    room_id,
+                    msg_id,
+                    edit_text,
+                    editing_this,
+                    starred: view.starred,
+                },
+                p,
+            ))
             .into_any_element()
     }
 
@@ -1443,9 +1460,10 @@ impl MessagePane {
         let inputs = std::rc::Rc::new(inputs.clone());
         list(self.messages_list.clone(), move |ix, _window, cx| {
             let pane = entity.read(cx);
+            let p = inputs.palette;
             match pane.rows.get(ix) {
-                Some(PaneRow::Separator { day_ts }) => pane.day_separator(day_ts),
-                Some(PaneRow::UnreadMarker { view_index }) => pane.unread_marker(*view_index),
+                Some(PaneRow::Separator { day_ts }) => pane.day_separator(day_ts, p),
+                Some(PaneRow::UnreadMarker { view_index }) => pane.unread_marker(*view_index, p),
                 Some(PaneRow::Message {
                     view_index,
                     grouped,

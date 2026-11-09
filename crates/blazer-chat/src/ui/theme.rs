@@ -2,10 +2,11 @@
 //! painted through `rgb(u32)` like the rest of the crate. Contrast
 //! pairs are asserted in tests against WCAG 2.1 relative luminance.
 
+use gpui::WindowAppearance;
+
 /// The window's colors as named u32 RGB values; `Copy` so render
-/// inputs carry it by value. The `dead_code` expectations hold until
-/// the m9 sweep wires the remaining fields in.
-#[derive(Clone, Copy)]
+/// inputs carry it by value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Palette {
     pub(crate) bg: u32,
     pub(crate) panel: u32,
@@ -14,23 +15,15 @@ pub(crate) struct Palette {
     pub(crate) text: u32,
     pub(crate) muted: u32,
     pub(crate) accent: u32,
-    #[expect(dead_code)]
     /// Text painted on `accent` surfaces (selected chips, badges).
     pub(crate) accent_fg: u32,
-    #[expect(dead_code)]
     /// Error text, mention badges, logout.
     pub(crate) danger: u32,
-    #[expect(dead_code)]
     pub(crate) online: u32,
-    #[expect(dead_code)]
     pub(crate) away: u32,
-    /// Only the contrast test reads `busy` before the m9 sweep.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) busy: u32,
-    #[expect(dead_code)]
     /// Inline code block background.
     pub(crate) code_bg: u32,
-    #[expect(dead_code)]
     /// Message input surface.
     pub(crate) input_bg: u32,
 }
@@ -54,6 +47,34 @@ pub(crate) const DARK: Palette = Palette {
     code_bg: 0x1c2430,
     input_bg: 0x121820,
 };
+
+/// The light counterpart, designed to WCAG AA: every text pair ≥ 4.5:1
+/// and both border pairs ≥ 3:1 (ratios in the m9 report).
+pub(crate) const LIGHT: Palette = Palette {
+    bg: 0xffffff,
+    panel: 0xf6f8fa,
+    row_hover: 0xeaeef2,
+    border: 0x656d76,
+    text: 0x1f2328,
+    muted: 0x59636e,
+    accent: 0x0865cd,
+    accent_fg: 0xffffff,
+    danger: 0xcf222e,
+    online: 0x1a7f37,
+    away: 0x9a6700,
+    busy: 0xcf222e,
+    code_bg: 0xeff2f6,
+    input_bg: 0xfafbfc,
+};
+
+/// The palette for the window's current appearance; the Vibrant
+/// variants map with their base appearance.
+pub(crate) fn palette(appearance: WindowAppearance) -> Palette {
+    match appearance {
+        WindowAppearance::Light | WindowAppearance::VibrantLight => LIGHT,
+        WindowAppearance::Dark | WindowAppearance::VibrantDark => DARK,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -81,6 +102,22 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
+    fn assert_aa(fg: u32, surface: u32) {
+        let ratio = contrast(fg, surface);
+        assert!(
+            ratio >= 4.5,
+            "{fg:#06x} on {surface:#06x}: {ratio:.2} < 4.5"
+        );
+    }
+
+    fn assert_ui(fg: u32, surface: u32) {
+        let ratio = contrast(fg, surface);
+        assert!(
+            ratio >= 3.0,
+            "{fg:#06x} on {surface:#06x}: {ratio:.2} < 3.0"
+        );
+    }
+
     #[test]
     fn theme_dark_border_holds_against_both_surfaces() {
         let vs_bg = contrast(DARK.border, DARK.bg);
@@ -99,5 +136,43 @@ mod tests {
             vs_bg >= 4.5 && vs_panel >= 4.5,
             "busy status must pass AA text on bg and panel: {vs_bg:.2}/{vs_panel:.2}"
         );
+    }
+
+    #[test]
+    fn theme_light_text_holds_aa_on_every_surface() {
+        for surface in [LIGHT.bg, LIGHT.panel, LIGHT.row_hover] {
+            assert_aa(LIGHT.text, surface);
+            assert_aa(LIGHT.muted, surface);
+            assert_aa(LIGHT.accent, surface);
+        }
+        assert_aa(LIGHT.text, LIGHT.code_bg);
+        assert_aa(LIGHT.text, LIGHT.input_bg);
+        for surface in [LIGHT.bg, LIGHT.panel] {
+            assert_aa(LIGHT.busy, surface);
+        }
+        assert_aa(LIGHT.accent_fg, LIGHT.accent);
+        assert_aa(LIGHT.danger, LIGHT.bg);
+        assert_aa(LIGHT.online, LIGHT.bg);
+        assert_aa(LIGHT.away, LIGHT.bg);
+    }
+
+    #[test]
+    fn theme_light_border_holds_against_both_surfaces() {
+        assert_ui(LIGHT.border, LIGHT.bg);
+        assert_ui(LIGHT.border, LIGHT.panel);
+    }
+
+    #[test]
+    fn theme_palette_maps_both_appearances() {
+        assert!(matches!(
+            palette(WindowAppearance::Light),
+            Palette { bg: 0xffffff, .. }
+        ));
+        assert!(matches!(
+            palette(WindowAppearance::VibrantLight),
+            Palette { bg: 0xffffff, .. }
+        ));
+        assert_eq!(palette(WindowAppearance::Dark), DARK);
+        assert_eq!(palette(WindowAppearance::VibrantDark), DARK);
     }
 }

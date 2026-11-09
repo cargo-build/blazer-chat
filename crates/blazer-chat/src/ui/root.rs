@@ -5,7 +5,7 @@
 use gpui::{
     Anchor, AnyElement, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight,
     MouseButton, Pixels, Role, ScrollHandle, SharedString, Window, anchored, deferred, div, img,
-    prelude::*, px, rems, rgb, uniform_list, white,
+    prelude::*, px, rems, rgb, uniform_list,
 };
 use std::sync::{Arc, Mutex};
 
@@ -15,14 +15,13 @@ use super::markdown;
 use super::message_pane::{
     MessagePane, MessageView, PaneEvent, PaneInputs, adjacent_grouped, avatar, pretty_time,
 };
+use super::theme::{Palette, palette};
 use super::{
     ZoomIn, ZoomOut, ZoomReset,
-    input::{ACCENT, BORDER, MUTED, PANEL, ROW_HOVER, Suggest, TEXT, TextInput, TextInputEvent},
+    input::{Suggest, TextInput, TextInputEvent},
 };
 use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
 use crate::rc::{Msg, Room};
-
-const BG: u32 = super::theme::DARK.bg;
 
 /// The one window's root view.
 pub(crate) struct ChatRoot {
@@ -56,6 +55,9 @@ pub(crate) struct ChatRoot {
     emoji_picker_open: bool,
     /// The top-bar avatar menu is open.
     user_menu_open: bool,
+    /// Colors for the window's current appearance; the m9 appearance
+    /// observer swaps it and re-renders on a live switch.
+    palette: Palette,
 }
 
 impl ChatRoot {
@@ -150,6 +152,19 @@ impl ChatRoot {
             | TextInputEvent::EditNext => {}
         })
         .detach();
+        // A live appearance switch swaps the palette and re-renders the
+        // window (m9): the pane rides PaneInputs, the composer reads
+        // `window.appearance()` per frame.
+        let this = cx.entity();
+        window
+            .observe_window_appearance(move |window, cx| {
+                let p = palette(window.appearance());
+                this.update(cx, |chat, cx| {
+                    chat.palette = p;
+                    cx.notify();
+                });
+            })
+            .detach();
         Self {
             state: ChatState::default(),
             commands,
@@ -169,6 +184,7 @@ impl ChatRoot {
             user_card: None,
             emoji_picker_open: false,
             user_menu_open: false,
+            palette: palette(window.appearance()),
         }
     }
 
@@ -740,7 +756,7 @@ fn side_entries(rooms: &[Room]) -> Vec<SideEntry> {
 /// the tallest, so the header rides the same 48 px row the rooms use
 /// — the label sits at its bottom edge like the original's sticky
 /// headers.
-fn section_row(label: &'static str) -> AnyElement {
+fn section_row(label: &'static str, p: Palette) -> AnyElement {
     div()
         .h(px(48.0))
         .flex()
@@ -752,7 +768,7 @@ fn section_row(label: &'static str) -> AnyElement {
             div()
                 .text_xs()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(MUTED))
+                .text_color(rgb(p.muted))
                 .child(label),
         )
         .into_any_element()
@@ -763,6 +779,7 @@ fn panel(
     subtitle: Option<&str>,
     content: impl IntoElement,
     width: Option<Pixels>,
+    p: Palette,
 ) -> impl IntoElement {
     // A fixed-width panel must not carry flex_1's zero basis: build the
     // sizing first, then the common chrome.
@@ -775,9 +792,9 @@ fn panel(
         .flex_col()
         .gap_2()
         .p_3()
-        .bg(rgb(PANEL))
+        .bg(rgb(p.panel))
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(p.border))
         .rounded_md()
         .child(
             div()
@@ -788,13 +805,13 @@ fn panel(
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(p.text))
                         .child(title.to_owned()),
                 )
                 .children(subtitle.map(|subtitle| {
                     div()
                         .text_xs()
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(p.muted))
                         .truncate()
                         .child(SharedString::from(subtitle.to_owned()))
                 })),
@@ -804,6 +821,7 @@ fn panel(
 
 impl gpui::Render for ChatRoot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
         let who = self
             .state
             .username
@@ -813,7 +831,7 @@ impl gpui::Render for ChatRoot {
             row.child(
                 div()
                     .text_sm()
-                    .text_color(gpui::red())
+                    .text_color(rgb(p.danger))
                     .child(format!("error: {message}")),
             )
         });
@@ -827,10 +845,11 @@ impl gpui::Render for ChatRoot {
         let room_count = entries.len();
         let rooms = uniform_list("rooms", room_count, move |range, _window, cx| {
             let root = this.read(cx);
+            let p = root.palette;
 
             range
                 .map(|index| match entries[index] {
-                    SideEntry::Section(label) => section_row(label),
+                    SideEntry::Section(label) => section_row(label, p),
                     SideEntry::Room(room_index) => {
                         let room = &root.state.rooms[room_index];
                         let room_id = room.id.clone();
@@ -846,9 +865,9 @@ impl gpui::Render for ChatRoot {
                                     .py_1()
                                     .rounded_xs()
                                     .text_xs()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(ROW_HOVER)))
+                                    .hover(|style| style.bg(rgb(p.row_hover)))
                                     .child(label)
                             };
                             deferred(
@@ -860,9 +879,9 @@ impl gpui::Render for ChatRoot {
                                         .min_w(px(150.0))
                                         .p_1()
                                         .gap_0p5()
-                                        .bg(rgb(PANEL))
+                                        .bg(rgb(p.panel))
                                         .border_1()
-                                        .border_color(rgb(BORDER))
+                                        .border_color(rgb(p.border))
                                         .rounded_md()
                                         .shadow_lg()
                                         .child(item("🚩 Mark Unread", "r-unread").on_click({
@@ -910,9 +929,9 @@ impl gpui::Render for ChatRoot {
                             .text_sm()
                             .overflow_hidden()
                             .cursor_pointer()
-                            .when(selected, |row| row.bg(rgb(ACCENT)))
+                            .when(selected, |row| row.bg(rgb(p.accent)))
                             .when(selected, |row| row.aria_selected(true))
-                            .hover(|style| style.bg(rgb(BORDER)))
+                            .hover(|style| style.bg(rgb(p.border)))
                             .on_click({
                                 let this = this.clone();
                                 let room_id = room_id.clone();
@@ -956,7 +975,7 @@ impl gpui::Render for ChatRoot {
                                                 div()
                                                     .flex_none()
                                                     .text_xs()
-                                                    .text_color(rgb(MUTED))
+                                                    .text_color(rgb(p.muted))
                                                     .child(SharedString::from(pretty_time(ts)))
                                             }))
                                             .when(unread > 0, |line| {
@@ -965,7 +984,7 @@ impl gpui::Render for ChatRoot {
                                                         .flex_none()
                                                         .px_1()
                                                         .rounded_xs()
-                                                        .bg(rgb(ACCENT))
+                                                        .bg(rgb(p.accent))
                                                         .text_xs()
                                                         .child(SharedString::from(
                                                             unread.to_string(),
@@ -978,9 +997,9 @@ impl gpui::Render for ChatRoot {
                                                         .flex_none()
                                                         .px_1()
                                                         .rounded_xs()
-                                                        .bg(gpui::red())
+                                                        .bg(rgb(p.danger))
                                                         .text_xs()
-                                                        .text_color(white())
+                                                        .text_color(rgb(p.accent_fg))
                                                         .child(SharedString::from(format!(
                                                             "@{}",
                                                             room.mentions
@@ -993,7 +1012,7 @@ impl gpui::Render for ChatRoot {
                                             .min_w_0()
                                             .truncate()
                                             .text_xs()
-                                            .text_color(rgb(MUTED))
+                                            .text_color(rgb(p.muted))
                                             .child(SharedString::from(format!("{sender}: {text}")))
                                     })),
                             )
@@ -1032,6 +1051,7 @@ impl gpui::Render for ChatRoot {
                 .as_deref()
                 .and_then(|room| self.permalink(room, ""))
                 .is_some(),
+            palette: p,
         };
         let messages = self.pane.read(cx).element(&pane_inputs);
 
@@ -1056,11 +1076,11 @@ impl gpui::Render for ChatRoot {
                         .px_2()
                         .py_1p5()
                         .rounded_md()
-                        .bg(rgb(PANEL))
+                        .bg(rgb(p.panel))
                         .border_1()
-                        .border_color(rgb(ACCENT))
+                        .border_color(rgb(p.accent))
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(ROW_HOVER)))
+                        .hover(|style| style.bg(rgb(p.row_hover)))
                         .on_click({
                             let this = this.clone();
                             move |_, _, cx| {
@@ -1082,13 +1102,13 @@ impl gpui::Render for ChatRoot {
                                     div()
                                         .text_sm()
                                         .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(p.text))
                                         .child(SharedString::from(note.title.clone())),
                                 )
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(p.muted))
                                         .truncate()
                                         .child(SharedString::from(body)),
                                 ),
@@ -1100,9 +1120,9 @@ impl gpui::Render for ChatRoot {
                                 .px_1()
                                 .rounded_xs()
                                 .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(TEXT)))
+                                .hover(|style| style.bg(rgb(p.border)).text_color(rgb(p.text)))
                                 .child("✖")
                                 .on_click({
                                     let this = this.clone();
@@ -1130,7 +1150,7 @@ impl gpui::Render for ChatRoot {
                         .flex_1()
                         .min_w_0()
                         .border_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(p.border))
                         .rounded_md()
                         .child(self.search.clone()),
                 )
@@ -1141,12 +1161,12 @@ impl gpui::Render for ChatRoot {
                         .aria_label("Search rooms")
                         .px_3()
                         .py_1()
-                        .bg(rgb(PANEL))
+                        .bg(rgb(p.panel))
                         .border_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(p.border))
                         .rounded_md()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(ACCENT)))
+                        .hover(|style| style.bg(rgb(p.accent)))
                         .child("🔍")
                         .on_click(move |_, _, cx| {
                             search_this.update(cx, |chat, cx| chat.run_search(cx));
@@ -1204,10 +1224,10 @@ impl gpui::Render for ChatRoot {
                         .px_2()
                         .py_0p5()
                         .rounded_xs()
-                        .bg(rgb(PANEL))
+                        .bg(rgb(p.panel))
                         .text_sm()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(ACCENT)))
+                        .hover(|style| style.bg(rgb(p.accent)))
                         .child("← thread")
                         .on_click(move |_, _, cx| {
                             this.update(cx, |chat, cx| {
@@ -1247,7 +1267,7 @@ impl gpui::Render for ChatRoot {
                         .flex()
                         .gap_2()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(ACCENT)))
+                        .hover(|style| style.bg(rgb(p.accent)))
                         .on_click(move |_, _, cx| {
                             this.update(cx, |chat, cx| {
                                 chat.open_room(room_id.clone(), cx);
@@ -1262,14 +1282,14 @@ impl gpui::Render for ChatRoot {
                             div()
                                 .text_sm()
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(p.text))
                                 .child(SharedString::from(format!("# {name}"))),
                         )
                         .child(
                             div()
                                 .flex_1()
                                 .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child("Jump to room"),
                         )
                         .into_any_element()
@@ -1285,7 +1305,7 @@ impl gpui::Render for ChatRoot {
                         .flex()
                         .gap_2()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(BORDER)))
+                        .hover(|style| style.bg(rgb(p.border)))
                         .on_click(move |_, _, cx| {
                             this.update(cx, |chat, cx| {
                                 chat.open_room(room_id.clone(), cx);
@@ -1303,14 +1323,14 @@ impl gpui::Render for ChatRoot {
                             div()
                                 .flex_none()
                                 .text_sm()
-                                .text_color(rgb(ACCENT))
+                                .text_color(rgb(p.accent))
                                 .child(SharedString::from(hit.room.clone())),
                         )
                         .child(
                             div()
                                 .flex_none()
                                 .text_sm()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(SharedString::from(hit.sender.clone())),
                         )
                         .child(
@@ -1357,7 +1377,7 @@ impl gpui::Render for ChatRoot {
                 rows.push(
                     div()
                         .text_sm()
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(p.muted))
                         .child("Nothing pinned in this room yet.")
                         .into_any_element(),
                 );
@@ -1377,7 +1397,7 @@ impl gpui::Render for ChatRoot {
                         .rounded_xs()
                         .text_sm()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(BORDER)))
+                        .hover(|style| style.bg(rgb(p.border)))
                         .child("← 📌 Pinned messages")
                         .on_click({
                             let this = this.clone();
@@ -1429,7 +1449,7 @@ impl gpui::Render for ChatRoot {
                         .rounded_xs()
                         .text_sm()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(BORDER)))
+                        .hover(|style| style.bg(rgb(p.border)))
                         .child("← ℹ️ Room info")
                         .on_click({
                             let this = search_this.clone();
@@ -1447,9 +1467,9 @@ impl gpui::Render for ChatRoot {
                         .flex_col()
                         .gap_2()
                         .p_3()
-                        .bg(rgb(PANEL))
+                        .bg(rgb(p.panel))
                         .border_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(p.border))
                         .rounded_md()
                         .child(
                             div().text_sm().font_weight(FontWeight::MEDIUM).child(
@@ -1462,13 +1482,13 @@ impl gpui::Render for ChatRoot {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(SharedString::from(kind_label)),
                         )
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(p.text))
                                 .child(SharedString::from(
                                     room.and_then(|room| room.topic.clone())
                                         .unwrap_or_else(|| "No topic set.".to_owned()),
@@ -1495,7 +1515,7 @@ impl gpui::Render for ChatRoot {
                 .size(rems(2.0))
                 .rounded_full()
                 .into_any_element(),
-            None => avatar(&me).into_any_element(),
+            None => avatar(&me, p).into_any_element(),
         };
         let status_item =
             |dot: u32, label: &'static str, key: &'static str, taken: Entity<ChatRoot>| {
@@ -1508,9 +1528,9 @@ impl gpui::Render for ChatRoot {
                     .py_1()
                     .rounded_xs()
                     .text_sm()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgb(ROW_HOVER)))
+                    .hover(|style| style.bg(rgb(p.row_hover)))
                     .child(div().size(px(10.0)).rounded_full().bg(rgb(dot)))
                     .child(label)
                     .on_click(move |_, _, cx| {
@@ -1535,9 +1555,9 @@ impl gpui::Render for ChatRoot {
                         .min_w(px(220.0))
                         .p_1()
                         .gap_0p5()
-                        .bg(rgb(PANEL))
+                        .bg(rgb(p.panel))
                         .border_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(p.border))
                         .rounded_md()
                         .shadow_lg()
                         .child(
@@ -1551,9 +1571,10 @@ impl gpui::Render for ChatRoot {
                                         .size(rems(2.5))
                                         .rounded_full()
                                         .into_any_element(),
-                                    None => {
-                                        div().size(rems(2.5)).child(avatar(&me)).into_any_element()
-                                    }
+                                    None => div()
+                                        .size(rems(2.5))
+                                        .child(avatar(&me, p))
+                                        .into_any_element(),
                                 })
                                 .child(
                                     div()
@@ -1563,10 +1584,10 @@ impl gpui::Render for ChatRoot {
                                             div()
                                                 .text_sm()
                                                 .font_weight(FontWeight::MEDIUM)
-                                                .text_color(rgb(TEXT))
+                                                .text_color(rgb(p.text))
                                                 .child(SharedString::from(me.clone())),
                                         )
-                                        .child(div().text_xs().text_color(rgb(MUTED)).child(
+                                        .child(div().text_xs().text_color(rgb(p.muted)).child(
                                             SharedString::from(match presence.as_deref() {
                                                 Some(status) => status.to_owned(),
                                                 None => "online".to_owned(),
@@ -1581,12 +1602,12 @@ impl gpui::Render for ChatRoot {
                                 .pb_0p5()
                                 .text_xs()
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child("Status"),
                         )
-                        .child(status_item(0x2f9e44, "online", "online", this_bar.clone()))
-                        .child(status_item(0xe8b30f, "away", "away", this_bar.clone()))
-                        .child(status_item(0xe03131, "busy", "busy", this_bar.clone()))
+                        .child(status_item(p.online, "online", "online", this_bar.clone()))
+                        .child(status_item(p.away, "away", "away", this_bar.clone()))
+                        .child(status_item(p.busy, "busy", "busy", this_bar.clone()))
                         .child(
                             div()
                                 .px_2()
@@ -1594,7 +1615,7 @@ impl gpui::Render for ChatRoot {
                                 .pb_0p5()
                                 .text_xs()
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child("Account"),
                         )
                         .child(
@@ -1607,9 +1628,9 @@ impl gpui::Render for ChatRoot {
                                 .py_1()
                                 .rounded_xs()
                                 .text_sm()
-                                .text_color(rgb(0xe03131))
+                                .text_color(rgb(p.danger))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(ROW_HOVER)))
+                                .hover(|style| style.bg(rgb(p.row_hover)))
                                 .child("⎋ Log out")
                                 .on_click({
                                     let this = this_bar.clone();
@@ -1635,15 +1656,15 @@ impl gpui::Render for ChatRoot {
                     .gap_3()
                     .px_3()
                     .py_2()
-                    .bg(rgb(PANEL))
+                    .bg(rgb(p.panel))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .rounded_md()
                     .child(
                         div()
                             .text_lg()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .child("blazer-chat"),
                     )
                     .child(div().flex_1())
@@ -1661,7 +1682,7 @@ impl gpui::Render for ChatRoot {
                                 .rounded_xs()
                                 .text_sm()
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(BORDER)))
+                                .hover(|style| style.bg(rgb(p.border)))
                                 .child("📌")
                                 .on_click({
                                     let this = this_bar.clone();
@@ -1700,7 +1721,7 @@ impl gpui::Render for ChatRoot {
                                 .rounded_xs()
                                 .text_sm()
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(BORDER)))
+                                .hover(|style| style.bg(rgb(p.border)))
                                 .child("ℹ️")
                                 .on_click({
                                     let this = this_bar.clone();
@@ -1717,7 +1738,7 @@ impl gpui::Render for ChatRoot {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(p.muted))
                             .pr_1()
                             .child(SharedString::from(me.clone())),
                     )
@@ -1764,11 +1785,11 @@ impl gpui::Render for ChatRoot {
                         .text_xs()
                         .cursor_pointer()
                         .when(index == suggest.selected, |chip| {
-                            chip.bg(rgb(ACCENT)).text_color(white())
+                            chip.bg(rgb(p.accent)).text_color(rgb(p.accent_fg))
                         })
                         .when(index != suggest.selected, |chip| {
-                            chip.text_color(rgb(TEXT))
-                                .hover(|style| style.bg(rgb(ROW_HOVER)))
+                            chip.text_color(rgb(p.text))
+                                .hover(|style| style.bg(rgb(p.row_hover)))
                         })
                         .child(SharedString::from(label))
                         .on_click(
@@ -1788,9 +1809,9 @@ impl gpui::Render for ChatRoot {
                 .flex_none()
                 .p_1()
                 .gap_0p5()
-                .bg(rgb(PANEL))
+                .bg(rgb(p.panel))
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(p.border))
                 .rounded_md()
                 .shadow_lg()
                 .children(chips)
@@ -1812,9 +1833,9 @@ impl gpui::Render for ChatRoot {
                 } else {
                     FontWeight::MEDIUM
                 })
-                .text_color(rgb(MUTED))
+                .text_color(rgb(p.muted))
                 .cursor_pointer()
-                .hover(|style| style.bg(rgb(BORDER)))
+                .hover(|style| style.bg(rgb(p.border)))
                 .child(label)
                 .on_click({
                     let composer = composer.clone();
@@ -1830,9 +1851,9 @@ impl gpui::Render for ChatRoot {
             .px_1p5()
             .rounded_xs()
             .text_xs()
-            .text_color(rgb(MUTED))
+            .text_color(rgb(p.muted))
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(BORDER)))
+            .hover(|style| style.bg(rgb(p.border)))
             .child("😊")
             .on_click({
                 let this = cx.entity();
@@ -1855,7 +1876,7 @@ impl gpui::Render for ChatRoot {
                     .text_lg()
                     .cursor_pointer()
                     .rounded_xs()
-                    .hover(|style| style.bg(rgb(ROW_HOVER)))
+                    .hover(|style| style.bg(rgb(p.row_hover)))
                     .child(*glyph)
                     .on_click(
                         move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
@@ -1879,9 +1900,9 @@ impl gpui::Render for ChatRoot {
                         .w(px(230.0))
                         .p_1()
                         .gap_0p5()
-                        .bg(rgb(PANEL))
+                        .bg(rgb(p.panel))
                         .border_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(p.border))
                         .rounded_md()
                         .shadow_lg()
                         .children(picker_rows),
@@ -1939,15 +1960,15 @@ impl gpui::Render for ChatRoot {
                         .gap_2()
                         .px_2()
                         .py_1()
-                        .bg(rgb(PANEL))
+                        .bg(rgb(p.panel))
                         .border_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(p.border))
                         .rounded_md()
                         .child(
                             div()
                                 .flex_none()
                                 .text_sm()
-                                .text_color(rgb(ACCENT))
+                                .text_color(rgb(p.accent))
                                 .child("↩"),
                         )
                         .child(
@@ -1956,7 +1977,7 @@ impl gpui::Render for ChatRoot {
                                 .flex_1()
                                 .truncate()
                                 .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(SharedString::from(label)),
                         )
                         .child(
@@ -1965,9 +1986,9 @@ impl gpui::Render for ChatRoot {
                                 .flex_none()
                                 .px_1()
                                 .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .cursor_pointer()
-                                .hover(|style| style.text_color(rgb(TEXT)))
+                                .hover(|style| style.text_color(rgb(p.text)))
                                 .child("✕")
                                 .on_click({
                                     let this = cx.entity();
@@ -1989,8 +2010,8 @@ impl gpui::Render for ChatRoot {
             .size_full()
             .p_4()
             .gap_3()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(p.bg))
+            .text_color(rgb(p.text))
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
@@ -2003,7 +2024,7 @@ impl gpui::Render for ChatRoot {
                     .flex_1()
                     .min_h_0()
                     .gap_3()
-                    .child(panel("rooms", None, rooms, Some(px(240.0))))
+                    .child(panel("rooms", None, rooms, Some(px(240.0)), p))
                     .child(panel(
                         &pane_title,
                         self.state
@@ -2015,6 +2036,7 @@ impl gpui::Render for ChatRoot {
                             .and_then(|room| room.topic.as_deref()),
                         div().flex().flex_1().min_h_0().child(toasts).child(pane),
                         None,
+                        p,
                     )),
             )
             .child(
@@ -2039,13 +2061,13 @@ impl gpui::Render for ChatRoot {
                                     .flex_none()
                                     .px_2()
                                     .py_1()
-                                    .bg(rgb(PANEL))
+                                    .bg(rgb(p.panel))
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(rgb(p.border))
                                     .rounded_md()
                                     .text_sm()
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(ACCENT)))
+                                    .hover(|style| style.bg(rgb(p.accent)))
                                     .child("📎")
                                     .on_click(cx.listener(|chat, _, _, _cx| {
                                         let tx = chat.pick_tx.clone();
@@ -2068,12 +2090,12 @@ impl gpui::Render for ChatRoot {
                                     })
                                     .px_3()
                                     .py_1()
-                                    .bg(rgb(PANEL))
+                                    .bg(rgb(p.panel))
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(rgb(p.border))
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(ACCENT)))
+                                    .hover(|style| style.bg(rgb(p.accent)))
                                     .active(|style| style.opacity(0.85))
                                     .on_click(cx.listener(|chat, _, _, cx| chat.send_message(cx)))
                                     .child(match self.editing.is_some() {
