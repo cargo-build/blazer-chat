@@ -30,6 +30,10 @@ use unicode_segmentation::*;
 pub(crate) const PANEL: u32 = 0x1a212b;
 pub(crate) const TEXT: u32 = 0xe8eaed;
 pub(crate) const MUTED: u32 = 0x93a4bc;
+pub(crate) const BORDER: u32 = 0x394354;
+pub(crate) const ACCENT: u32 = 0x4f8cff;
+/// One step above the pane background: the hovered message row.
+pub(crate) const ROW_HOVER: u32 = 0x1a2230;
 
 /// The composer shows at most this many text rows; longer content stops
 /// growing and scrolls so the cursor stays visible.

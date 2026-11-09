@@ -4,6 +4,7 @@
 
 mod input;
 mod markdown;
+mod message_pane;
 mod root;
 
 use gpui::{

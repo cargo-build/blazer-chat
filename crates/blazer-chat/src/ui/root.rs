@@ -3,33 +3,32 @@
 //! push commands back.
 
 use gpui::{
-    Anchor, AnyElement, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode,
-    FontWeight, Hsla, ListAlignment, ListOffset, ListState, MouseButton, Pixels, Role,
-    ScrollHandle, SharedString, Window, anchored, deferred, div, hsla, img, list, prelude::*, px,
-    rems, rgb, uniform_list, white,
+    Anchor, AnyElement, Context, Entity, FocusHandle, Focusable, FollowMode, FontWeight,
+    ListAlignment, ListOffset, ListState, MouseButton, Pixels, Role, ScrollHandle, SharedString,
+    Window, anchored, deferred, div, img, list, prelude::*, px, rems, rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
 use async_channel::Sender;
 
-use super::markdown::{self, Span};
+use super::markdown;
+use super::message_pane::{
+    ActionContext, MessageView, PaneRow, ReactionTooltip, RowChange, action_strip,
+    adjacent_grouped, attachment_card, avatar, card_opener, classify_row_change, display_emoji,
+    local_day, message_element, pretty_day, pretty_time,
+};
 use super::{
     ZoomIn, ZoomOut, ZoomReset,
-    input::{MUTED, PANEL, Suggest, TextInput, TextInputEvent},
+    input::{ACCENT, BORDER, MUTED, PANEL, ROW_HOVER, Suggest, TEXT, TextInput, TextInputEvent},
 };
 use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
 use crate::rc::{Msg, Room};
 
 const BG: u32 = 0x11151c;
-const BORDER: u32 = 0x394354;
-const TEXT: u32 = 0xe8eaed;
-const ACCENT: u32 = 0x4f8cff;
-/// One step above the pane background: the hovered message row.
-const ROW_HOVER: u32 = 0x1a2230;
 
 /// The one window's root view.
 pub(crate) struct ChatRoot {
-    state: ChatState,
+    pub(crate) state: ChatState,
     commands: Sender<ChatCommand>,
     snapshot: Arc<Mutex<Option<UiSnapshot>>>,
     /// Real pane rebuilds (version-guard misses); served over /state
@@ -45,7 +44,7 @@ pub(crate) struct ChatRoot {
     /// Local search box (the pane shows results while a query is set).
     search: Entity<TextInput>,
     /// `(room_id, msg_id)` while the composer edits an existing message.
-    editing: Option<(String, String)>,
+    pub(crate) editing: Option<(String, String)>,
     thread_scroll: ScrollHandle,
     results_scroll: ScrollHandle,
     /// The pane's rows: messages interleaved with day separators,
@@ -59,13 +58,13 @@ pub(crate) struct ChatRoot {
     /// This entity's own handle for row-closure callbacks.
     handle: Entity<ChatRoot>,
     /// The row whose labeled action menu is open `(room_id, msg_id)`.
-    open_menu: Option<(String, String)>,
+    pub(crate) open_menu: Option<(String, String)>,
     /// The room whose right-click context menu is open (m12 F5).
     room_menu: Option<String>,
     /// The room-info panel toggle (header ℹ️, m12 F7).
     show_info: bool,
     /// The username whose user card is open (m12 F8).
-    user_card: Option<String>,
+    pub(crate) user_card: Option<String>,
     /// The emoji picker popover is open (m12 F9).
     emoji_picker_open: bool,
     /// The top-bar avatar menu is open.
@@ -85,36 +84,6 @@ pub(crate) struct ChatRoot {
     paged_since_top: bool,
     /// Room whose messages the scroll handle last re-pinned.
     pinned_room: Option<String>,
-}
-
-/// One precomputed message row of the active room: the pane renders
-/// these without re-parsing markdown per frame.
-struct MessageView {
-    id: String,
-    system: bool,
-    room_id: String,
-    ts: String,
-    sender: String,
-    /// Raw text — the edit action puts it back into the composer.
-    text: String,
-    lines: std::sync::Arc<Vec<Vec<Span>>>,
-    reactions: Vec<(String, crate::rc::Reaction)>,
-    /// `(name, url, size)` when the message carries an uploaded file.
-    file: Option<(String, String, u64)>,
-    /// Cached preview path for image attachments.
-    image_path: Option<String>,
-    /// Cached avatar path for the sender; initials render as fallback.
-    avatar: Option<String>,
-    /// `(reply count, formatted last reply)` when this message starts a
-    /// thread.
-    thread: Option<(u32, String)>,
-    /// Starred by the logged-in user (menu shows "Remove Star").
-    starred: bool,
-    /// UTC date (YYYY-MM-DD); the pane inserts day separators between
-    /// different dates.
-    day: String,
-    /// Raw server timestamp for the grouping window.
-    ts_raw: String,
 }
 
 impl ChatRoot {
@@ -502,7 +471,7 @@ impl ChatRoot {
 
     /// Queues a command; a full queue is a bug-scale backlog, so the
     /// drop is loud (m10 bounded-channel policy).
-    fn send_command(&self, command: ChatCommand) {
+    pub(crate) fn send_command(&self, command: ChatCommand) {
         if let Err(error) = self.commands.try_send(command) {
             eprintln!("blazer-chat: command queue full, dropped: {error}");
         }
@@ -671,7 +640,7 @@ impl ChatRoot {
     /// Rocket.Chat reactions are emoji NAMES on the wire (`+1`, `tada`,
     /// …); the unicode glyph is display-only.
     /// Opens or closes one row's labeled action menu.
-    fn toggle_menu(&mut self, room_id: String, msg_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_menu(&mut self, room_id: String, msg_id: String, cx: &mut Context<Self>) {
         self.open_menu = match self.open_menu.as_ref() {
             Some(open) if open.0 == room_id && open.1 == msg_id => None,
             _ => Some((room_id, msg_id)),
@@ -681,7 +650,7 @@ impl ChatRoot {
 
     /// Stars or unstars a message through the server; the fold applies
     /// the flip locally.
-    fn toggle_star(&mut self, msg_id: String, starred: bool, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_star(&mut self, msg_id: String, starred: bool, cx: &mut Context<Self>) {
         self.send_command(ChatCommand::StarMessage {
             msg_id,
             star: !starred,
@@ -693,7 +662,7 @@ impl ChatRoot {
     /// The original client's permalink:
     /// `{origin}/{channel|group}/{room name}/msg/{id}` — channels and
     /// groups only (DM links address the peer, which rooms don't carry).
-    fn permalink(&self, room_id: &str, msg_id: &str) -> Option<String> {
+    pub(crate) fn permalink(&self, room_id: &str, msg_id: &str) -> Option<String> {
         let origin = self.state.origin.as_deref()?;
         let room = self.state.rooms.iter().find(|room| room.id == room_id)?;
         let path = match room.kind {
@@ -728,7 +697,7 @@ impl ChatRoot {
         cx.notify();
     }
 
-    fn toggle_reaction(
+    pub(crate) fn toggle_reaction(
         &mut self,
         room_id: &str,
         msg_id: &str,
@@ -745,7 +714,7 @@ impl ChatRoot {
 
     /// Puts a message back into the composer for editing; the next
     /// submit sends `chat.update` instead of a new message.
-    fn begin_edit(
+    pub(crate) fn begin_edit(
         &mut self,
         room_id: String,
         msg_id: String,
@@ -781,7 +750,7 @@ impl ChatRoot {
         cx.notify();
     }
 
-    fn delete_message(&mut self, room_id: &str, msg_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn delete_message(&mut self, room_id: &str, msg_id: &str, cx: &mut Context<Self>) {
         self.send_command(ChatCommand::DeleteMessage {
             room_id: room_id.to_owned(),
             msg_id: msg_id.to_owned(),
@@ -2577,358 +2546,6 @@ impl gpui::Render for ChatRoot {
     }
 }
 
-/// One message body: the text split into lines (newlines preserved), each
-/// line parsed into markdown spans and laid out as a wrapping row so inline
-/// emoji images flow with the text.
-/// The sender's initial on a per-user color disc (Rocket.Chat colors
-/// usernames too).
-fn avatar(sender: &str) -> gpui::Div {
-    let initial = sender
-        .chars()
-        .next()
-        .unwrap_or('?')
-        .to_uppercase()
-        .next()
-        .unwrap_or('?');
-    div()
-        .flex_none()
-        .size(rems(2.0))
-        .rounded_full()
-        .bg(user_color(sender))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_sm()
-        .text_color(white())
-        .child(SharedString::from(initial.to_string()))
-}
-
-/// Deterministic per-sender accent from the name itself.
-fn user_color(sender: &str) -> Hsla {
-    let hash = sender.bytes().fold(5381u32, |acc, byte| {
-        acc.wrapping_mul(33).wrapping_add(u32::from(byte))
-    });
-    hsla((hash % 360) as f32, 0.55, 0.62, 1.0)
-}
-
-/// The wire's emoji names (`+1`) render as their unicode glyphs
-/// (Rocket.Chat's canonical names); unknown names stay as-is.
-fn display_emoji(name: &str) -> String {
-    match name {
-        "+1" => "👍".to_owned(),
-        "-1" => "👎".to_owned(),
-        "smile" => "😄".to_owned(),
-        "tada" => "🎉".to_owned(),
-        "heart" => "❤️".to_owned(),
-        "eyes" => "👀".to_owned(),
-        other => other.to_owned(),
-    }
-}
-
-/// Consecutive-grouping window: same sender within five minutes.
-/// How the pane's row list changed across a rebuild: identity of the
-/// boundary views decides, not counts alone (deepseek S5 T5).
-#[derive(Debug, PartialEq, Eq)]
-enum RowChange {
-    Same,
-    /// Grew at the tail (new message): `usize` rows added.
-    Appended(usize),
-    /// Grew at the head (load-older): `usize` rows added.
-    Prepended(usize),
-    /// Anything else — reset and restore the anchor by identity.
-    Reshaped,
-}
-
-fn classify_row_change(
-    old_len: usize,
-    old_first: Option<&str>,
-    old_last: Option<&str>,
-    new_len: usize,
-    new_first: Option<&str>,
-    new_last: Option<&str>,
-) -> RowChange {
-    match old_len.cmp(&new_len) {
-        // Equal length still hides a mid-list edit/delete+add: when a
-        // boundary identity moved, the anchor must re-derive.
-        std::cmp::Ordering::Equal => {
-            if old_first == new_first && old_last == new_last {
-                RowChange::Same
-            } else {
-                RowChange::Reshaped
-            }
-        }
-        std::cmp::Ordering::Greater => RowChange::Reshaped,
-        std::cmp::Ordering::Less => {
-            let added = new_len - old_len;
-            // Growing from empty is an append: splice(0..len) would
-            // shift the anchor of an empty viewport for nothing.
-            if old_first == new_first || old_first.is_none() {
-                RowChange::Appended(added)
-            } else if old_last == new_last {
-                RowChange::Prepended(added)
-            } else {
-                RowChange::Reshaped
-            }
-        }
-    }
-}
-
-/// Two adjacent views collapse into one compact row: same non-system
-/// sender on the same day within five minutes.
-fn adjacent_grouped(previous: &MessageView, view: &MessageView) -> bool {
-    !previous.system
-        && !view.system
-        && previous.sender == view.sender
-        && previous.day == view.day
-        && within_five_minutes(&previous.ts_raw, &view.ts_raw)
-}
-
-fn within_five_minutes(prev: &str, next: &str) -> bool {
-    match (
-        prev.parse::<jiff::Timestamp>(),
-        next.parse::<jiff::Timestamp>(),
-    ) {
-        (Ok(a), Ok(b)) => b < a + std::time::Duration::from_secs(5 * 60),
-        _ => false,
-    }
-}
-
-/// The human day for a separator: `November 7`.
-/// The message's local calendar day (`YYYY-MM-DD`): grouping and the
-/// label use the same zoned value, so west-of-UTC users see their own
-/// dates instead of a UTC day over local timestamps.
-fn local_day(ts: &str) -> String {
-    ts.parse::<jiff::Timestamp>()
-        .map(|stamp| {
-            stamp
-                .to_zoned(jiff::tz::TimeZone::system())
-                .date()
-                .to_string()
-        })
-        .unwrap_or_else(|_| ts.split('T').next().unwrap_or(ts).to_owned())
-}
-
-fn pretty_day(ts: &str) -> String {
-    match ts.parse::<jiff::Timestamp>() {
-        Ok(stamp) => stamp
-            .to_zoned(jiff::tz::TimeZone::system())
-            .strftime("%B %-d")
-            .to_string(),
-        Err(_) => ts.split('T').next().unwrap_or(ts).to_owned(),
-    }
-}
-
-/// `2026-11-07T20:32:00.514Z` → `8:32 PM` in the machine's local zone;
-/// unparsable stamps degrade to the raw time part.
-fn pretty_time(ts: &str) -> String {
-    pretty_time_in(ts, &jiff::tz::TimeZone::system())
-}
-
-/// The same formatting against an explicit zone (tests pin offsets).
-fn pretty_time_in(ts: &str, tz: &jiff::tz::TimeZone) -> String {
-    let Ok(stamp) = ts.parse::<jiff::Timestamp>() else {
-        return raw_time(ts);
-    };
-    let local = stamp.to_zoned(tz.clone());
-    let (hour, suffix) = match local.hour() {
-        0 => (12, "AM"),
-        hour @ 1..=11 => (hour, "AM"),
-        12 => (12, "PM"),
-        hour => (hour - 12, "PM"),
-    };
-    format!("{hour}:{:02} {suffix}", local.minute())
-}
-
-/// The unparsable-stamp fallback: the raw time component.
-fn raw_time(ts: &str) -> String {
-    ts.split_once('T')
-        .map(|(_, time)| time.to_owned())
-        .unwrap_or_else(|| ts.to_owned())
-}
-
-/// One attachment as a card: type tile, name link, size — with the
-/// fetched image inline when cached (the original client's look).
-fn attachment_card(
-    msg_id: &str,
-    name: &str,
-    url: &str,
-    size: u64,
-    image_path: Option<&str>,
-) -> gpui::Div {
-    let extension = name
-        .rsplit('.')
-        .next()
-        .filter(|_| name.contains('.'))
-        .unwrap_or("file")
-        .to_uppercase();
-    let url = url.to_owned();
-    div()
-        .mt_0p5()
-        .max_w(rems(26.25))
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_2()
-        .rounded_md()
-        .bg(rgb(PANEL))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_none()
-                        .size(rems(2.5))
-                        .rounded_sm()
-                        .bg(rgb(BORDER))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_xs()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(TEXT))
-                        .child(SharedString::from(extension)),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("file-{msg_id}")))
-                                .text_sm()
-                                .text_color(rgb(ACCENT))
-                                .cursor_pointer()
-                                .hover(|style| style.underline())
-                                .child(SharedString::from(name.to_owned()))
-                                .on_click(move |_, _, cx| cx.open_url(&url)),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(MUTED))
-                                .child(SharedString::from(human_bytes(size))),
-                        ),
-                ),
-        )
-        .children(image_path.map(|path| {
-            img(std::path::PathBuf::from(path))
-                .max_w(rems(25.0))
-                .rounded_sm()
-        }))
-}
-
-fn message_element(view: &MessageView, me: Option<&str>, this: &Entity<ChatRoot>) -> gpui::Div {
-    let lines: Vec<gpui::Div> = view
-        .lines
-        .iter()
-        .enumerate()
-        .map(|(line_index, spans)| {
-            let mut row = div().flex().flex_wrap().items_center();
-            for (span_index, span) in spans.iter().enumerate() {
-                let id = format!("{}-{line_index}-{span_index}", view.id);
-                row = row.child(span_element(span.clone(), me, this, &id));
-            }
-            row
-        })
-        .collect();
-    div().flex().flex_col().children(lines)
-}
-
-/// One span as an inline element; links open in the browser,
-/// mentions highlight the own name and open the user's card (m12
-/// D3). `id` makes the clickable spans stateful and unique.
-fn span_element(
-    span: Span,
-    me: Option<&str>,
-    this: &Entity<ChatRoot>,
-    id: &str,
-) -> gpui::AnyElement {
-    match span {
-        Span::Text {
-            text,
-            bold,
-            italic,
-            code,
-            strike,
-        } => {
-            let mut element = div().text_sm().child(SharedString::from(text));
-            if bold {
-                element = element.font_weight(FontWeight::BOLD);
-            }
-            if italic {
-                element = element.italic();
-            }
-            if strike {
-                element = element.line_through();
-            }
-            if code {
-                element = element
-                    .font_family("monospace")
-                    .bg(rgb(0x1c2430))
-                    .px_1()
-                    .rounded_sm();
-            }
-            element.into_any_element()
-        }
-        Span::Link { label, url } => div()
-            .id(SharedString::from(format!("lnk-{id}")))
-            .text_sm()
-            .underline()
-            .text_color(rgb(ACCENT))
-            .cursor_pointer()
-            .hover(|style| style.text_color(white()))
-            .on_click({
-                let url = url.clone();
-                move |_: &gpui::ClickEvent, _: &mut gpui::Window, _: &mut gpui::App| {
-                    open_url(&url);
-                }
-            })
-            .child(SharedString::from(label))
-            .into_any_element(),
-        Span::Mention(name) => {
-            let mine = name.strip_prefix('@') == me;
-            div()
-                .id(SharedString::from(format!("mnt-{id}")))
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .px_1()
-                .rounded_xs()
-                .cursor_pointer()
-                .when(mine, |pill| pill.bg(rgb(ACCENT)).text_color(white()))
-                .when(!mine, |pill| pill.text_color(rgb(ACCENT)))
-                .hover(|style| style.bg(rgb(ROW_HOVER)))
-                .on_click(card_opener(this.clone(), name.clone()))
-                .child(SharedString::from(name))
-                .into_any_element()
-        }
-        Span::Emoji { path } => div()
-            .child(
-                img(std::path::PathBuf::from(&path))
-                    .h(rems(1.125))
-                    .w(rems(1.125)),
-            )
-            .into_any_element(),
-        Span::CodeBlock { body } => div()
-            .font_family("monospace")
-            .text_sm()
-            .bg(rgb(0x121820))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .rounded_sm()
-            .px_2()
-            .py_1()
-            .min_w_0()
-            .child(SharedString::from(body.clone()))
-            .into_any_element(),
-    }
-}
-
 /// The word ending at `caret`, if it starts with `@` or `:` — the
 /// completion token (m12 F10). Returns the token's start (the sigil
 /// included), the sigil and the query after it.
@@ -2947,448 +2564,10 @@ fn completion_token(text: &str, caret: usize) -> Option<(usize, char, String)> {
     (sigil == '@' || sigil == ':').then(|| (start, sigil, token[1..].to_owned()))
 }
 
-/// The click handler opening a user's card — avatars, sender names
-/// and mention pills (m12 D3/F8); unknown users fetch their card
-/// data on the first open.
-fn card_opener(
-    this: Entity<ChatRoot>,
-    name: String,
-) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static {
-    move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
-        this.update(cx, |chat, cx| {
-            chat.user_card = Some(name.clone());
-            if !chat.state.user_info.contains_key(&name) {
-                chat.send_command(ChatCommand::UserInfo {
-                    username: name.clone(),
-                });
-            }
-            cx.notify();
-        });
-    }
-}
-
-/// Opens a link in the system browser; the spawn is fire-and-forget
-/// (m12 D3).
-fn open_url(url: &str) {
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-}
-
-/// What a message row's action buttons need at click time.
-/// One virtualized pane row: a message or a day divider.
-enum PaneRow {
-    Separator {
-        day_ts: String,
-    },
-    UnreadMarker {
-        view_index: usize,
-    },
-    /// `grouped` is computed once per rebuild from view adjacency, not
-    /// per frame (m10 S4).
-    Message {
-        view_index: usize,
-        grouped: bool,
-    },
-}
-
-struct ActionContext {
-    this: Entity<ChatRoot>,
-    room_id: String,
-    msg_id: String,
-    edit_text: String,
-    editing_this: bool,
-    /// This row's labeled menu is open.
-    menu_open: bool,
-    /// Starred by me (menu label flips).
-    starred: bool,
-    /// The room supports permalinks (channels/groups; not DMs).
-    link_ready: bool,
-}
-
-/// The hover-revealed per-message actions: react, edit, delete. The strip
-/// is invisible until its row (`group("msg")`) is hovered; the row being
-/// edited also shows a cancel button.
-fn action_strip(actions: ActionContext) -> gpui::Div {
-    let ActionContext {
-        this,
-        room_id,
-        msg_id,
-        edit_text,
-        editing_this,
-        menu_open,
-        starred,
-        link_ready,
-    } = actions;
-
-    let button = |label: &'static str, suffix: &'static str| {
-        div()
-            .id(SharedString::from(format!("{suffix}-{msg_id}")))
-            .px_1()
-            .rounded_xs()
-            .text_xs()
-            .text_color(rgb(MUTED))
-            .cursor_pointer()
-            .child(label)
-    };
-
-    // The original client's quick-reaction set; wire names, glyphs for
-    // display.
-    let quick = [
-        ("👍", "+1"),
-        ("👎", "-1"),
-        ("😄", "smile"),
-        ("🎉", "tada"),
-        ("👀", "eyes"),
-    ];
-    let react = div()
-        .flex()
-        .gap_1()
-        .children(quick.iter().map(|(glyph, name)| {
-            let this = this.clone();
-            let room_id = room_id.clone();
-            let msg_id = msg_id.clone();
-            let name = *name;
-            button(glyph, "react").on_click(move |_, _, cx| {
-                this.update(cx, |chat, cx| {
-                    chat.toggle_reaction(&room_id, &msg_id, name, cx)
-                });
-            })
-        }));
-    let edit = button("✏", "edit").on_click({
-        let this = this.clone();
-        let room_id = room_id.clone();
-        let msg_id = msg_id.clone();
-        let edit_text = edit_text.clone();
-        move |_, window, cx| {
-            this.update(cx, |chat, cx| {
-                chat.begin_edit(
-                    room_id.clone(),
-                    msg_id.clone(),
-                    edit_text.clone(),
-                    window,
-                    cx,
-                );
-            });
-        }
-    });
-    let thread = button("🧵", "thread").on_click({
-        let this = this.clone();
-        let tmid = msg_id.clone();
-        move |_, _, cx| {
-            this.update(cx, |chat, cx| {
-                chat.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
-                cx.notify();
-            });
-        }
-    });
-    let delete = button("🗑", "delete").on_click({
-        let this = this.clone();
-        let room_id = room_id.clone();
-        let msg_id = msg_id.clone();
-        move |_, _, cx| {
-            this.update(cx, |chat, cx| chat.delete_message(&room_id, &msg_id, cx));
-        }
-    });
-
-    // The original's labeled action menu (Start a Discussion / Star /
-    // Copy link / Copy text / Edit): gpui 0.2.2 has no anchored popover,
-    // so the ⋮ toggles an in-flow card in the strip.
-    let kebab = button("⋮", "menu").on_click({
-        let this = this.clone();
-        let room_id = room_id.clone();
-        let msg_id = msg_id.clone();
-        move |_, _, cx| {
-            this.update(cx, |chat, cx| {
-                chat.toggle_menu(room_id.clone(), msg_id.clone(), cx)
-            });
-        }
-    });
-    // The labeled menu renders in a floating layer anchored to the
-    // strip (SwitchAnchor keeps it inside the window) — no layout
-    // shift, nothing painted while closed.
-    let menu = menu_open.then(|| {
-        let star_label = if starred {
-            "☆ Remove Star"
-        } else {
-            "⭐ Star Message"
-        };
-        let item = |label: &'static str, suffix: &'static str| {
-            div()
-                .id(SharedString::from(format!("{suffix}-{msg_id}")))
-                .px_2()
-                .py_1()
-                .rounded_xs()
-                .text_xs()
-                .text_color(rgb(TEXT))
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(ROW_HOVER)))
-                .child(label)
-        };
-        deferred(
-            anchored().anchor(Anchor::TopLeft).child(
-                div()
-                    .occlude()
-                    .flex()
-                    .flex_col()
-                    .min_w(px(150.0))
-                    .p_1()
-                    .gap_0p5()
-                    .bg(rgb(PANEL))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .rounded_md()
-                    .shadow_lg()
-                    .child(item("💬 Start a Discussion", "m-thread").on_click({
-                        let this = this.clone();
-                        let tmid = msg_id.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.open_menu = None;
-                                chat.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
-                                cx.notify();
-                            });
-                        }
-                    }))
-                    .child(item("↩ Quote", "m-quote").on_click({
-                        let this = this.clone();
-                        let room_id = room_id.clone();
-                        let msg_id = msg_id.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.open_menu = None;
-                                chat.state.quote = Some((room_id.clone(), msg_id.clone()));
-                                cx.notify();
-                            });
-                        }
-                    }))
-                    .child(item(star_label, "m-star").on_click({
-                        let this = this.clone();
-                        let msg_id = msg_id.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.toggle_star(msg_id.clone(), starred, cx)
-                            });
-                        }
-                    }))
-                    .when(link_ready, |menu| {
-                        menu.child(item("🔗 Copy Link", "m-link").on_click({
-                            let this = this.clone();
-                            let room_id = room_id.clone();
-                            let msg_id = msg_id.clone();
-                            move |_, _, cx| {
-                                this.update(cx, |chat, cx| {
-                                    chat.open_menu = None;
-                                    if let Some(link) = chat.permalink(&room_id, &msg_id) {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(link));
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                        }))
-                    })
-                    .child(item("📋 Copy Text", "m-copy").on_click({
-                        let this = this.clone();
-                        let text = edit_text.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.open_menu = None;
-                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                                cx.notify();
-                            });
-                        }
-                    }))
-                    .child(item("✏ Edit", "m-edit").on_click({
-                        let this = this.clone();
-                        let room_id = room_id.clone();
-                        let msg_id = msg_id.clone();
-                        let edit_text = edit_text.clone();
-                        move |_, window, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.open_menu = None;
-                                chat.begin_edit(
-                                    room_id.clone(),
-                                    msg_id.clone(),
-                                    edit_text.clone(),
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }
-                    })),
-            ),
-        )
-        .into_any_element()
-    });
-
-    div()
-        .flex_none()
-        .flex()
-        .gap_1()
-        .opacity(0.)
-        .group_hover("msg", |style| style.opacity(1.))
-        .when(editing_this || menu_open, |strip| strip.opacity(1.))
-        .child(react)
-        .child(edit)
-        .child(thread)
-        .child(delete)
-        .child(kebab)
-        .children(menu)
-        .when(editing_this, |strip| {
-            strip.child(button("✖", "cancel").on_click({
-                let this = this.clone();
-                move |_, _, cx| {
-                    this.update(cx, |chat, cx| {
-                        chat.editing = None;
-                        cx.notify();
-                    });
-                }
-            }))
-        })
-}
-
-/// Sizes in human units for attachment chips.
-fn human_bytes(size: u64) -> String {
-    match size {
-        0 => "0 B".to_owned(),
-        size if size < 1024 => format!("{size} B"),
-        size if size < 1024 * 1024 => format!("{:.1} KB", size as f64 / 1024.0),
-        size => format!("{:.1} MB", size as f64 / (1024.0 * 1024.0)),
-    }
-}
-
-/// The hover card over a reaction pill: who reacted.
-struct ReactionTooltip {
-    text: SharedString,
-}
-
-impl gpui::Render for ReactionTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .text_xs()
-            .text_color(rgb(TEXT))
-            .max_w(px(280.0))
-            .child(self.text.clone())
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // tests assert the expected path
 mod tests {
     use super::*;
-
-    #[test]
-    fn row_change_classifies_by_boundary_identity() {
-        let (f, l) = (Some("a"), Some("z"));
-        // Same boundary views: append at the tail.
-        assert_eq!(
-            classify_row_change(3, f, l, 4, f, Some("y")),
-            RowChange::Appended(1)
-        );
-        // Same tail view: prepend at the head.
-        assert_eq!(
-            classify_row_change(3, f, l, 5, Some("p"), l),
-            RowChange::Prepended(2)
-        );
-        // Both boundaries moved: reshape even at the same length.
-        assert_eq!(
-            classify_row_change(3, f, l, 3, Some("p"), Some("y")),
-            RowChange::Reshaped
-        );
-        // Same length and boundaries: no change.
-        assert_eq!(classify_row_change(3, f, l, 3, f, l), RowChange::Same);
-        // Shrinks are reshapes (delete) — never classified as growth.
-        assert_eq!(
-            classify_row_change(4, f, l, 2, Some("p"), Some("y")),
-            RowChange::Reshaped
-        );
-        // Empty to filled: append from a missing old first.
-        assert_eq!(
-            classify_row_change(0, None, None, 2, Some("a"), Some("b")),
-            RowChange::Appended(2)
-        );
-    }
-
-    #[test]
-    fn adjacent_grouped_needs_same_sender_day_and_recency() {
-        let base = |sender: &str, day: &str, ts: &str| MessageView {
-            id: format!("m-{sender}-{ts}"),
-            system: false,
-            room_id: "r".to_owned(),
-            ts: ts.to_owned(),
-            sender: sender.to_owned(),
-            text: String::new(),
-            lines: Default::default(),
-            reactions: Vec::new(),
-            file: None,
-            image_path: None,
-            avatar: None,
-            thread: None,
-            starred: false,
-            day: day.to_owned(),
-            ts_raw: ts.to_owned(),
-        };
-        let a = base("alice", "2026-11-09", "2026-11-09T10:00:00Z");
-        let b = base("alice", "2026-11-09", "2026-11-09T10:04:00Z");
-        assert!(adjacent_grouped(&a, &b), "four minutes apart groups");
-        let far = base("alice", "2026-11-09", "2026-11-09T10:06:00Z");
-        assert!(!adjacent_grouped(&a, &far), "six minutes does not");
-        let other = base("bob", "2026-11-09", "2026-11-09T10:01:00Z");
-        assert!(!adjacent_grouped(&a, &other), "other sender does not");
-        let new_day = base("alice", "2026-11-10", "2026-11-10T09:00:00Z");
-        assert!(!adjacent_grouped(&a, &new_day), "new day does not");
-        // System rows never group — neither as the previous row nor as
-        // the view (m12 F2).
-        let mut system_previous = base("alice", "2026-11-09", "2026-11-09T10:01:00Z");
-        system_previous.system = true;
-        assert!(
-            !adjacent_grouped(&system_previous, &b),
-            "a system previous row does not group"
-        );
-        let mut system_view = base("alice", "2026-11-09", "2026-11-09T10:02:00Z");
-        system_view.system = true;
-        assert!(
-            !adjacent_grouped(&a, &system_view),
-            "a system view does not group"
-        );
-    }
-
-    #[test]
-    fn within_five_minutes_bounds_the_grouping_window() {
-        assert!(
-            within_five_minutes("2026-11-09T10:00:00Z", "2026-11-09T10:04:59Z"),
-            "just inside the window groups"
-        );
-        assert!(
-            !within_five_minutes("2026-11-09T10:00:00Z", "2026-11-09T10:05:00Z"),
-            "the window is half-open: exactly five minutes does not group"
-        );
-        // One-sided window: `b < a + 5 min` never checks order, so an
-        // earlier stamp still groups. Unreachable in the pane, where
-        // rows are chronological — pinned as shipped semantics.
-        assert!(
-            within_five_minutes("2026-11-09T10:00:00Z", "2026-11-09T09:59:59Z"),
-            "the window is one-sided: only the upper bound is checked"
-        );
-        assert!(
-            !within_five_minutes("not-a-stamp", "2026-11-09T10:01:00Z"),
-            "unparsable stamps never group"
-        );
-    }
-
-    #[test]
-    fn pretty_time_renders_zone_offsets_and_falls_back() {
-        let utc = jiff::tz::TimeZone::UTC;
-        assert_eq!(pretty_time_in("2026-11-07T20:32:00.514Z", &utc), "8:32 PM");
-        let msk = jiff::tz::TimeZone::fixed(jiff::tz::Offset::from_hours(3).unwrap());
-        assert_eq!(pretty_time_in("2026-11-07T20:32:00.514Z", &msk), "11:32 PM");
-        assert_eq!(pretty_time_in("2026-11-07T00:05:00Z", &utc), "12:05 AM");
-        assert_eq!(pretty_time_in("not-a-stamp", &utc), "not-a-stamp");
-    }
 
     #[test]
     fn room_hits_match_names_case_insensitively() {
