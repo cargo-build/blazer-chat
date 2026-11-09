@@ -1116,7 +1116,7 @@ impl gpui::Render for ChatRoot {
             row.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(p.danger))
+                    .text_color(rgb(p.danger_text))
                     .child(format!("error: {message}")),
             )
         });
@@ -1921,7 +1921,7 @@ impl gpui::Render for ChatRoot {
                                 .py_1()
                                 .rounded_xs()
                                 .text_sm()
-                                .text_color(rgb(p.danger))
+                                .text_color(rgb(p.danger_text))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(p.row_hover)))
                                 .child("⎋ Log out")

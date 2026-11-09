@@ -22,7 +22,7 @@ use gpui::{
     Focusable, GlobalElementId, ImageFormat, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style, TextAlign,
     TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
-    prelude::*, px, relative, rgb, rgba, size,
+    prelude::*, px, relative, rgb, size,
 };
 use unicode_segmentation::*;
 
@@ -1203,11 +1203,18 @@ impl Element for TextElement {
                     ),
                     size(px(2.), line_height),
                 ),
-                rgb(p.accent),
+                rgb(p.cursor),
             ));
         }
 
-        let selection = selection_quads(&shape, &selected_range, bounds, line_height, scroll);
+        let selection = selection_quads(
+            &shape,
+            &selected_range,
+            bounds,
+            line_height,
+            scroll,
+            p.selection_bg,
+        );
 
         PrepaintState {
             shape,
@@ -1288,6 +1295,7 @@ fn selection_quads(
     bounds: gpui::Bounds<Pixels>,
     line_height: Pixels,
     scroll: Pixels,
+    selection_bg: u32,
 ) -> Vec<PaintQuad> {
     if selected_range.is_empty() {
         return Vec::new();
@@ -1349,7 +1357,7 @@ fn selection_quads(
                         point(bounds.left() + x0, y),
                         point(bounds.left() + x1.max(x0), y + line_height),
                     ),
-                    rgba(0x3311ff30),
+                    rgb(selection_bg),
                 ));
             }
         }
@@ -1412,7 +1420,7 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(p.panel))
+            .bg(rgb(p.input_bg))
             .line_height(px(28.))
             .text_size(px(14.))
             .text_color(rgb(p.text))
@@ -1420,7 +1428,7 @@ impl Render for TextInput {
                 div()
                     .w_full()
                     .p(px(4.))
-                    .bg(rgb(p.panel))
+                    .bg(rgb(p.input_bg))
                     .child(TextElement { input: cx.entity() }),
             )
     }
