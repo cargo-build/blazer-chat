@@ -22,7 +22,7 @@ use gpui::{
     Focusable, GlobalElementId, ImageFormat, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style, TextAlign,
     TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
-    prelude::*, px, relative, rgb, size,
+    prelude::*, px, relative, rems, rgb, size,
 };
 use unicode_segmentation::*;
 
@@ -1370,6 +1370,7 @@ fn selection_quads(
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(window.appearance());
+        let focused = self.focus_handle(cx).is_focused(window);
         div()
             .flex()
             .w_full()
@@ -1420,14 +1421,20 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            // The writing field reads as its own well: input_bg inside
+            // a border that lights up accent_fill while focused (the
+            // composer card carries the panel around it).
+            .border_1()
+            .border_color(rgb(if focused { p.accent_fill } else { p.border }))
+            .rounded_md()
             .bg(rgb(p.input_bg))
-            .line_height(px(28.))
-            .text_size(px(14.))
+            .line_height(rems(1.75))
+            .text_size(rems(0.875))
             .text_color(rgb(p.text))
             .child(
                 div()
                     .w_full()
-                    .p(px(4.))
+                    .p(rems(0.25))
                     .bg(rgb(p.input_bg))
                     .child(TextElement { input: cx.entity() }),
             )

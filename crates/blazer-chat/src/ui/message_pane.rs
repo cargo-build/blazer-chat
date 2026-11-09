@@ -4,8 +4,8 @@
 
 use gpui::{
     Anchor, AnyElement, Context, Entity, EventEmitter, FollowMode, FontWeight, Hsla, ListAlignment,
-    ListOffset, ListState, Role, SharedString, Window, anchored, deferred, div, hsla, img, list,
-    prelude::*, px, rems, rgb,
+    ListOffset, ListState, Rems, Role, SharedString, Window, anchored, deferred, div, hsla, img,
+    list, prelude::*, px, rems, rgb,
 };
 
 use super::markdown::{self, Span};
@@ -170,8 +170,9 @@ pub(crate) fn raw_time(ts: &str) -> String {
 /// line parsed into markdown spans and laid out as a wrapping row so inline
 /// emoji images flow with the text.
 /// The sender's initial on a per-user color disc (Rocket.Chat colors
-/// usernames too).
-pub(crate) fn avatar(sender: &str, p: Palette) -> gpui::Div {
+/// usernames too); `size` scales the disc to its site (message rows
+/// 2.0, the sidebar identity column 1.25).
+pub(crate) fn avatar(sender: &str, p: Palette, size: Rems) -> gpui::Div {
     let initial = sender
         .chars()
         .next()
@@ -181,7 +182,7 @@ pub(crate) fn avatar(sender: &str, p: Palette) -> gpui::Div {
         .unwrap_or('?');
     div()
         .flex_none()
-        .size(rems(2.0))
+        .size(size)
         .rounded_full()
         .bg(user_color(sender))
         .flex()
@@ -252,7 +253,7 @@ pub(crate) fn attachment_card(
                         .flex_none()
                         .size(rems(2.5))
                         .rounded_sm()
-                        .bg(rgb(p.border))
+                        .bg(rgb(p.code_bg))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -376,10 +377,12 @@ pub(crate) fn span_element(
                 .rounded_xs()
                 .cursor_pointer()
                 .when(mine, |pill| {
-                    pill.bg(rgb(p.accent)).text_color(rgb(p.accent_fg))
+                    // accent_fill, not accent: white needs >= 4.5
+                    // on the fill (deepseek D13; plain accent 2.57 dark)
+                    pill.bg(rgb(p.accent_fill)).text_color(rgb(p.accent_fg))
                 })
                 .when(!mine, |pill| pill.text_color(rgb(p.accent)))
-                .hover(|style| style.bg(rgb(p.row_hover)))
+                .hover(|style| style.bg(rgb(p.row_hover)).text_color(rgb(p.text)))
                 .on_click(card_opener(this.clone(), name.clone()))
                 .child(SharedString::from(name))
                 .into_any_element()
@@ -1260,7 +1263,7 @@ impl MessagePane {
         // data on the first open.
         let card_open = inputs.user_card.as_deref() == Some(view.sender.as_str());
         let lead = if grouped {
-            div().flex_none().w(px(32.0)).into_any_element()
+            div().flex_none().w(rems(2.0)).into_any_element()
         } else {
             div()
                 .id(SharedString::from(format!("card-{msg_id}")))
@@ -1275,7 +1278,7 @@ impl MessagePane {
                         .size(rems(2.0))
                         .rounded_full()
                         .into_any_element(),
-                    None => avatar(&view.sender, p).into_any_element(),
+                    None => avatar(&view.sender, p, rems(2.0)).into_any_element(),
                 })
                 .into_any_element()
         };
@@ -1298,6 +1301,9 @@ impl MessagePane {
             .items_start()
             .px_2()
             .py_1()
+            // Ungrouped rows breathe one step more; grouped
+            // continuations keep the compact lead (deepseek D7).
+            .when(!grouped, |row| row.py_1p5())
             .rounded_md()
             .hover(|style| style.bg(rgb(p.row_hover)))
             .child(lead)
@@ -1318,7 +1324,7 @@ impl MessagePane {
                                     div()
                                         .id(SharedString::from(format!("cardname-{msg_id}")))
                                         .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
+                                        .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(p.text))
                                         .cursor_pointer()
                                         .hover(|style| style.text_color(rgb(p.accent)))
@@ -1382,7 +1388,7 @@ impl MessagePane {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(avatar(&view.sender, p))
+                                    .child(avatar(&view.sender, p, rems(2.0)))
                                     .child(
                                         div()
                                             .flex()
@@ -1478,7 +1484,7 @@ impl MessagePane {
                 .min_h_0()
                 .items_center()
                 .justify_center()
-                .child(div().text_sm().text_color(rgb(p.muted)).child(text))
+                .child(div().text_base().text_color(rgb(p.muted)).child(text))
                 .into_any_element();
         }
         let entity = self.entity.clone();

@@ -4,7 +4,7 @@
 
 use gpui::{
     Anchor, AnyElement, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight,
-    MouseButton, Pixels, Role, ScrollHandle, SharedString, Window, anchored, deferred, div, img,
+    MouseButton, Role, ScrollHandle, SharedString, Window, anchored, deferred, div, img,
     prelude::*, px, rems, rgb, uniform_list,
 };
 use std::sync::{Arc, Mutex};
@@ -1033,12 +1033,12 @@ fn side_entries(rooms: &[Room]) -> Vec<SideEntry> {
 }
 
 /// One sidebar section header. uniform_list stretches every row to
-/// the tallest, so the header rides the same 48 px row the rooms use
-/// — the label sits at its bottom edge like the original's sticky
+/// the tallest, so the header rides the same rems(3.25) row the rooms
+/// use — the label sits at its bottom edge like the original's sticky
 /// headers.
 fn section_row(label: &'static str, p: Palette) -> AnyElement {
     div()
-        .h(px(48.0))
+        .h(rems(3.25))
         .flex()
         .flex_col()
         .justify_end()
@@ -1047,18 +1047,26 @@ fn section_row(label: &'static str, p: Palette) -> AnyElement {
         .child(
             div()
                 .text_xs()
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(p.muted))
                 .child(label),
         )
         .into_any_element()
 }
 
+/// Send-button hover fills (deepseek D12): white keeps ≥ 6.7:1 on
+/// both (DARK 0x1d4ed8 6.70, LIGHT 0x0550a8 7.72); they deepen
+/// `accent_fill` instead of reusing a palette token because no token
+/// is a darker sibling of the fill.
+const SEND_HOVER_DARK: u32 = 0x1d4ed8;
+const SEND_HOVER_LIGHT: u32 = 0x0550a8;
+
 fn panel(
     title: &str,
     subtitle: Option<&str>,
     content: impl IntoElement,
-    width: Option<Pixels>,
+    width: Option<gpui::AbsoluteLength>,
+    surface: u32,
     p: Palette,
 ) -> impl IntoElement {
     // A fixed-width panel must not carry flex_1's zero basis: build the
@@ -1072,7 +1080,7 @@ fn panel(
         .flex_col()
         .gap_2()
         .p_3()
-        .bg(rgb(p.panel))
+        .bg(rgb(surface))
         .border_1()
         .border_color(rgb(p.border))
         .rounded_md()
@@ -1083,8 +1091,8 @@ fn panel(
                 .gap_0p5()
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
+                        .text_base()
+                        .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(p.text))
                         .child(title.to_owned()),
                 )
@@ -1107,6 +1115,11 @@ impl gpui::Render for ChatRoot {
             std::time::Instant::now(),
         );
         let p = self.palette;
+        let send_hover = if p == LIGHT {
+            SEND_HOVER_LIGHT
+        } else {
+            SEND_HOVER_DARK
+        };
         let who = self
             .state
             .username
@@ -1208,15 +1221,27 @@ impl gpui::Render for ChatRoot {
                                 unread => format!("{} — {} unread", room.name, unread),
                             })
                             .px_2()
-                            .py_1()
-                            .h(px(48.0))
+                            .py_0p5()
+                            .h(rems(3.25))
                             .rounded_sm()
                             .text_sm()
                             .overflow_hidden()
                             .cursor_pointer()
-                            .when(selected, |row| row.bg(rgb(p.accent)))
-                            .when(selected, |row| row.aria_selected(true))
-                            .hover(|style| style.bg(rgb(p.border)))
+                            // Selection = accent rail + row_hover (two
+                            // cues, WCAG 1.4.1); the rail keeps its slot
+                            // transparent when unselected so the row
+                            // never shifts, and hover stays gated off
+                            // while selected (m5 finding 4).
+                            .border_l_3()
+                            .when(selected, |row| {
+                                row.bg(rgb(p.row_hover))
+                                    .border_color(rgb(p.accent))
+                                    .aria_selected(true)
+                            })
+                            .when(!selected, |row| {
+                                row.border_color(gpui::transparent_black())
+                                    .hover(|style| style.bg(rgb(p.row_hover)))
+                            })
                             .on_click({
                                 let this = this.clone();
                                 let room_id = room_id.clone();
@@ -1239,67 +1264,113 @@ impl gpui::Render for ChatRoot {
                             })
                             .child(
                                 div()
+                                    .flex()
                                     .min_w_0()
                                     .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
+                                    .gap_1()
+                                    .child(match room.kind {
+                                        // Identity column (deepseek
+                                        // D10): '#' for channels/groups,
+                                        // a small per-user disc for DMs.
+                                        'd' => div()
+                                            .flex_none()
+                                            .w(rems(1.25))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(avatar(&room.name, p, rems(1.25)))
+                                            .into_any_element(),
+                                        _ => div()
+                                            .flex_none()
+                                            .w(rems(1.25))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(p.muted))
+                                            .child("#")
+                                            .into_any_element(),
+                                    })
                                     .child(
                                         div()
+                                            .min_w_0()
+                                            .flex_1()
                                             .flex()
-                                            .gap_1()
-                                            .items_baseline()
+                                            .flex_col()
+                                            .gap_0p5()
                                             .child(
                                                 div()
-                                                    .min_w_0()
-                                                    .flex_1()
-                                                    .overflow_hidden()
-                                                    .child(SharedString::from(room.name.clone())),
+                                                    .flex()
+                                                    .gap_1()
+                                                    .items_baseline()
+                                                    .child(
+                                                        div()
+                                                            .min_w_0()
+                                                            .flex_1()
+                                                            .overflow_hidden()
+                                                            .font_weight(if unread > 0 {
+                                                                FontWeight::SEMIBOLD
+                                                            } else {
+                                                                FontWeight::MEDIUM
+                                                            })
+                                                            .child(SharedString::from(
+                                                                room.name.clone(),
+                                                            )),
+                                                    )
+                                                    .children(room.lm.as_ref().map(|ts| {
+                                                        div()
+                                                            .flex_none()
+                                                            .text_xs()
+                                                            .text_color(rgb(p.muted))
+                                                            .child(SharedString::from(pretty_time(
+                                                                ts,
+                                                            )))
+                                                    }))
+                                                    .when(unread > 0, |line| {
+                                                        line.child(
+                                                            div()
+                                                                .flex_none()
+                                                                .px_1()
+                                                                .rounded_xs()
+                                                                .bg(rgb(p.accent_fill))
+                                                                .text_xs()
+                                                                .font_weight(FontWeight::MEDIUM)
+                                                                .text_color(rgb(p.accent_fg))
+                                                                .child(SharedString::from(
+                                                                    unread.to_string(),
+                                                                )),
+                                                        )
+                                                    })
+                                                    .when(room.mentions > 0, |line| {
+                                                        line.child(
+                                                            div()
+                                                                .flex_none()
+                                                                .px_1()
+                                                                .rounded_xs()
+                                                                .bg(rgb(p.danger))
+                                                                .text_xs()
+                                                                .font_weight(FontWeight::MEDIUM)
+                                                                .text_color(rgb(p.accent_fg))
+                                                                .child(SharedString::from(
+                                                                    format!("@{}", room.mentions),
+                                                                )),
+                                                        )
+                                                    }),
                                             )
-                                            .children(room.lm.as_ref().map(|ts| {
-                                                div()
-                                                    .flex_none()
-                                                    .text_xs()
-                                                    .text_color(rgb(p.muted))
-                                                    .child(SharedString::from(pretty_time(ts)))
-                                            }))
-                                            .when(unread > 0, |line| {
-                                                line.child(
+                                            .children(room.preview.as_ref().map(
+                                                |(sender, text)| {
                                                     div()
-                                                        .flex_none()
-                                                        .px_1()
-                                                        .rounded_xs()
-                                                        .bg(rgb(p.accent))
+                                                        .min_w_0()
+                                                        .truncate()
                                                         .text_xs()
-                                                        .child(SharedString::from(
-                                                            unread.to_string(),
-                                                        )),
-                                                )
-                                            })
-                                            .when(room.mentions > 0, |line| {
-                                                line.child(
-                                                    div()
-                                                        .flex_none()
-                                                        .px_1()
-                                                        .rounded_xs()
-                                                        .bg(rgb(p.danger))
-                                                        .text_xs()
-                                                        .text_color(rgb(p.accent_fg))
+                                                        .text_color(rgb(p.muted))
                                                         .child(SharedString::from(format!(
-                                                            "@{}",
-                                                            room.mentions
-                                                        ))),
-                                                )
-                                            }),
-                                    )
-                                    .children(room.preview.as_ref().map(|(sender, text)| {
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(rgb(p.muted))
-                                            .child(SharedString::from(format!("{sender}: {text}")))
-                                    })),
+                                                            "{sender}: {text}"
+                                                        )))
+                                                },
+                                            )),
+                                    ),
                             )
                             .children(room_menu)
                             .into_any_element()
@@ -1399,7 +1470,7 @@ impl gpui::Render for ChatRoot {
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_sm()
                                     .text_color(rgb(p.muted))
                                     .truncate()
                                     .child(SharedString::from(body)),
@@ -1414,7 +1485,7 @@ impl gpui::Render for ChatRoot {
                             .text_xs()
                             .text_color(rgb(p.muted))
                             .cursor_pointer()
-                            .hover(|style| style.bg(rgb(p.border)).text_color(rgb(p.text)))
+                            .hover(|style| style.bg(rgb(p.row_hover)).text_color(rgb(p.text)))
                             .child("✖")
                             .on_click({
                                 let this = this.clone();
@@ -1459,7 +1530,7 @@ impl gpui::Render for ChatRoot {
                         .border_color(rgb(p.border))
                         .rounded_md()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(p.accent)))
+                        .hover(|style| style.bg(rgb(p.row_hover)))
                         .child("🔍")
                         .on_click(move |_, _, cx| {
                             search_this.update(cx, |chat, cx| chat.run_search(cx));
@@ -1520,7 +1591,7 @@ impl gpui::Render for ChatRoot {
                         .bg(rgb(p.panel))
                         .text_sm()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(p.accent)))
+                        .hover(|style| style.bg(rgb(p.row_hover)))
                         .child("← thread")
                         .on_click(move |_, _, cx| {
                             this.update(cx, |chat, cx| {
@@ -1560,7 +1631,7 @@ impl gpui::Render for ChatRoot {
                         .flex()
                         .gap_2()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(p.accent)))
+                        .hover(|style| style.bg(rgb(p.row_hover)))
                         .on_click(move |_, _, cx| {
                             this.update(cx, |chat, cx| {
                                 chat.open_room(room_id.clone(), cx);
@@ -1598,7 +1669,7 @@ impl gpui::Render for ChatRoot {
                         .flex()
                         .gap_2()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(p.border)))
+                        .hover(|style| style.bg(rgb(p.row_hover)))
                         .on_click(move |_, _, cx| {
                             this.update(cx, |chat, cx| {
                                 chat.open_room(room_id.clone(), cx);
@@ -1617,6 +1688,7 @@ impl gpui::Render for ChatRoot {
                                 .flex_none()
                                 .text_sm()
                                 .text_color(rgb(p.accent))
+                                .hover(|style| style.text_color(rgb(p.text)))
                                 .child(SharedString::from(hit.room.clone())),
                         )
                         .child(
@@ -1690,7 +1762,7 @@ impl gpui::Render for ChatRoot {
                         .rounded_xs()
                         .text_sm()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(p.border)))
+                        .hover(|style| style.bg(rgb(p.row_hover)))
                         .child("← 📌 Pinned messages")
                         .on_click({
                             let this = this.clone();
@@ -1742,7 +1814,7 @@ impl gpui::Render for ChatRoot {
                         .rounded_xs()
                         .text_sm()
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(p.border)))
+                        .hover(|style| style.bg(rgb(p.row_hover)))
                         .child("← ℹ️ Room info")
                         .on_click({
                             let this = search_this.clone();
@@ -1808,7 +1880,7 @@ impl gpui::Render for ChatRoot {
                 .size(rems(2.0))
                 .rounded_full()
                 .into_any_element(),
-            None => avatar(&me, p).into_any_element(),
+            None => avatar(&me, p, rems(2.0)).into_any_element(),
         };
         let status_item =
             |dot: u32, label: &'static str, key: &'static str, taken: Entity<ChatRoot>| {
@@ -1866,7 +1938,7 @@ impl gpui::Render for ChatRoot {
                                         .into_any_element(),
                                     None => div()
                                         .size(rems(2.5))
-                                        .child(avatar(&me, p))
+                                        .child(avatar(&me, p, rems(2.5)))
                                         .into_any_element(),
                                 })
                                 .child(
@@ -1949,7 +2021,7 @@ impl gpui::Render for ChatRoot {
                     .gap_3()
                     .px_3()
                     .py_2()
-                    .bg(rgb(p.panel))
+                    .bg(rgb(p.panel_alt))
                     .border_b_1()
                     .border_color(rgb(p.border))
                     .rounded_md()
@@ -1977,6 +2049,7 @@ impl gpui::Render for ChatRoot {
                                 p.danger
                             }))
                             .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(if self.state.live_connected {
                                 p.muted
                             } else {
@@ -2008,7 +2081,8 @@ impl gpui::Render for ChatRoot {
                             .rounded_full()
                             .border_1()
                             .border_color(rgb(p.border))
-                            .text_xs()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(p.muted))
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(p.row_hover)).text_color(rgb(p.text)))
@@ -2031,7 +2105,7 @@ impl gpui::Render for ChatRoot {
                             }),
                     )
                     .child(div().flex_1())
-                    .child(div().flex_none().flex().w(px(480.0)).child(search_strip))
+                    .child(div().flex_none().flex().w(rems(30.0)).child(search_strip))
                     .child(div().flex_1())
                     .when_some(self.state.active_room.clone(), |bar, room_id| {
                         bar.child(
@@ -2045,7 +2119,7 @@ impl gpui::Render for ChatRoot {
                                 .rounded_xs()
                                 .text_sm()
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(p.border)))
+                                .hover(|style| style.bg(rgb(p.row_hover)))
                                 .child("📌")
                                 .on_click({
                                     let this = this_bar.clone();
@@ -2084,7 +2158,7 @@ impl gpui::Render for ChatRoot {
                                 .rounded_xs()
                                 .text_sm()
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(p.border)))
+                                .hover(|style| style.bg(rgb(p.row_hover)))
                                 .child("ℹ️")
                                 .on_click({
                                     let this = this_bar.clone();
@@ -2148,7 +2222,7 @@ impl gpui::Render for ChatRoot {
                         .text_xs()
                         .cursor_pointer()
                         .when(index == suggest.selected, |chip| {
-                            chip.bg(rgb(p.accent)).text_color(rgb(p.accent_fg))
+                            chip.bg(rgb(p.accent_fill)).text_color(rgb(p.accent_fg))
                         })
                         .when(index != suggest.selected, |chip| {
                             chip.text_color(rgb(p.text))
@@ -2181,24 +2255,30 @@ impl gpui::Render for ChatRoot {
         });
 
         // The formatting toolbar: wrap-on-type over the selection
-        // (m12 F11); Ctrl+B/I drive the same paths.
+        // (m12 F11); Ctrl+B/I drive the same paths. Each letter is a
+        // 24×24 target styled as what it inserts (deepseek D6/D8):
+        // borderless, row_hover on hover — `border` is an edge, never
+        // a hover surface.
         let fmt_button = |label: &'static str, id: &'static str, marker: &'static str| {
             let composer = self.composer.clone();
             div()
                 .id(SharedString::from(id))
                 .role(Role::Button)
                 .aria_label(label)
-                .px_1p5()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(rems(1.5))
+                .h(rems(1.5))
                 .rounded_xs()
-                .text_xs()
-                .font_weight(if marker == "*" {
-                    FontWeight::BOLD
-                } else {
-                    FontWeight::MEDIUM
-                })
-                .text_color(rgb(p.muted))
+                .text_sm()
+                .text_color(rgb(p.text))
+                .when(marker == "*", |button| button.font_weight(FontWeight::BOLD))
+                .when(marker == "_", |button| button.italic())
+                .when(marker == "~", |button| button.line_through())
+                .when(marker == "`", |button| button.font_family("monospace"))
                 .cursor_pointer()
-                .hover(|style| style.bg(rgb(p.border)))
+                .hover(|style| style.bg(rgb(p.row_hover)))
                 .child(label)
                 .on_click({
                     let composer = composer.clone();
@@ -2211,12 +2291,15 @@ impl gpui::Render for ChatRoot {
             .id("emoji-picker")
             .role(Role::Button)
             .aria_label("Emoji")
-            .px_1p5()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(rems(1.5))
+            .h(rems(1.5))
             .rounded_xs()
-            .text_xs()
-            .text_color(rgb(p.muted))
+            .text_color(rgb(p.text))
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(p.border)))
+            .hover(|style| style.bg(rgb(p.row_hover)))
             .child("😊")
             .on_click({
                 let this = cx.entity();
@@ -2433,7 +2516,7 @@ impl gpui::Render for ChatRoot {
                                 .flex_1()
                                 .items_center()
                                 .justify_center()
-                                .child(div().text_sm().text_color(rgb(p.muted)).child(
+                                .child(div().text_base().text_color(rgb(p.muted)).child(
                                     if self.state.rooms.is_empty() {
                                         "no rooms yet"
                                     } else {
@@ -2444,7 +2527,8 @@ impl gpui::Render for ChatRoot {
                         } else {
                             rooms.into_any_element()
                         },
-                        Some(px(240.0)),
+                        Some(gpui::AbsoluteLength::Rems(rems(15.0))),
+                        p.panel_alt,
                         p,
                     ))
                     .child(panel(
@@ -2467,6 +2551,7 @@ impl gpui::Render for ChatRoot {
                             .child(toasts)
                             .child(pane),
                         None,
+                        p.panel,
                         p,
                     )),
             )
@@ -2475,7 +2560,15 @@ impl gpui::Render for ChatRoot {
                     .flex()
                     .flex_col()
                     .flex_none()
+                    // The composer card (deepseek D8): quote card,
+                    // toolbar and input row share one bordered panel
+                    // instead of floating strips.
                     .gap_1()
+                    .bg(rgb(p.panel))
+                    .border_1()
+                    .border_color(rgb(p.border))
+                    .rounded_md()
+                    .p_2()
                     .children(quote_card)
                     .children(suggest_popup)
                     .child(toolbar)
@@ -2492,13 +2585,13 @@ impl gpui::Render for ChatRoot {
                                     .flex_none()
                                     .px_2()
                                     .py_1()
-                                    .bg(rgb(p.panel))
+                                    .bg(rgb(p.panel_alt))
                                     .border_1()
                                     .border_color(rgb(p.border))
                                     .rounded_md()
                                     .text_sm()
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(p.accent)))
+                                    .hover(|style| style.bg(rgb(p.row_hover)))
                                     .child("📎")
                                     .on_click(cx.listener(|chat, _, _, _cx| {
                                         let tx = chat.pick_tx.clone();
@@ -2529,12 +2622,13 @@ impl gpui::Render for ChatRoot {
                                     })
                                     .px_3()
                                     .py_1()
-                                    .bg(rgb(p.panel))
-                                    .border_1()
-                                    .border_color(rgb(p.border))
+                                    .bg(rgb(p.accent_fill))
                                     .rounded_md()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(p.accent_fg))
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(p.accent)))
+                                    .hover(|style| style.bg(rgb(send_hover)))
                                     .active(|style| style.opacity(0.85))
                                     .on_click(cx.listener(|chat, _, _, cx| chat.send_message(cx)))
                                     .child(match self.editing.is_some() {
