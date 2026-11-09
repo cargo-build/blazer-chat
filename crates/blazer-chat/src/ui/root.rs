@@ -65,6 +65,45 @@ pub(crate) struct ChatRoot {
     /// gold standard.
     last_frame_start: Option<std::time::Instant>,
     frame_ms: std::collections::VecDeque<f64>,
+    /// Debounce generation for the typing draft save (m14 P2): each
+    /// keystroke bumps it and schedules a 300 ms task; only the
+    /// task whose generation still matches saves.
+    draft_save_gen: u64,
+}
+
+/// RC's `Message_MaxAllowedSize` default: sends over the limit keep
+/// the text and surface an error instead of hitting the wire
+/// (m14 P2). Follow-up: fetch settings.public like the original.
+const MAX_MESSAGE_LEN: usize = 500;
+
+/// `+:emoji:` as the ENTIRE message reacts on the room's last
+/// message instead of sending (RC processSetReaction): the name
+/// between the colons, `None` for anything else.
+fn reaction_only(text: &str) -> Option<String> {
+    let name = text
+        .strip_prefix('+')?
+        .strip_prefix(':')?
+        .strip_suffix(':')?;
+    if name.is_empty() || name.contains(':') {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+/// Odd count of ``` fences appends the closing one (RC
+/// closeUnclosedCodeBlock, m14 P2).
+fn close_unclosed_code_block(text: &str) -> String {
+    let fences = text.matches("```").count();
+    if fences.is_multiple_of(2) {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len() + 5);
+    out.push_str(text);
+    if !text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("```");
+    out
 }
 
 /// Frame-interval sampling (m13 telemetry): the interval between
@@ -151,6 +190,7 @@ impl ChatRoot {
                 }
                 TextInputEvent::Changed { text, caret } => {
                     chat.update_suggestions(text, *caret, cx);
+                    chat.queue_draft_save(cx);
                 }
                 TextInputEvent::SuggestMoved => cx.notify(),
                 TextInputEvent::EditPrevious => chat.edit_walk(true, window, cx),
@@ -196,6 +236,7 @@ impl ChatRoot {
             composer,
             last_frame_start: None,
             frame_ms: std::collections::VecDeque::new(),
+            draft_save_gen: 0,
             search_rooms,
             focus: cx.focus_handle(),
             search,
@@ -339,6 +380,8 @@ impl ChatRoot {
                 text: draft,
             });
         }
+        self.draft_save_gen += 1; // a pending typing save would
+        // now carry the wrong room's text
         self.editing = None;
         // Panels and cards belong to the room they opened in.
         self.show_info = false;
@@ -347,15 +390,12 @@ impl ChatRoot {
         let restored = self.state.drafts.get(&room_id).cloned().unwrap_or_default();
         self.composer
             .update(cx, |composer, cx| composer.set_content(&restored, cx));
-        // The placeholder names the room (m12 F12).
-        let name = self
-            .state
-            .rooms
-            .iter()
-            .find(|room| room.id == room_id)
-            .map(|room| room.name.clone());
-        let placeholder = match name {
-            Some(name) => format!("Message #{name}"),
+        // RC useMessageBoxPlaceholder (m14 P2): `Message @user`
+        // for DMs (kind 'd'), `Message #channel` otherwise; the
+        // placeholder names the room (m12 F12).
+        let placeholder = match self.state.rooms.iter().find(|room| room.id == room_id) {
+            Some(room) if room.kind == 'd' => format!("Message @{}", room.name),
+            Some(room) => format!("Message #{}", room.name),
             None => "Message…".to_owned(),
         };
         self.composer.update(cx, |composer, cx| {
@@ -537,6 +577,38 @@ impl ChatRoot {
         cx.notify();
     }
 
+    /// Debounced typing draft save (RC useDraft's 300 ms, m14
+    /// P2): the local map updates immediately so a room switch
+    /// never loses text; the server save fires only after 300 ms
+    /// without a keystroke. Room switches and sends bump the
+    /// generation, retiring stale tasks that would save the wrong
+    /// room's text.
+    fn queue_draft_save(&mut self, cx: &mut Context<Self>) {
+        let Some(room) = self.state.active_room.clone() else {
+            return;
+        };
+        let draft = self.composer.read(cx).content().to_owned();
+        self.state.drafts.insert(room.clone(), draft);
+        self.draft_save_gen += 1;
+        let generation = self.draft_save_gen;
+        cx.spawn(async move |root, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            let _ = root.update(cx, |chat, cx| {
+                if chat.draft_save_gen != generation {
+                    return; // superseded by a newer keystroke
+                }
+                let text = chat.composer.read(cx).content().to_owned();
+                chat.send_command(ChatCommand::SaveDraft {
+                    room_id: room,
+                    text,
+                });
+            });
+        })
+        .detach();
+    }
+
     fn send_message(&mut self, cx: &mut Context<Self>) {
         let Some(room_id) = self.state.active_room.clone() else {
             self.state.error = Some("open a room first".to_owned());
@@ -545,6 +617,43 @@ impl ChatRoot {
         };
         let text = self.composer.read(cx).content().trim().to_owned();
         if text.is_empty() {
+            return;
+        }
+        // RC send chain order (m14 P2): reaction -> too-long ->
+        // editing -> send.
+        //
+        // `+:emoji:` as the entire message reacts on the room's
+        // last non-system message instead of sending; an unknown
+        // emoji or an empty room falls through as a normal send.
+        if let Some(name) =
+            reaction_only(&text).filter(|name| markdown::shortcode_glyph(name).is_some())
+        {
+            let target = self
+                .state
+                .messages
+                .get(&room_id)
+                .and_then(|messages| messages.iter().rev().find(|message| !message.system))
+                .map(|message| message.id.clone());
+            if let Some(msg_id) = target {
+                self.composer.update(cx, |composer, cx| composer.reset(cx));
+                self.state.drafts.remove(&room_id);
+                self.send_command(ChatCommand::React {
+                    room_id,
+                    msg_id,
+                    emoji: name,
+                });
+                cx.notify();
+                return;
+            }
+        }
+        // Too long: keep the text in the composer and surface the
+        // error (RC processTooLongMessage; the attachment-conversion
+        // modal is optional and omitted).
+        if text.chars().count() > MAX_MESSAGE_LEN {
+            self.state.error = Some(format!(
+                "message too long (server limit {MAX_MESSAGE_LEN}); text kept"
+            ));
+            cx.notify();
             return;
         }
         // Unicode shortcodes resolve on the wire (:smile: → 😄, m12
@@ -577,12 +686,13 @@ impl ChatRoot {
                         .map(|(_, msg_id)| msg_id.clone());
                     ChatCommand::Send {
                         room_id: room_id.clone(),
-                        text: text.clone(),
+                        text: close_unclosed_code_block(&text),
                         quote_msg_id: quote,
                     }
                 }
             },
         };
+        self.draft_save_gen += 1;
         self.state.drafts.remove(&room_id);
         self.send_command(ChatCommand::SaveDraft {
             room_id: room_id.clone(),
@@ -2049,6 +2159,43 @@ impl gpui::Render for ChatRoot {
             .bg(rgb(p.bg))
             .text_color(rgb(p.text))
             .track_focus(&self.focus)
+            // Type-to-focus (m14 P2, RC composer refocus): a bare
+            // printable keystroke while neither input holds focus
+            // lands in the composer as if typed there.
+            .on_key_down(cx.listener(|chat, event: &gpui::KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                let shift_only = modifiers.shift
+                    && !(modifiers.control
+                        || modifiers.alt
+                        || modifiers.platform
+                        || modifiers.function);
+                if modifiers.modified() && !shift_only {
+                    return;
+                }
+                let key = event.keystroke.key.as_str();
+                if key.len() != 1 {
+                    return; // named keys (space, enter…) stay put
+                }
+                let composer_focused = chat.composer.read(cx).focus_handle(cx).is_focused(window);
+                let search_focused = chat.search.read(cx).focus_handle(cx).is_focused(window);
+                if composer_focused || search_focused {
+                    return;
+                }
+                let Some(ch) = key.chars().next() else {
+                    return;
+                };
+                let ch = if shift_only {
+                    ch.to_ascii_uppercase()
+                } else {
+                    ch
+                };
+                window.focus(&chat.composer.read(cx).focus_handle(cx), cx);
+                chat.composer.update(cx, |composer, cx| {
+                    use gpui::EntityInputHandler as _;
+                    composer.replace_text_in_range(None, &ch.to_string(), window, cx)
+                });
+                cx.stop_propagation();
+            }))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
@@ -2167,6 +2314,33 @@ fn completion_token(text: &str, caret: usize) -> Option<(usize, char, String)> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn reaction_only_needs_the_full_plus_colon_form() {
+        assert_eq!(reaction_only("+:smile:"), Some("smile".to_owned()));
+        assert_eq!(reaction_only("+:tada:"), Some("tada".to_owned()));
+        assert_eq!(reaction_only("+ :smile:"), None, "no space allowed");
+        assert_eq!(reaction_only("+:smile: plus text"), None);
+        assert_eq!(reaction_only("hello +:smile:"), None);
+        assert_eq!(reaction_only("+::"), None, "empty name");
+        assert_eq!(reaction_only("+:a:b:"), None, "one token only");
+    }
+
+    #[test]
+    fn fence_autoclose_appends_only_on_odd_count() {
+        assert_eq!(close_unclosed_code_block("```rust\nx"), "```rust\nx\n```");
+        assert_eq!(
+            close_unclosed_code_block("a```b```c"),
+            "a```b```c",
+            "even fences stay untouched"
+        );
+        assert_eq!(close_unclosed_code_block("no fences"), "no fences");
+        let closed = close_unclosed_code_block("```x\n```\n```\n");
+        assert!(
+            closed.ends_with("```\n```"),
+            "odd count 3 -> one more fence"
+        );
+    }
 
     #[test]
     fn frame_ring_samples_real_frames_only() {
