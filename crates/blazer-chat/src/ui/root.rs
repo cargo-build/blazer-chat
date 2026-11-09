@@ -3341,6 +3341,43 @@ mod tests {
         assert!(!adjacent_grouped(&a, &other), "other sender does not");
         let new_day = base("alice", "2026-11-10", "2026-11-10T09:00:00Z");
         assert!(!adjacent_grouped(&a, &new_day), "new day does not");
+        // System rows never group — neither as the previous row nor as
+        // the view (m12 F2).
+        let mut system_previous = base("alice", "2026-11-09", "2026-11-09T10:01:00Z");
+        system_previous.system = true;
+        assert!(
+            !adjacent_grouped(&system_previous, &b),
+            "a system previous row does not group"
+        );
+        let mut system_view = base("alice", "2026-11-09", "2026-11-09T10:02:00Z");
+        system_view.system = true;
+        assert!(
+            !adjacent_grouped(&a, &system_view),
+            "a system view does not group"
+        );
+    }
+
+    #[test]
+    fn within_five_minutes_bounds_the_grouping_window() {
+        assert!(
+            within_five_minutes("2026-11-09T10:00:00Z", "2026-11-09T10:04:59Z"),
+            "just inside the window groups"
+        );
+        assert!(
+            !within_five_minutes("2026-11-09T10:00:00Z", "2026-11-09T10:05:00Z"),
+            "the window is half-open: exactly five minutes does not group"
+        );
+        // One-sided window: `b < a + 5 min` never checks order, so an
+        // earlier stamp still groups. Unreachable in the pane, where
+        // rows are chronological — pinned as shipped semantics.
+        assert!(
+            within_five_minutes("2026-11-09T10:00:00Z", "2026-11-09T09:59:59Z"),
+            "the window is one-sided: only the upper bound is checked"
+        );
+        assert!(
+            !within_five_minutes("not-a-stamp", "2026-11-09T10:01:00Z"),
+            "unparsable stamps never group"
+        );
     }
 
     #[test]
