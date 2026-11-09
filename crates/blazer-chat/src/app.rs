@@ -291,6 +291,10 @@ pub struct ChatState {
     /// Bumped whenever cached messages change; the UI skips rebuilds
     /// otherwise.
     pub messages_version: u64,
+    /// Per-room render versions: the pane rebuilds only when its own
+    /// room's messages changed — background traffic must not touch it
+    /// (m10 S4).
+    pub message_versions: std::collections::HashMap<String, u64>,
     /// Room → the id of its first unread message, pinned when history
     /// lands with a positive unread count and cleared once a live
     /// message folds in for the open room (the user read past it).
@@ -379,7 +383,7 @@ impl ChatState {
                     })
             }
             ChatEvent::Messages { room_id, messages } => {
-                self.messages_version += 1;
+                self.bump_room_version(&room_id);
                 // The subscription count says how many of the newest
                 // messages were unread when the room opened: pin the
                 // boundary message before the count clears (m12 F1).
@@ -448,7 +452,7 @@ impl ChatState {
                 None
             }
             ChatEvent::Sent { message } => {
-                self.messages_version += 1;
+                self.bump_room_version(&message.room_id);
                 // The quote card is consumed by its send (m12 F6).
                 self.quote = None;
                 self.bump_room_activity(&message.room_id, message.ts.clone());
@@ -465,7 +469,7 @@ impl ChatState {
                 None
             }
             ChatEvent::LiveMessage(mut message) => {
-                self.messages_version += 1;
+                self.bump_room_version(&message.room_id);
                 // A live message for the open room means the user read
                 // past the boundary: the divider's job is done (m12 F1).
                 if self.active_room.as_deref() == Some(message.room_id.as_str()) {
@@ -495,8 +499,8 @@ impl ChatState {
                 None
             }
             ChatEvent::MessageUpdated { message } => {
-                self.messages_version += 1;
                 let room_id = message.room_id.clone();
+                self.bump_room_version(&room_id);
                 if let Some(room) = self.messages.get_mut(&room_id)
                     && let Some(known) = room.iter_mut().find(|known| known.id == message.id)
                 {
@@ -505,7 +509,7 @@ impl ChatState {
                 None
             }
             ChatEvent::MessageDeleted { room_id, msg_id } => {
-                self.messages_version += 1;
+                self.bump_room_version(&room_id);
                 if let Some(room) = self.messages.get_mut(&room_id) {
                     room.retain(|known| known.id != msg_id);
                 }
@@ -516,7 +520,7 @@ impl ChatState {
                 msg_id,
                 emoji,
             } => {
-                self.messages_version += 1;
+                self.bump_room_version(&room_id);
                 // Local toggle until the authoritative live redelivery;
                 // exact because the username is known here.
                 if let Some(me) = self.username.clone()
@@ -538,7 +542,9 @@ impl ChatState {
                         }
                     }
                 }
-                self.messages_version += 1;
+                for room_id in self.messages.keys().cloned().collect::<Vec<_>>() {
+                    self.bump_room_version(&room_id);
+                }
                 None
             }
             ChatEvent::UnreadCount { room_id, unread } => {
@@ -658,7 +664,7 @@ impl ChatState {
                 Some(ChatCommand::RefreshRoom { room_id })
             }
             ChatEvent::OlderMessages { room_id, messages } => {
-                self.messages_version += 1;
+                self.bump_room_version(&room_id);
                 if messages.is_empty() {
                     self.older_exhausted.insert(room_id);
                 } else {
@@ -703,6 +709,14 @@ impl ChatState {
     }
 
     /// Room activity bump: new messages raise the room to the top.
+    /// Bumps the room's render version (and the global one for any
+    /// other readers); the pane guard compares the active room's own
+    /// counter (m10 S4).
+    fn bump_room_version(&mut self, room_id: &str) {
+        *self.message_versions.entry(room_id.to_owned()).or_default() += 1;
+        self.messages_version += 1;
+    }
+
     fn bump_room_activity(&mut self, room_id: &str, ts: String) {
         if let Some(room) = self.rooms.iter_mut().find(|room| room.id == room_id) {
             room.lm = Some(ts);

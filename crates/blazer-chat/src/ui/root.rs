@@ -3,9 +3,10 @@
 //! push commands back.
 
 use gpui::{
-    Anchor, AnyElement, ClipboardItem, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    MouseButton, Pixels, Role, ScrollHandle, SharedString, Window, anchored, deferred, div, hsla,
-    img, prelude::*, px, rems, rgb, uniform_list, white,
+    Anchor, AnyElement, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode,
+    FontWeight, Hsla, ListAlignment, ListState, MouseButton, Pixels, Role, ScrollHandle,
+    SharedString, Window, anchored, deferred, div, hsla, img, list, prelude::*, px, rems, rgb,
+    uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
@@ -47,8 +48,9 @@ pub(crate) struct ChatRoot {
     /// The pane's rows: messages interleaved with day separators,
     /// rendered as plain scrollable children.
     rows: Vec<PaneRow>,
-    /// The pane's scroll; pins to the newest message on room switches.
-    scroll: ScrollHandle,
+    /// The pane's virtualized list state; follows the tail on new
+    /// messages and stops when the operator scrolls up (m10 S4).
+    messages_list: ListState,
     /// Picked file paths from the attach dialog's worker thread.
     pick_tx: async_channel::Sender<Option<std::path::PathBuf>>,
     /// This entity's own handle for row-closure callbacks.
@@ -72,7 +74,8 @@ pub(crate) struct ChatRoot {
     parsed: std::collections::HashMap<(String, String), std::sync::Arc<Vec<Vec<markdown::Span>>>>,
     /// The state versions the views were built from (skip no-op
     /// rebuilds).
-    views_version: u64,
+    views_room: Option<String>,
+    views_room_version: u64,
     views_emoji_version: u64,
     views_avatars_version: u64,
     /// One older-slice fetch per visit to the pane's top edge.
@@ -201,7 +204,12 @@ impl ChatRoot {
             thread_scroll: ScrollHandle::new(),
             results_scroll: ScrollHandle::new(),
             rows: Vec::new(),
-            scroll: ScrollHandle::new(),
+            messages_list: {
+                let state = ListState::new(0, ListAlignment::Bottom, px(400.))
+                    .with_uniform_item_height(px(52.));
+                state.set_follow_mode(FollowMode::Tail);
+                state
+            },
             pinned_room: None,
             pick_tx,
             open_menu: None,
@@ -212,7 +220,8 @@ impl ChatRoot {
             user_menu_open: false,
             loading_older: false,
             parsed: Default::default(),
-            views_version: u64::MAX,
+            views_room: None,
+            views_room_version: u64::MAX,
             views_emoji_version: u64::MAX,
             views_avatars_version: u64::MAX,
             paged_since_top: false,
@@ -244,10 +253,10 @@ impl ChatRoot {
                 .rows
                 .iter()
                 .position(|row| {
-                    matches!(row, PaneRow::Message { view_index } if self.views[*view_index].id == anchor_id)
+                    matches!(row, PaneRow::Message { view_index, .. } if self.views[*view_index].id == anchor_id)
                 })
         {
-            self.scroll.scroll_to_item(index);
+            self.messages_list.scroll_to_reveal_item(index);
         }
         self.mirror();
         cx.notify();
@@ -258,14 +267,25 @@ impl ChatRoot {
     fn rebuild_views(&mut self) {
         let switched = self.pinned_room.as_deref() != self.state.active_room.as_deref();
         // Nothing visible changed (badge/event churn): keep the views.
+        let room_version = self
+            .state
+            .active_room
+            .as_deref()
+            .and_then(|room| self.state.message_versions.get(room).copied())
+            .unwrap_or(0);
         if !switched
-            && self.views_version == self.state.messages_version
+            && self.views_room == self.state.active_room
+            && self.views_room_version == room_version
             && self.views_emoji_version == self.state.emoji_version
             && self.views_avatars_version == self.state.avatars_version
         {
             return;
         }
-        let at_bottom = self.scroll.offset().y >= -self.scroll.max_offset().y;
+        let anchor = self.messages_list.logical_scroll_top();
+        let tail = self.messages_list.is_following_tail();
+        let old_rows_len = self.rows.len();
+        let old_first = self.views.first().map(|view| view.id.clone());
+        let old_last = self.views.last().map(|view| view.id.clone());
         let messages = self.state.active_messages().to_vec();
         self.views = messages
             .iter()
@@ -291,22 +311,52 @@ impl ChatRoot {
             if boundary.as_deref() == Some(view.id.as_str()) {
                 self.rows.push(PaneRow::UnreadMarker { view_index });
             }
-            self.rows.push(PaneRow::Message { view_index });
+            let grouped = view_index > 0 && adjacent_grouped(&self.views[view_index - 1], view);
+            self.rows.push(PaneRow::Message {
+                view_index,
+                grouped,
+            });
         }
-        if switched || at_bottom {
+        if switched {
             // Jump to the unread divider when the room opened with
-            // unreads; otherwise land at the newest message.
+            // unreads; otherwise land at the newest message. While
+            // following, the list's Tail mode re-pins by itself.
             match self
                 .rows
                 .iter()
                 .position(|row| matches!(row, PaneRow::UnreadMarker { .. }))
             {
-                Some(index) if switched => self.scroll.scroll_to_item(index),
-                _ => self.scroll.scroll_to_bottom(),
+                Some(index) => self.messages_list.scroll_to_reveal_item(index),
+                None => self.messages_list.scroll_to_end(),
             }
             self.pinned_room = self.state.active_room.clone();
         }
-        self.views_version = self.state.messages_version;
+        // Splice preserves the anchor and scroll fill for append-only
+        // (new message) and prepend-only (load-older) growth; reset is
+        // the general fallback (drops one wheel frame, list.rs:907).
+        match self.rows.len().cmp(&old_rows_len) {
+            std::cmp::Ordering::Equal => {}
+            std::cmp::Ordering::Greater
+                if self.views.first().map(|view| view.id.clone()) == old_first =>
+            {
+                self.messages_list
+                    .splice(old_rows_len..old_rows_len, self.rows.len() - old_rows_len);
+            }
+            std::cmp::Ordering::Greater
+                if self.views.last().map(|view| view.id.clone()) == old_last =>
+            {
+                self.messages_list
+                    .splice(0..0, self.rows.len() - old_rows_len);
+            }
+            _ => {
+                self.messages_list.reset(self.rows.len());
+                if !tail {
+                    self.messages_list.scroll_to(anchor);
+                }
+            }
+        }
+        self.views_room = self.state.active_room.clone();
+        self.views_room_version = room_version;
         self.views_emoji_version = self.state.emoji_version;
         self.views_avatars_version = self.state.avatars_version;
     }
@@ -794,25 +844,13 @@ impl ChatRoot {
 
     /// One message row; consecutive same-sender rows within five
     /// minutes group (avatar and header hidden), like the original.
-    fn message_row(&self, index: usize) -> AnyElement {
-        self.message_row_view(&self.views[index])
+    fn message_row(&self, index: usize, grouped: bool) -> AnyElement {
+        self.message_row_view(&self.views[index], grouped)
     }
 
     /// The full row builder for any message view (main pane and
     /// threads render the same way).
-    fn message_row_view(&self, view: &MessageView) -> AnyElement {
-        let index = self
-            .views
-            .iter()
-            .position(|known| known.id == view.id)
-            .unwrap_or(0);
-        let grouped = index > 0 && !view.system && {
-            let previous = &self.views[index - 1];
-            !previous.system
-                && previous.sender == view.sender
-                && previous.day == view.day
-                && within_five_minutes(&previous.ts_raw, &view.ts_raw)
-        };
+    fn message_row_view(&self, view: &MessageView, grouped: bool) -> AnyElement {
         let room_id = view.room_id.clone();
         let msg_id = view.id.clone();
         let edit_text = view.text.clone();
@@ -1432,27 +1470,27 @@ impl gpui::Render for ChatRoot {
         .flex_1()
         .min_h_0();
 
-        // DECIDED (m10): plain scrollable rows for the pane,
-        // uniform_list for the sidebar. list() on the migrated
-        // bezel-gpui stack paints an empty pane even with a fixed
-        // height (feat/list-probe 81ace8a3, negative), and momentum
-        // glide stays operator-rejected. Revisit only on an upstream
-        // list() fix, with frame-time numbers from a visible window.
-        let mut rows: Vec<AnyElement> = Vec::with_capacity(self.rows.len());
-        for row in &self.rows {
-            match row {
-                PaneRow::Separator { day_ts } => rows.push(self.day_separator(day_ts)),
-                PaneRow::UnreadMarker { view_index } => rows.push(self.unread_marker(*view_index)),
-                PaneRow::Message { view_index } => rows.push(self.message_row(*view_index)),
+        // Virtualized pane (m10 S4): list() materializes only the
+        // visible window, so per-frame cost no longer scales with the
+        // room's cache. The old plain-children pane built every row
+        // every frame — the large-room lag. The 81ace8a3 probe's
+        // "negative" was a misapplied height (post-mortem: deepseek
+        // S4), not a gpui defect.
+        let handle = self.handle.clone();
+        let messages = list(self.messages_list.clone(), move |ix, _window, cx| {
+            let root = handle.read(cx);
+            match root.rows.get(ix) {
+                Some(PaneRow::Separator { day_ts }) => root.day_separator(day_ts),
+                Some(PaneRow::UnreadMarker { view_index }) => root.unread_marker(*view_index),
+                Some(PaneRow::Message {
+                    view_index,
+                    grouped,
+                }) => root.message_row(*view_index, *grouped),
+                None => div().into_any_element(),
             }
-        }
-        let messages = div()
-            .id("messages")
-            .flex()
-            .flex_col()
-            .track_scroll(&self.scroll)
-            .overflow_y_scroll()
-            .children(rows);
+        })
+        .flex_1()
+        .min_h_0();
 
         // Popup toasts: the pending notification list, docked above the
         // pane (the original client's bottom-right toasts; in-window so
@@ -1575,7 +1613,7 @@ impl gpui::Render for ChatRoot {
         // Scroll-to-top paging: one older slice per visit to the top
         // edge (edge-triggered — a pinned top must not re-fire every
         // frame), stopping at the pane cap or when history runs out.
-        let at_top = self.scroll.offset().y >= px(-1.0);
+        let at_top = self.messages_list.logical_scroll_top().item_ix == 0;
         if !at_top {
             self.paged_since_top = false;
         }
@@ -1605,11 +1643,16 @@ impl gpui::Render for ChatRoot {
             // attachments with image previews, reaction pills).
             let this = search_this.clone();
             let thread_messages: Vec<Msg> = self.state.thread(&tmid).to_vec();
-            let rows = thread_messages
+            let views: Vec<MessageView> = thread_messages
                 .iter()
-                .map(|message| {
-                    let view = self.message_view(message);
-                    self.message_row_view(&view)
+                .map(|message| self.message_view(message))
+                .collect();
+            let rows = views
+                .iter()
+                .enumerate()
+                .map(|(index, view)| {
+                    let grouped = index > 0 && adjacent_grouped(&views[index - 1], view);
+                    self.message_row_view(view, grouped)
                 })
                 .collect::<Vec<_>>();
             div()
@@ -1759,11 +1802,16 @@ impl gpui::Render for ChatRoot {
             // Read-only pinned tab (m12 F7): the same full rows as the
             // main pane.
             let this = search_this.clone();
-            let mut rows: Vec<gpui::AnyElement> = pinned
+            let views: Vec<MessageView> = pinned
                 .iter()
-                .map(|message| {
-                    let view = self.message_view(message);
-                    self.message_row_view(&view)
+                .map(|message| self.message_view(message))
+                .collect();
+            let mut rows: Vec<gpui::AnyElement> = views
+                .iter()
+                .enumerate()
+                .map(|(index, view)| {
+                    let grouped = index > 0 && adjacent_grouped(&views[index - 1], view);
+                    self.message_row_view(view, grouped)
                 })
                 .collect();
             if rows.is_empty() {
@@ -2426,7 +2474,7 @@ impl gpui::Render for ChatRoot {
                                 Some(room.id.as_str()) == self.state.active_room.as_deref()
                             })
                             .and_then(|room| room.topic.as_deref()),
-                        div().flex().flex_col().min_h_0().child(toasts).child(pane),
+                        div().flex().flex_1().min_h_0().child(toasts).child(pane),
                         None,
                     )),
             )
@@ -2548,6 +2596,16 @@ fn display_emoji(name: &str) -> String {
 }
 
 /// Consecutive-grouping window: same sender within five minutes.
+/// Two adjacent views collapse into one compact row: same non-system
+/// sender on the same day within five minutes.
+fn adjacent_grouped(previous: &MessageView, view: &MessageView) -> bool {
+    !previous.system
+        && !view.system
+        && previous.sender == view.sender
+        && previous.day == view.day
+        && within_five_minutes(&previous.ts_raw, &view.ts_raw)
+}
+
 fn within_five_minutes(prev: &str, next: &str) -> bool {
     match (
         prev.parse::<jiff::Timestamp>(),
@@ -2841,9 +2899,18 @@ fn open_url(url: &str) {
 /// What a message row's action buttons need at click time.
 /// One virtualized pane row: a message or a day divider.
 enum PaneRow {
-    Separator { day_ts: String },
-    UnreadMarker { view_index: usize },
-    Message { view_index: usize },
+    Separator {
+        day_ts: String,
+    },
+    UnreadMarker {
+        view_index: usize,
+    },
+    /// `grouped` is computed once per rebuild from view adjacency, not
+    /// per frame (m10 S4).
+    Message {
+        view_index: usize,
+        grouped: bool,
+    },
 }
 
 struct ActionContext {
