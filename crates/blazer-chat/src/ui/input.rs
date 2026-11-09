@@ -26,14 +26,15 @@ use gpui::{
 };
 use unicode_segmentation::*;
 
-/// Palette shared with the chat view (dark, native Wayland).
-pub(crate) const PANEL: u32 = 0x1a212b;
-pub(crate) const TEXT: u32 = 0xe8eaed;
-pub(crate) const MUTED: u32 = 0x93a4bc;
-pub(crate) const BORDER: u32 = 0x394354;
-pub(crate) const ACCENT: u32 = 0x4f8cff;
+/// Palette shared with the chat view; the values live in
+/// `theme::DARK` (the m9 sweep retires these aliases).
+pub(crate) const PANEL: u32 = super::theme::DARK.panel;
+pub(crate) const TEXT: u32 = super::theme::DARK.text;
+pub(crate) const MUTED: u32 = super::theme::DARK.muted;
+pub(crate) const BORDER: u32 = super::theme::DARK.border;
+pub(crate) const ACCENT: u32 = super::theme::DARK.accent;
 /// One step above the pane background: the hovered message row.
-pub(crate) const ROW_HOVER: u32 = 0x1a2230;
+pub(crate) const ROW_HOVER: u32 = super::theme::DARK.row_hover;
 
 /// The composer shows at most this many text rows; longer content stops
 /// growing and scrolls so the cursor stays visible.

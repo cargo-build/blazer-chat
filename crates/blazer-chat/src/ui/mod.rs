@@ -6,6 +6,7 @@ mod input;
 mod markdown;
 mod message_pane;
 mod root;
+mod theme;
 
 use gpui::{
     App, Application, Bounds, Focusable, WindowBounds, WindowOptions, actions, prelude::*, px, size,

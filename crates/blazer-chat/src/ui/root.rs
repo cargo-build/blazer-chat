@@ -22,7 +22,7 @@ use super::{
 use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
 use crate::rc::{Msg, Room};
 
-const BG: u32 = 0x11151c;
+const BG: u32 = super::theme::DARK.bg;
 
 /// The one window's root view.
 pub(crate) struct ChatRoot {
