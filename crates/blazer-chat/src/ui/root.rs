@@ -69,6 +69,11 @@ pub(crate) struct ChatRoot {
     /// keystroke bumps it and schedules a 300 ms task; only the
     /// task whose generation still matches saves.
     draft_save_gen: u64,
+    /// Per-message edit drafts keyed by `(room_id, msg_id)` (m14
+    /// P2, RC CurrentEditingMessage): an in-progress edit keeps
+    /// its own text across hops and re-entries; submission or
+    /// Escape discards it.
+    edit_drafts: std::collections::HashMap<(String, String), String>,
 }
 
 /// RC's `Message_MaxAllowedSize` default: sends over the limit keep
@@ -106,6 +111,34 @@ fn close_unclosed_code_block(text: &str) -> String {
     out
 }
 
+/// The edit-transition routing (RC CurrentEditingMessage, m14
+/// P2): the outgoing text lands in the outgoing edit's
+/// per-message draft, or in the room draft from a fresh composer;
+/// the incoming edit loads its unsubmitted draft, falling back to
+/// the message's own text. Returns the text to load.
+fn route_edit_transition(
+    editing: Option<&(String, String)>,
+    edit_drafts: &mut std::collections::HashMap<(String, String), String>,
+    room_drafts: &mut std::collections::HashMap<String, String>,
+    room_id: &str,
+    msg_id: &str,
+    outgoing: String,
+    original: String,
+) -> String {
+    match editing.cloned() {
+        Some(key) => {
+            edit_drafts.insert(key, outgoing);
+        }
+        None => {
+            room_drafts.insert(room_id.to_owned(), outgoing);
+        }
+    }
+    edit_drafts
+        .get(&(room_id.to_owned(), msg_id.to_owned()))
+        .cloned()
+        .unwrap_or(original)
+}
+
 /// Frame-interval sampling (m13 telemetry): the interval between
 /// consecutive render starts enters a 10-slot ring; the very first
 /// frame has no predecessor and samples nothing.
@@ -124,7 +157,12 @@ fn record_frame(
 }
 
 impl ChatRoot {
-    pub(crate) fn new(service: ChatService, window: &Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        service: ChatService,
+        send_on_enter: crate::settings::SendOnEnter,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let ChatService {
             events,
             commands,
@@ -175,7 +213,11 @@ impl ChatRoot {
         })
         .detach();
 
-        let composer = cx.new(|cx| TextInput::new("Message…", cx));
+        let composer = cx.new(|cx| {
+            let mut composer = TextInput::new("Message…", cx);
+            composer.set_send_on_enter(send_on_enter);
+            composer
+        });
         let search_rooms = Vec::new();
         // Edit walking needs the window (begin_edit focuses the
         // composer): subscribe_in, same as the pane (m13 S2b).
@@ -237,6 +279,7 @@ impl ChatRoot {
             last_frame_start: None,
             frame_ms: std::collections::VecDeque::new(),
             draft_save_gen: 0,
+            edit_drafts: Default::default(),
             search_rooms,
             focus: cx.focus_handle(),
             search,
@@ -418,7 +461,10 @@ impl ChatRoot {
     /// Escape: an edit backs out to the room's draft; with no edit an
     /// active search clears (m12 F12).
     fn cancel_editing(&mut self, cx: &mut Context<Self>) {
-        if let Some((edit_room, _)) = self.editing.take() {
+        if let Some((edit_room, msg_id)) = self.editing.take() {
+            // Escape discards the per-message draft (RC cancel,
+            // m14 P2); the room draft comes back.
+            self.edit_drafts.remove(&(edit_room.clone(), msg_id));
             let restored = self
                 .state
                 .drafts
@@ -471,9 +517,8 @@ impl ChatRoot {
         if own.is_empty() {
             return;
         }
-        // The in-progress text becomes the room draft before the hop.
-        let draft = self.composer.read(cx).content().to_owned();
-        self.state.drafts.insert(room.clone(), draft);
+        // begin_edit routes the in-progress text (per-message
+        // draft while editing, room draft from a fresh composer).
         let position = self
             .editing
             .as_ref()
@@ -664,11 +709,17 @@ impl ChatRoot {
         // A thread reply posts into the open thread; the main composer
         // posts to the room (SendThread was unreachable from the UI).
         let command = match self.editing.take() {
-            Some((edit_room, msg_id)) => ChatCommand::EditMessage {
-                room_id: edit_room,
-                msg_id,
-                text: text.clone(),
-            },
+            Some((edit_room, msg_id)) => {
+                // A submitted edit discards its draft (RC stop,
+                // m14 P2).
+                self.edit_drafts
+                    .remove(&(edit_room.clone(), msg_id.clone()));
+                ChatCommand::EditMessage {
+                    room_id: edit_room,
+                    msg_id,
+                    text: text.clone(),
+                }
+            }
             None => match self.state.open_thread.clone() {
                 Some((thread_room, tmid)) => ChatCommand::SendThread {
                     room_id: thread_room,
@@ -791,9 +842,23 @@ impl ChatRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The routing (RC CurrentEditingMessage, m14 P2): the
+        // outgoing text keeps its own per-message draft while
+        // editing, stays the room draft from a fresh composer; the
+        // incoming edit restores its unsubmitted text.
+        let outgoing = self.composer.read(cx).content().to_owned();
+        let loaded = route_edit_transition(
+            self.editing.as_ref(),
+            &mut self.edit_drafts,
+            &mut self.state.drafts,
+            &room_id,
+            &msg_id,
+            outgoing,
+            text,
+        );
         self.editing = Some((room_id, msg_id));
         self.composer
-            .update(cx, |composer, cx| composer.set_content(&text, cx));
+            .update(cx, |composer, cx| composer.set_content(&loaded, cx));
         window.focus(&self.composer.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
@@ -1974,7 +2039,7 @@ impl gpui::Render for ChatRoot {
                 .px_1p5()
                 .rounded_xs()
                 .text_xs()
-                .font_weight(if marker == "**" {
+                .font_weight(if marker == "*" {
                     FontWeight::BOLD
                 } else {
                     FontWeight::MEDIUM
@@ -2059,9 +2124,9 @@ impl gpui::Render for ChatRoot {
             .flex()
             .flex_none()
             .gap_1()
-            .child(fmt_button("B", "fmt-bold", "**"))
+            .child(fmt_button("B", "fmt-bold", "*"))
             .child(fmt_button("I", "fmt-italic", "_"))
-            .child(fmt_button("S", "fmt-strike", "~~"))
+            .child(fmt_button("S", "fmt-strike", "~"))
             .child(fmt_button("</>", "fmt-code", "`"))
             .child(emoji_button)
             .children(emoji_picker);
@@ -2262,7 +2327,15 @@ impl gpui::Render for ChatRoot {
                                         });
                                     })),
                             )
-                            .child(div().flex_1().child(self.composer.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    // The sendOnEnter modifier bindings
+                                    // scope here, not to the search box
+                                    // (m14 P2).
+                                    .key_context("Composer")
+                                    .child(self.composer.clone()),
+                            )
                             .child(
                                 div()
                                     .id("send")
@@ -2314,6 +2387,65 @@ fn completion_token(text: &str, caret: usize) -> Option<(usize, char, String)> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn edit_transition_routes_outgoing_and_loads_unsubmitted() {
+        let mut edit_drafts = std::collections::HashMap::new();
+        let mut room_drafts = std::collections::HashMap::new();
+        // Fresh composer: the typed text stays the room draft; the
+        // message's own text loads.
+        let loaded = route_edit_transition(
+            None,
+            &mut edit_drafts,
+            &mut room_drafts,
+            "room",
+            "mB",
+            "xyz".to_owned(),
+            "B".to_owned(),
+        );
+        assert_eq!(loaded, "B");
+        assert_eq!(room_drafts.get("room").map(String::as_str), Some("xyz"));
+        assert!(edit_drafts.is_empty());
+        // Hopping while editing: the outgoing text keeps the
+        // outgoing message's draft; re-entry restores it.
+        let editing = Some(("room".to_owned(), "mB".to_owned()));
+        let loaded = route_edit_transition(
+            editing.as_ref(),
+            &mut edit_drafts,
+            &mut room_drafts,
+            "room",
+            "mA",
+            "B2".to_owned(),
+            "A".to_owned(),
+        );
+        assert_eq!(loaded, "A");
+        assert_eq!(
+            edit_drafts
+                .get(&("room".to_owned(), "mB".to_owned()))
+                .map(String::as_str),
+            Some("B2")
+        );
+        // Hopping BACK via the walk (ArrowDown): re-entering mB
+        // restores its unsubmitted edit; the outgoing A text keeps
+        // its own draft.
+        let editing_on_a = Some(("room".to_owned(), "mA".to_owned()));
+        let loaded = route_edit_transition(
+            editing_on_a.as_ref(),
+            &mut edit_drafts,
+            &mut room_drafts,
+            "room",
+            "mB",
+            "A2".to_owned(),
+            "B".to_owned(),
+        );
+        assert_eq!(loaded, "B2", "re-entering restores the unsubmitted edit");
+        assert_eq!(
+            edit_drafts
+                .get(&("room".to_owned(), "mA".to_owned()))
+                .map(String::as_str),
+            Some("A2")
+        );
+    }
 
     #[test]
     fn reaction_only_needs_the_full_plus_colon_form() {

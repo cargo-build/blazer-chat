@@ -145,6 +145,10 @@ impl ShapeEntry {
 
 pub(crate) struct TextInput {
     focus_handle: FocusHandle,
+    /// The Enter semantics (m14 P2); only the message composer
+    /// takes the setting — the search box and other inputs keep
+    /// `Normal`.
+    pub(crate) send_on_enter: crate::settings::SendOnEnter,
     content: SharedString,
     placeholder: SharedString,
     /// The active completion popup; the host computes candidates (m12
@@ -184,6 +188,7 @@ impl TextInput {
         ]);
         Self {
             focus_handle: cx.focus_handle(),
+            send_on_enter: crate::settings::SendOnEnter::default(),
             content: "".into(),
             placeholder: placeholder.to_owned().into(),
             suggest: None,
@@ -206,6 +211,12 @@ impl TextInput {
 
     /// Sets the empty-composer hint (the per-room "Message #room",
     /// m12 F12).
+    /// Applies the sendOnEnter setting (m14 P2); called once for
+    /// the message composer at construction.
+    pub(crate) fn set_send_on_enter(&mut self, mode: crate::settings::SendOnEnter) {
+        self.send_on_enter = mode;
+    }
+
     pub(crate) fn set_placeholder(&mut self, text: &str, cx: &mut Context<Self>) {
         if self.placeholder.as_ref() != text {
             self.placeholder = text.to_owned().into();
@@ -476,6 +487,16 @@ impl TextInput {
     }
 
     fn insert_newline(&mut self, _: &InsertNewline, window: &mut Window, cx: &mut Context<Self>) {
+        // sendOnEnter=alternative: shift-enter is the send
+        // keystroke (m14 P2) — the modifier keys route here only
+        // in `normal`.
+        if self.send_on_enter == crate::settings::SendOnEnter::Alternative {
+            return self.submit_or_accept(cx);
+        }
+        self.insert_newline_only(window, cx);
+    }
+
+    fn insert_newline_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.marked_range.is_some() {
             return;
         }
@@ -627,16 +648,29 @@ impl TextInput {
             .unwrap_or(self.content.len())
     }
 
-    fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+    fn submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
+        // sendOnEnter=alternative (RC MessageBox inverted roles,
+        // m14 P2): plain Enter inserts a newline; the send
+        // keystrokes are the modifier variants (ctrl/alt/super are
+        // bound to Submit in the Composer context, shift-enter
+        // branches in `insert_newline`). The suggestion popup
+        // still accepts first.
+        if self.send_on_enter == crate::settings::SendOnEnter::Alternative && self.suggest.is_none()
+        {
+            return self.insert_newline_only(window, cx);
+        }
+        self.submit_or_accept(cx);
+    }
+
+    /// The shared send path: a suggestion up means Enter accepts it
+    /// (m12 F10); IME composition commits instead of sending;
+    /// whitespace-only content is not a message either (the send
+    /// path trims, an empty command would still hit the server).
+    fn submit_or_accept(&mut self, cx: &mut Context<Self>) {
         if self.suggest.is_some() {
-            // A suggestion is up: Enter accepts it instead of sending
-            // (m12 F10).
             self.accept_suggestion(cx);
             return;
         }
-        // Enter during IME composition commits the composition, never the
-        // message; whitespace-only content is not a message either (the
-        // send path trims, an empty command would still hit the server).
         if self.marked_range.is_some() || !self.content.trim().is_empty() {
             cx.emit(TextInputEvent::Submitted);
         }

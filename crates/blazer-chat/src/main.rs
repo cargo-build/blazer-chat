@@ -16,7 +16,7 @@ mod ui;
 
 fn main() {
     let settings = match settings::AppSettings::load() {
-        Ok(settings) => settings.server,
+        Ok(settings) => settings,
         Err(error) => {
             eprintln!("blazer-chat: {error}");
             std::process::exit(1);

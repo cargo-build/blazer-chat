@@ -13,10 +13,11 @@ use gpui::{
 };
 use gpui_platform::current_platform;
 
-use crate::rc::RcSettings;
+use crate::settings::{AppSettings, SendOnEnter};
 use input::{
-    Backspace, Copy, Cut, Delete, End, Home, Left, MoveLeftWord, MoveRightWord, Paste, Right,
-    SelectAll, SelectLeft, SelectLeftWord, SelectRight, SelectRightWord, ShowCharacterPalette,
+    Backspace, Copy, Cut, Delete, End, Home, InsertNewline, Left, MoveLeftWord, MoveRightWord,
+    Paste, Right, SelectAll, SelectLeft, SelectLeftWord, SelectRight, SelectRightWord,
+    ShowCharacterPalette, Submit,
 };
 
 actions!(zoom, [ZoomIn, ZoomOut, ZoomReset]);
@@ -26,15 +27,31 @@ actions!(roomnav, [FocusSearch]);
 /// Wayland app-id of the surface.
 const APP_ID: &str = "blazer-chat";
 
-pub fn run(settings: RcSettings) {
+pub fn run(settings: AppSettings) {
     // Bootstrap without the platform crate's HTTP client: its
     // `application()` attaches a Reqwest client whose constructor
     // spawns a hidden Tokio runtime — a third executor, against
     // DECL0001 (one owner per layer; all app I/O belongs to compio).
     // The UI never loads network images through gpui: emoji, avatars
     // and attachments land on disk via the compio client first.
-    Application::with_platform(current_platform(false)).run(|cx: &mut App| {
-        let service = crate::app::spawn(settings);
+    // sendOnEnter bindings (m14 P2, RC MessageBox): scoped to the
+    // composer's `Composer` context so the search box keeps its
+    // plain semantics. In `normal` every modifier+Enter inserts a
+    // newline (row 22); in `alternative` the modifier+Enter keys
+    // send — plain Enter and shift-enter branch inside the
+    // handlers.
+    let enter_bindings: Vec<gpui::KeyBinding> = match settings.composer.send_on_enter {
+        SendOnEnter::Normal => ["ctrl-enter", "alt-enter", "super-enter"]
+            .map(|key| gpui::KeyBinding::new(key, InsertNewline, Some("Composer")))
+            .into(),
+        SendOnEnter::Alternative => ["ctrl-enter", "alt-enter", "super-enter"]
+            .map(|key| gpui::KeyBinding::new(key, Submit, Some("Composer")))
+            .into(),
+    };
+    let send_on_enter = settings.composer.send_on_enter;
+    Application::with_platform(current_platform(false)).run(move |cx: &mut App| {
+        let service = crate::app::spawn(settings.server);
+        cx.bind_keys(enter_bindings);
 
         cx.bind_keys([
             gpui::KeyBinding::new("backspace", Backspace, None),
@@ -92,7 +109,7 @@ pub fn run(settings: RcSettings) {
                     app_id: Some(APP_ID.to_owned()),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| root::ChatRoot::new(service, window, cx)),
+                |window, cx| cx.new(|cx| root::ChatRoot::new(service, send_on_enter, window, cx)),
             )
             .expect("open the chat window");
 
