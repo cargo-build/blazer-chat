@@ -33,7 +33,7 @@ clippy:
     cargo clippy --workspace --all-targets -j 2 -- -D warnings
 
 # Everything a change must pass before it lands.
-gate: fmt-check clippy test api-check
+gate: fmt-check clippy test api-check pins-check
     @echo "gate green"
 
 # Fail the gate if client code calls an endpoint missing from the API
@@ -74,3 +74,24 @@ api-check:
 # Serve the API contract (Swagger UI) at http://localhost:8321.
 swagger:
     python3 -m http.server 8321 --directory docs/api
+
+# Fail the gate if the bezel-gpui crates drift apart: the lib and its
+# platform must resolve to one snapshot or runtime bootstrap breaks
+# (m10 S5 T6).
+pins-check:
+    #!/usr/bin/env python3
+    import pathlib, re, sys
+
+    lock = pathlib.Path("Cargo.lock").read_text()
+    versions = {}
+    for name, version in re.findall(
+        r'name = "(bezel-gpui[a-z-]*)"\nversion = "([^"]+)"', lock
+    ):
+        versions.setdefault(name, set()).add(version)
+    if not versions:
+        sys.exit("no bezel-gpui crates in Cargo.lock")
+    drifted = {name: sorted(vs) for name, vs in versions.items() if len(vs) > 1}
+    distinct = {sorted(vs)[0] for vs in versions.values()}
+    if drifted or len(distinct) > 1:
+        sys.exit(f"bezel-gpui family drifted: {drifted or dict(versions)}")
+    print(f"pins ok: {len(versions)} bezel crates at {sorted(distinct)[0]}")

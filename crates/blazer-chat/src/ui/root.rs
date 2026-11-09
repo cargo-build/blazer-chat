@@ -4,9 +4,9 @@
 
 use gpui::{
     Anchor, AnyElement, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode,
-    FontWeight, Hsla, ListAlignment, ListState, MouseButton, Pixels, Role, ScrollHandle,
-    SharedString, Window, anchored, deferred, div, hsla, img, list, prelude::*, px, rems, rgb,
-    uniform_list, white,
+    FontWeight, Hsla, ListAlignment, ListOffset, ListState, MouseButton, Pixels, Role,
+    ScrollHandle, SharedString, Window, anchored, deferred, div, hsla, img, list, prelude::*, px,
+    rems, rgb, uniform_list, white,
 };
 use std::sync::{Arc, Mutex};
 
@@ -32,6 +32,9 @@ pub(crate) struct ChatRoot {
     state: ChatState,
     commands: Sender<ChatCommand>,
     snapshot: Arc<Mutex<Option<UiSnapshot>>>,
+    /// Real pane rebuilds (version-guard misses); served over /state
+    /// as the runtime half of the S5 regression guard.
+    pane_rebuilds: u64,
     pub(crate) composer: Entity<TextInput>,
     /// Room matches for the current search query: id + display name,
     /// rendered above the message hits (m12 F3 room jump).
@@ -220,6 +223,7 @@ impl ChatRoot {
             user_menu_open: false,
             loading_older: false,
             parsed: Default::default(),
+            pane_rebuilds: 0,
             views_room: None,
             views_room_version: u64::MAX,
             views_emoji_version: u64::MAX,
@@ -232,32 +236,15 @@ impl ChatRoot {
         if matches!(event, ChatEvent::OlderMessages { .. }) {
             self.loading_older = false;
         }
-        // Prepending shifts rows: pin the previously-top message.
-        let anchor = match &event {
-            ChatEvent::OlderMessages { messages, .. } if !messages.is_empty() => self
-                .state
-                .active_messages()
-                .first()
-                .map(|message| message.id.clone()),
-            _ => None,
-        };
+        // Anchor policy lives only in rebuild_views: splices keep the
+        // viewport natively and reshapes restore by message id — a
+        // second anchor here would fight the first one (deepseek S5
+        // T3: the later scroll_to_reveal_item rewrote the index).
         let follow_up = self.state.apply(event);
         if let Some(command) = follow_up {
             self.send_command(command);
         }
-        // Render data derives in the entity, never in render: the pane only
-        // maps the precomputed spans to elements.
         self.rebuild_views();
-        if let Some(anchor_id) = anchor
-            && let Some(index) = self
-                .rows
-                .iter()
-                .position(|row| {
-                    matches!(row, PaneRow::Message { view_index, .. } if self.views[*view_index].id == anchor_id)
-                })
-        {
-            self.messages_list.scroll_to_reveal_item(index);
-        }
         self.mirror();
         cx.notify();
     }
@@ -286,6 +273,21 @@ impl ChatRoot {
         let old_rows_len = self.rows.len();
         let old_first = self.views.first().map(|view| view.id.clone());
         let old_last = self.views.last().map(|view| view.id.clone());
+        // The one anchor: the first message row at-or-below the
+        // viewport top, with its sub-row offset. Restore it if the
+        // rebuild reshapes the rows (deletes, edits that rewrap);
+        // splice arms keep it natively.
+        let restore = (!tail && !switched).then(|| {
+            let id = self
+                .rows
+                .iter()
+                .skip(anchor.item_ix)
+                .find_map(|row| match row {
+                    PaneRow::Message { view_index, .. } => Some(self.views[*view_index].id.clone()),
+                    _ => None,
+                });
+            id.map(|id| (id, anchor.offset_in_item))
+        });
         let messages = self.state.active_messages().to_vec();
         self.views = messages
             .iter()
@@ -334,27 +336,45 @@ impl ChatRoot {
         // Splice preserves the anchor and scroll fill for append-only
         // (new message) and prepend-only (load-older) growth; reset is
         // the general fallback (drops one wheel frame, list.rs:907).
-        match self.rows.len().cmp(&old_rows_len) {
-            std::cmp::Ordering::Equal => {}
-            std::cmp::Ordering::Greater
-                if self.views.first().map(|view| view.id.clone()) == old_first =>
-            {
-                self.messages_list
-                    .splice(old_rows_len..old_rows_len, self.rows.len() - old_rows_len);
+        let new_first = self.views.first().map(|view| view.id.clone());
+        let new_last = self.views.last().map(|view| view.id.clone());
+        match classify_row_change(
+            old_rows_len,
+            old_first.as_deref(),
+            old_last.as_deref(),
+            self.rows.len(),
+            new_first.as_deref(),
+            new_last.as_deref(),
+        ) {
+            RowChange::Same => {}
+            RowChange::Appended(added) => {
+                self.messages_list.splice(old_rows_len..old_rows_len, added);
             }
-            std::cmp::Ordering::Greater
-                if self.views.last().map(|view| view.id.clone()) == old_last =>
-            {
-                self.messages_list
-                    .splice(0..0, self.rows.len() - old_rows_len);
+            RowChange::Prepended(added) => {
+                self.messages_list.splice(0..0, added);
             }
-            _ => {
+            RowChange::Reshaped => {
                 self.messages_list.reset(self.rows.len());
-                if !tail {
-                    self.messages_list.scroll_to(anchor);
+                let restored = restore.flatten().and_then(|(id, offset)| {
+                    self.rows
+                        .iter()
+                        .position(|row| {
+                            matches!(row, PaneRow::Message { view_index, .. }
+                                if self.views[*view_index].id == id)
+                        })
+                        .map(|index| ListOffset {
+                            item_ix: index,
+                            offset_in_item: offset,
+                        })
+                });
+                match restored {
+                    Some(offset) => self.messages_list.scroll_to(offset),
+                    None if !tail => self.messages_list.scroll_to(anchor),
+                    None => {}
                 }
             }
         }
+        self.pane_rebuilds += 1;
         self.views_room = self.state.active_room.clone();
         self.views_room_version = room_version;
         self.views_emoji_version = self.state.emoji_version;
@@ -425,11 +445,17 @@ impl ChatRoot {
     /// Mirrors the entity into the control-socket snapshot. The UI thread
     /// holds the lock only for the store, never across a frame.
     fn mirror(&self) {
+        let mut snapshot = UiSnapshot::from_state(&self.state);
+        snapshot.pane_rebuilds = self.pane_rebuilds;
+        snapshot.build_profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
         *self
             .snapshot
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Some(UiSnapshot::from_state(&self.state));
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot);
     }
 
     fn open_room(&mut self, room_id: String, cx: &mut Context<Self>) {
@@ -1617,7 +1643,11 @@ impl gpui::Render for ChatRoot {
         if !at_top {
             self.paged_since_top = false;
         }
-        let filled = self.state.active_messages().len() >= 400;
+        let filled = self
+            .state
+            .active_room
+            .as_deref()
+            .is_some_and(|room| self.state.at_cache_cap(room));
         if at_top
             && !self.paged_since_top
             && !self.loading_older
@@ -2596,6 +2626,53 @@ fn display_emoji(name: &str) -> String {
 }
 
 /// Consecutive-grouping window: same sender within five minutes.
+/// How the pane's row list changed across a rebuild: identity of the
+/// boundary views decides, not counts alone (deepseek S5 T5).
+#[derive(Debug, PartialEq, Eq)]
+enum RowChange {
+    Same,
+    /// Grew at the tail (new message): `usize` rows added.
+    Appended(usize),
+    /// Grew at the head (load-older): `usize` rows added.
+    Prepended(usize),
+    /// Anything else — reset and restore the anchor by identity.
+    Reshaped,
+}
+
+fn classify_row_change(
+    old_len: usize,
+    old_first: Option<&str>,
+    old_last: Option<&str>,
+    new_len: usize,
+    new_first: Option<&str>,
+    new_last: Option<&str>,
+) -> RowChange {
+    match old_len.cmp(&new_len) {
+        // Equal length still hides a mid-list edit/delete+add: when a
+        // boundary identity moved, the anchor must re-derive.
+        std::cmp::Ordering::Equal => {
+            if old_first == new_first && old_last == new_last {
+                RowChange::Same
+            } else {
+                RowChange::Reshaped
+            }
+        }
+        std::cmp::Ordering::Greater => RowChange::Reshaped,
+        std::cmp::Ordering::Less => {
+            let added = new_len - old_len;
+            // Growing from empty is an append: splice(0..len) would
+            // shift the anchor of an empty viewport for nothing.
+            if old_first == new_first || old_first.is_none() {
+                RowChange::Appended(added)
+            } else if old_last == new_last {
+                RowChange::Prepended(added)
+            } else {
+                RowChange::Reshaped
+            }
+        }
+    }
+}
+
 /// Two adjacent views collapse into one compact row: same non-system
 /// sender on the same day within five minutes.
 fn adjacent_grouped(previous: &MessageView, view: &MessageView) -> bool {
@@ -3203,6 +3280,68 @@ impl gpui::Render for ReactionTooltip {
 #[allow(clippy::unwrap_used)] // tests assert the expected path
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_change_classifies_by_boundary_identity() {
+        let (f, l) = (Some("a"), Some("z"));
+        // Same boundary views: append at the tail.
+        assert_eq!(
+            classify_row_change(3, f, l, 4, f, Some("y")),
+            RowChange::Appended(1)
+        );
+        // Same tail view: prepend at the head.
+        assert_eq!(
+            classify_row_change(3, f, l, 5, Some("p"), l),
+            RowChange::Prepended(2)
+        );
+        // Both boundaries moved: reshape even at the same length.
+        assert_eq!(
+            classify_row_change(3, f, l, 3, Some("p"), Some("y")),
+            RowChange::Reshaped
+        );
+        // Same length and boundaries: no change.
+        assert_eq!(classify_row_change(3, f, l, 3, f, l), RowChange::Same);
+        // Shrinks are reshapes (delete) — never classified as growth.
+        assert_eq!(
+            classify_row_change(4, f, l, 2, Some("p"), Some("y")),
+            RowChange::Reshaped
+        );
+        // Empty to filled: append from a missing old first.
+        assert_eq!(
+            classify_row_change(0, None, None, 2, Some("a"), Some("b")),
+            RowChange::Appended(2)
+        );
+    }
+
+    #[test]
+    fn adjacent_grouped_needs_same_sender_day_and_recency() {
+        let base = |sender: &str, day: &str, ts: &str| MessageView {
+            id: format!("m-{sender}-{ts}"),
+            system: false,
+            room_id: "r".to_owned(),
+            ts: ts.to_owned(),
+            sender: sender.to_owned(),
+            text: String::new(),
+            lines: Default::default(),
+            reactions: Vec::new(),
+            file: None,
+            image_path: None,
+            avatar: None,
+            thread: None,
+            starred: false,
+            day: day.to_owned(),
+            ts_raw: ts.to_owned(),
+        };
+        let a = base("alice", "2026-11-09", "2026-11-09T10:00:00Z");
+        let b = base("alice", "2026-11-09", "2026-11-09T10:04:00Z");
+        assert!(adjacent_grouped(&a, &b), "four minutes apart groups");
+        let far = base("alice", "2026-11-09", "2026-11-09T10:06:00Z");
+        assert!(!adjacent_grouped(&a, &far), "six minutes does not");
+        let other = base("bob", "2026-11-09", "2026-11-09T10:01:00Z");
+        assert!(!adjacent_grouped(&a, &other), "other sender does not");
+        let new_day = base("alice", "2026-11-10", "2026-11-10T09:00:00Z");
+        assert!(!adjacent_grouped(&a, &new_day), "new day does not");
+    }
 
     #[test]
     fn pretty_time_renders_zone_offsets_and_falls_back() {

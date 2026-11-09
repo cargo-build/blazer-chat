@@ -71,7 +71,14 @@ pub fn run(settings: RcSettings) {
                     // collide; keep the layout intact instead.
                     window_min_size: Some(size(px(760.0), px(480.0))),
                     titlebar: Some(gpui::TitlebarOptions {
-                        title: Some("blazer-chat".into()),
+                        // A debug binary lags visibly and reads as a
+                        // regression (m10 incident 2): make the build
+                        // profile impossible to miss.
+                        title: Some(if cfg!(debug_assertions) {
+                            "blazer-chat [DEBUG — unoptimized]".into()
+                        } else {
+                            "blazer-chat".into()
+                        }),
                         ..Default::default()
                     }),
                     app_id: Some(APP_ID.to_owned()),

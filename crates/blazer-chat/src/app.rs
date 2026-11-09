@@ -676,7 +676,7 @@ impl ChatState {
                         .filter(|message| !known.contains(&message.id))
                         .collect();
                     entry.splice(0..0, fresh);
-                    let excess = entry.len().saturating_sub(400);
+                    let excess = entry.len().saturating_sub(ROOM_CACHE_CAP);
                     entry.drain(0..excess);
                 }
                 None
@@ -712,6 +712,13 @@ impl ChatState {
     /// Bumps the room's render version (and the global one for any
     /// other readers); the pane guard compares the active room's own
     /// counter (m10 S4).
+    /// Whether the room's cache sits at the cap (paging cutoff).
+    pub(crate) fn at_cache_cap(&self, room: &str) -> bool {
+        self.messages
+            .get(room)
+            .is_some_and(|entry| entry.len() >= ROOM_CACHE_CAP)
+    }
+
     fn bump_room_version(&mut self, room_id: &str) {
         *self.message_versions.entry(room_id.to_owned()).or_default() += 1;
         self.messages_version += 1;
@@ -758,6 +765,11 @@ impl ChatState {
 
 /// Mirror of the window state, written by the UI entity and served by the
 /// control socket so background tooling can verify without the compositor.
+/// One owner for the per-room cache cap: the transport trims here and
+/// the pane reads the same policy instead of a silent two-sided
+/// literal (m10 S5).
+pub(crate) const ROOM_CACHE_CAP: usize = 400;
+
 #[derive(Clone, Default, Serialize)]
 pub struct UiSnapshot {
     pub status: String,
@@ -777,6 +789,12 @@ pub struct UiSnapshot {
     pub active_room: Option<String>,
     pub messages: Vec<String>,
     pub error: Option<String>,
+    /// Build profile: the debug-binary trap (m10 incident 2) must be
+    /// visible to tooling, not just to a human squinting at latency.
+    pub build_profile: &'static str,
+    /// How many times the pane actually rebuilt (the S4 regression
+    /// guard's runtime half: background traffic must not move this).
+    pub pane_rebuilds: u64,
 }
 
 impl UiSnapshot {
@@ -788,6 +806,12 @@ impl UiSnapshot {
                 (None, _) => "not logged in".to_owned(),
             },
             username: state.username.clone(),
+            build_profile: if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            pane_rebuilds: 0,
             rooms: state
                 .rooms
                 .iter()
