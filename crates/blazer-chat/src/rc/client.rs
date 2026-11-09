@@ -675,7 +675,7 @@ impl<T: Transport> RcClient<T> {
 
     /// One wire message → the application message; the single owner of
     /// the mapping.
-    fn message_into_msg(&self, message: WireMessage) -> Msg {
+    pub(crate) fn message_into_msg(&self, message: WireMessage) -> Msg {
         let reactions = message
             .reactions
             .unwrap_or_default()
@@ -739,6 +739,7 @@ impl<T: Transport> RcClient<T> {
             sender: message.u.and_then(|user| user.username).unwrap_or_default(),
             text: message.msg.unwrap_or_default(),
             ts: message.ts.unwrap_or_default(),
+            edited: message.ued.is_some(),
             tmid: message.tmid,
             tcount: message.tcount,
             tlm: message.tlm,

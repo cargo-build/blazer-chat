@@ -365,6 +365,7 @@ mod tests {
             sender: "tester".to_owned(),
             text: "cached".to_owned(),
             ts: "2026-11-07T20:00:00Z".to_owned(),
+            edited: false,
             tmid: None,
             tcount: None,
             tlm: None,

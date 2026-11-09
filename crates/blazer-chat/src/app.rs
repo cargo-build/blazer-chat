@@ -284,6 +284,9 @@ pub struct ChatState {
     /// Notifications for rooms other than the active one, pending
     /// display (newest last, bounded).
     pub notifications: Vec<crate::rc::Notification>,
+    /// The last toast id handed out (m9 finding 20): stable ids
+    /// keep element identity and removal honest.
+    notification_seq: u64,
     /// Sender username → cached avatar path.
     pub avatars: std::collections::HashMap<String, String>,
     /// Rooms whose older history ran out (paging stops asking).
@@ -685,6 +688,9 @@ impl ChatState {
                 // The active room's traffic is on screen already; popups
                 // carry only the rest. Bounded: the oldest fall off.
                 if self.active_room.as_deref() != Some(note.room_id.as_str()) {
+                    let mut note = note;
+                    self.notification_seq += 1;
+                    note.id = self.notification_seq;
                     self.notifications.push(note);
                     let excess = self.notifications.len().saturating_sub(8);
                     self.notifications.drain(0..excess);
@@ -1485,6 +1491,7 @@ mod tests {
             sender: sender.to_owned(),
             text: text.to_owned(),
             ts: String::new(),
+            edited: false,
             tmid: None,
             tcount: None,
             tlm: None,
@@ -1773,6 +1780,7 @@ mod tests {
             ..ChatState::default()
         };
         let note = |room: &str| crate::rc::Notification {
+            id: 0,
             title: "laurent".to_owned(),
             text: String::new(),
             room_id: room.to_owned(),
@@ -1786,6 +1794,11 @@ mod tests {
         state.apply(ChatEvent::Notification(note("dm")));
         assert_eq!(state.notifications.len(), 1, "the active room is skipped");
         assert_eq!(state.notifications[0].room_id, "other");
+        state.apply(ChatEvent::Notification(note("third")));
+        assert_eq!(state.notifications[0].id, 1, "ids assign at push, stable");
+        assert_eq!(state.notifications[1].id, 2, "distinct, increasing");
+        state.notifications.retain(|note| note.id != 1);
+        assert_eq!(state.notifications[0].id, 2, "removal by id, not index");
         let snapshot = UiSnapshot::from_state(&state);
         assert_eq!(snapshot.notifications, vec!["laurent: hello".to_owned()]);
     }
@@ -1932,6 +1945,7 @@ mod tests {
                 sender: format!("u{index}"),
                 text: format!("text {index}"),
                 ts: format!("2026-11-08T0{index}:00:00Z"),
+                edited: false,
                 tmid: None,
                 tcount: None,
                 tlm: None,
@@ -1957,6 +1971,7 @@ mod tests {
             sender: "u9".to_owned(),
             text: "live".to_owned(),
             ts: "2026-11-08T05:00:00Z".to_owned(),
+            edited: false,
             tmid: None,
             tcount: None,
             tlm: None,

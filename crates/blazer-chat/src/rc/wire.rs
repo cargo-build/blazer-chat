@@ -153,6 +153,9 @@ pub struct WireMessage {
     /// Reaction name (server sends it colon-wrapped) → participant list.
     #[serde(default)]
     pub reactions: Option<std::collections::BTreeMap<String, WireReaction>>,
+    /// User-edited date (wire `ued`): present on edited messages.
+    #[serde(default)]
+    pub ued: Option<f64>,
     /// Starred-by list (user ids as values/objects on different server
     /// versions) — leniently kept as JSON values.
     #[serde(default)]

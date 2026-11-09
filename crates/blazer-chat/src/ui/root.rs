@@ -15,17 +15,18 @@ use super::markdown;
 use super::message_pane::{
     MessagePane, MessageView, PaneEvent, PaneInputs, adjacent_grouped, avatar, pretty_time,
 };
-use super::theme::{Palette, palette};
+use super::theme::{DARK, LIGHT, Palette, palette};
 use super::{
     ZoomIn, ZoomOut, ZoomReset,
     input::{Suggest, TextInput, TextInputEvent},
 };
 use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
 use crate::rc::{Msg, Room};
+use gpui::WindowAppearance;
 
 /// The one window's root view.
 pub(crate) struct ChatRoot {
-    pub(crate) state: ChatState,
+    state: ChatState,
     commands: Sender<ChatCommand>,
     snapshot: Arc<Mutex<Option<UiSnapshot>>>,
     pub(crate) composer: Entity<TextInput>,
@@ -36,7 +37,7 @@ pub(crate) struct ChatRoot {
     /// Local search box (the pane shows results while a query is set).
     search: Entity<TextInput>,
     /// `(room_id, msg_id)` while the composer edits an existing message.
-    pub(crate) editing: Option<(String, String)>,
+    editing: Option<(String, String)>,
     thread_scroll: ScrollHandle,
     results_scroll: ScrollHandle,
     /// Picked file paths from the attach dialog's worker thread.
@@ -44,13 +45,13 @@ pub(crate) struct ChatRoot {
     /// The message pane entity: rows, list state and parse cache.
     pane: Entity<MessagePane>,
     /// The row whose labeled action menu is open `(room_id, msg_id)`.
-    pub(crate) open_menu: Option<(String, String)>,
+    open_menu: Option<(String, String)>,
     /// The room whose right-click context menu is open (m12 F5).
     room_menu: Option<String>,
     /// The room-info panel toggle (header ℹ️, m12 F7).
     show_info: bool,
     /// The username whose user card is open (m12 F8).
-    pub(crate) user_card: Option<String>,
+    user_card: Option<String>,
     /// The emoji picker popover is open (m12 F9).
     emoji_picker_open: bool,
     /// The top-bar avatar menu is open.
@@ -69,12 +70,21 @@ pub(crate) struct ChatRoot {
     /// keystroke bumps it and schedules a 300 ms task; only the
     /// task whose generation still matches saves.
     draft_save_gen: u64,
+    /// Toasts the pointer is over (m9 finding 20): their
+    /// auto-dismiss timers re-arm instead of firing.
+    hovered_toasts: std::collections::HashSet<u64>,
+    /// Manual theme selection (operator request): None follows the
+    /// system appearance; Dark/Light pin it.
+    theme_override: Option<gpui::WindowAppearance>,
     /// Per-message edit drafts keyed by `(room_id, msg_id)` (m14
     /// P2, RC CurrentEditingMessage): an in-progress edit keeps
     /// its own text across hops and re-entries; submission or
     /// Escape discards it.
     edit_drafts: std::collections::HashMap<(String, String), String>,
 }
+
+/// How long a toast lives before auto-dismiss (m9 finding 20).
+const TOAST_AUTO_DISMISS: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// RC's `Message_MaxAllowedSize` default: sends over the limit keep
 /// the text and surface an error instead of hitting the wire
@@ -266,7 +276,11 @@ impl ChatRoot {
             .observe_window_appearance(move |window, cx| {
                 let p = palette(window.appearance());
                 this.update(cx, |chat, cx| {
-                    chat.palette = p;
+                    // A manual theme selection wins over the system
+                    // (operator request, m9).
+                    if chat.theme_override.is_none() {
+                        chat.palette = p;
+                    }
                     cx.notify();
                 });
             })
@@ -279,6 +293,8 @@ impl ChatRoot {
             last_frame_start: None,
             frame_ms: std::collections::VecDeque::new(),
             draft_save_gen: 0,
+            hovered_toasts: Default::default(),
+            theme_override: None,
             edit_drafts: Default::default(),
             search_rooms,
             focus: cx.focus_handle(),
@@ -302,7 +318,11 @@ impl ChatRoot {
         if matches!(event, ChatEvent::OlderMessages { .. }) {
             self.pane.update(cx, |pane, _| pane.clear_loading_older());
         }
+        let is_toast = matches!(event, ChatEvent::Notification(_));
         let follow_up = self.state.apply(event);
+        if is_toast && let Some(id) = self.state.notifications.last().map(|note| note.id) {
+            self.spawn_toast_timer(id, cx);
+        }
         if let Some(command) = follow_up {
             self.send_command(command);
         }
@@ -452,7 +472,7 @@ impl ChatRoot {
 
     /// Queues a command; a full queue is a bug-scale backlog, so the
     /// drop is loud (m10 bounded-channel policy).
-    pub(crate) fn send_command(&self, command: ChatCommand) {
+    fn send_command(&self, command: ChatCommand) {
         if let Err(error) = self.commands.try_send(command) {
             eprintln!("blazer-chat: command queue full, dropped: {error}");
         }
@@ -622,6 +642,60 @@ impl ChatRoot {
         cx.notify();
     }
 
+    /// Cycles the manual theme selection (operator request, m9):
+    /// auto (system appearance) -> dark -> light -> auto.
+    fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme_override = match self.theme_override {
+            None => Some(WindowAppearance::Dark),
+            Some(WindowAppearance::Dark) => Some(WindowAppearance::Light),
+            Some(WindowAppearance::Light) | Some(WindowAppearance::VibrantLight) => None,
+            Some(WindowAppearance::VibrantDark) => None,
+        };
+        self.palette = match self.theme_override {
+            Some(WindowAppearance::Dark | WindowAppearance::VibrantDark) => DARK,
+            Some(WindowAppearance::Light | WindowAppearance::VibrantLight) => LIGHT,
+            None => palette(window.appearance()),
+        };
+        cx.notify();
+    }
+
+    /// Auto-dismiss loop for one toast (m9 finding 20): fires
+    /// after 6 s, re-arming while the pointer hovers the toast.
+    /// A toast already gone (clicked through or drained) ends the
+    /// loop.
+    fn spawn_toast_timer(&mut self, id: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |root, cx| {
+            loop {
+                cx.background_executor().timer(TOAST_AUTO_DISMISS).await;
+                let action = root
+                    .update(cx, |chat, _| {
+                        if !chat.state.notifications.iter().any(|note| note.id == id) {
+                            None // already gone
+                        } else if chat.hovered_toasts.contains(&id) {
+                            Some(false) // hovered: re-arm
+                        } else {
+                            Some(true) // dismiss
+                        }
+                    })
+                    .ok()
+                    .flatten();
+                match action {
+                    None => break,
+                    Some(false) => continue,
+                    Some(true) => {
+                        let _ = root.update(cx, |chat, cx| {
+                            chat.state.notifications.retain(|note| note.id != id);
+                            chat.hovered_toasts.remove(&id);
+                            cx.notify();
+                        });
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Debounced typing draft save (RC useDraft's 300 ms, m14
     /// P2): the local map updates immediately so a room switch
     /// never loses text; the server save fires only after 300 ms
@@ -760,7 +834,7 @@ impl ChatRoot {
     /// Rocket.Chat reactions are emoji NAMES on the wire (`+1`, `tada`,
     /// …); the unicode glyph is display-only.
     /// Opens or closes one row's labeled action menu.
-    pub(crate) fn toggle_menu(&mut self, room_id: String, msg_id: String, cx: &mut Context<Self>) {
+    fn toggle_menu(&mut self, room_id: String, msg_id: String, cx: &mut Context<Self>) {
         self.open_menu = match self.open_menu.as_ref() {
             Some(open) if open.0 == room_id && open.1 == msg_id => None,
             _ => Some((room_id, msg_id)),
@@ -770,7 +844,7 @@ impl ChatRoot {
 
     /// Stars or unstars a message through the server; the fold applies
     /// the flip locally.
-    pub(crate) fn toggle_star(&mut self, msg_id: String, starred: bool, cx: &mut Context<Self>) {
+    fn toggle_star(&mut self, msg_id: String, starred: bool, cx: &mut Context<Self>) {
         self.send_command(ChatCommand::StarMessage {
             msg_id,
             star: !starred,
@@ -782,7 +856,7 @@ impl ChatRoot {
     /// The original client's permalink:
     /// `{origin}/{channel|group}/{room name}/msg/{id}` — channels and
     /// groups only (DM links address the peer, which rooms don't carry).
-    pub(crate) fn permalink(&self, room_id: &str, msg_id: &str) -> Option<String> {
+    fn permalink(&self, room_id: &str, msg_id: &str) -> Option<String> {
         let origin = self.state.origin.as_deref()?;
         let room = self.state.rooms.iter().find(|room| room.id == room_id)?;
         let path = match room.kind {
@@ -817,7 +891,7 @@ impl ChatRoot {
         cx.notify();
     }
 
-    pub(crate) fn toggle_reaction(
+    fn toggle_reaction(
         &mut self,
         room_id: &str,
         msg_id: &str,
@@ -834,7 +908,7 @@ impl ChatRoot {
 
     /// Puts a message back into the composer for editing; the next
     /// submit sends `chat.update` instead of a new message.
-    pub(crate) fn begin_edit(
+    fn begin_edit(
         &mut self,
         room_id: String,
         msg_id: String,
@@ -884,7 +958,7 @@ impl ChatRoot {
         cx.notify();
     }
 
-    pub(crate) fn delete_message(&mut self, room_id: &str, msg_id: &str, cx: &mut Context<Self>) {
+    fn delete_message(&mut self, room_id: &str, msg_id: &str, cx: &mut Context<Self>) {
         self.send_command(ChatCommand::DeleteMessage {
             room_id: room_id.to_owned(),
             msg_id: msg_id.to_owned(),
@@ -1269,83 +1343,91 @@ impl gpui::Render for ChatRoot {
         // Popup toasts: the pending notification list, docked above the
         // pane (the original client's bottom-right toasts; in-window so
         // nothing floats over the operator's desktop). Click opens the
-        // room; ✖ dismisses.
+        // room; ✖ dismisses; hover pauses the auto-dismiss (m9
+        // finding 20: stable ids, removal by id, live-region role).
         let toasts = div().flex().flex_none().flex_col().gap_1().children(
-            self.state
-                .notifications
-                .iter()
-                .enumerate()
-                .map(|(index, note)| {
-                    let this = cx.entity();
-                    let room_id = note.room_id.clone();
-                    let body = note.message.clone().unwrap_or_else(|| note.text.clone());
-                    div()
-                        .id(SharedString::from(format!("toast-{index}")))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .py_1p5()
-                        .rounded_md()
-                        .bg(rgb(p.panel))
-                        .border_1()
-                        .border_color(rgb(p.accent))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(p.row_hover)))
-                        .on_click({
-                            let this = this.clone();
-                            move |_, _, cx| {
-                                this.update(cx, |chat, cx| {
-                                    chat.open_room(room_id.clone(), cx);
-                                    chat.state.notifications.remove(index);
-                                    cx.notify();
-                                });
-                            }
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap_0p5()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(p.text))
-                                        .child(SharedString::from(note.title.clone())),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(p.muted))
-                                        .truncate()
-                                        .child(SharedString::from(body)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("toast-close-{index}")))
-                                .flex_none()
-                                .px_1()
-                                .rounded_xs()
-                                .text_xs()
-                                .text_color(rgb(p.muted))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(p.border)).text_color(rgb(p.text)))
-                                .child("✖")
-                                .on_click({
-                                    let this = this.clone();
-                                    move |_, _, cx| {
-                                        this.update(cx, |chat, cx| {
-                                            chat.state.notifications.remove(index);
-                                            cx.notify();
-                                        });
-                                    }
-                                }),
-                        )
-                }),
+            self.state.notifications.iter().map(|note| {
+                let this = cx.entity();
+                let id = note.id;
+                let room_id = note.room_id.clone();
+                let body = note.message.clone().unwrap_or_else(|| note.text.clone());
+                div()
+                    .id(SharedString::from(format!("toast-{id}")))
+                    .role(Role::Status)
+                    .on_hover(cx.listener(move |chat, hovered: &bool, _, _| {
+                        if *hovered {
+                            chat.hovered_toasts.insert(id);
+                        } else {
+                            chat.hovered_toasts.remove(&id);
+                        }
+                    }))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_md()
+                    .bg(rgb(p.panel))
+                    .border_1()
+                    .border_color(rgb(p.accent))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(p.row_hover)))
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |chat, cx| {
+                                chat.open_room(room_id.clone(), cx);
+                                chat.state.notifications.retain(|note| note.id != id);
+                                chat.hovered_toasts.remove(&id);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(p.text))
+                                    .child(SharedString::from(note.title.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(p.muted))
+                                    .truncate()
+                                    .child(SharedString::from(body)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("toast-close-{id}")))
+                            .flex_none()
+                            .px_1()
+                            .rounded_xs()
+                            .text_xs()
+                            .text_color(rgb(p.muted))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(p.border)).text_color(rgb(p.text)))
+                            .child("✖")
+                            .on_click({
+                                let this = this.clone();
+                                move |_, _, cx| {
+                                    this.update(cx, |chat, cx| {
+                                        chat.state.notifications.retain(|note| note.id != id);
+                                        chat.hovered_toasts.remove(&id);
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
+            }),
         );
 
         // Search strip: a query switches the pane to local results.
@@ -1878,6 +1960,76 @@ impl gpui::Render for ChatRoot {
                             .text_color(rgb(p.text))
                             .child("blazer-chat"),
                     )
+                    .child(
+                        // live_connected chip (m9, m5 finding 21):
+                        // the websocket state was invisible before.
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(if self.state.live_connected {
+                                p.online
+                            } else {
+                                p.danger
+                            }))
+                            .text_xs()
+                            .text_color(rgb(if self.state.live_connected {
+                                p.muted
+                            } else {
+                                p.danger
+                            }))
+                            .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(rgb(
+                                if self.state.live_connected {
+                                    p.online
+                                } else {
+                                    p.danger
+                                },
+                            )))
+                            .child(if self.state.live_connected {
+                                "live"
+                            } else {
+                                "offline"
+                            }),
+                    )
+                    .child(
+                        // Theme toggle (operator request, m9): auto
+                        // follows the system; dark/light pin it.
+                        div()
+                            .id("theme-toggle")
+                            .role(Role::Button)
+                            .aria_label("Cycle theme: auto, dark, light")
+                            .flex_none()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(p.border))
+                            .text_xs()
+                            .text_color(rgb(p.muted))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(p.row_hover)).text_color(rgb(p.text)))
+                            .on_click({
+                                let this = cx.entity();
+                                move |_: &gpui::ClickEvent,
+                                      window: &mut gpui::Window,
+                                      cx: &mut gpui::App| {
+                                    this.update(cx, |chat, cx| chat.cycle_theme(window, cx));
+                                }
+                            })
+                            .child(match self.theme_override {
+                                Some(WindowAppearance::Dark | WindowAppearance::VibrantDark) => {
+                                    "dark"
+                                }
+                                Some(WindowAppearance::Light | WindowAppearance::VibrantLight) => {
+                                    "light"
+                                }
+                                _ => "auto",
+                            }),
+                    )
                     .child(div().flex_1())
                     .child(div().flex_none().flex().w(px(480.0)).child(search_strip))
                     .child(div().flex_1())
@@ -2272,7 +2424,29 @@ impl gpui::Render for ChatRoot {
                     .flex_1()
                     .min_h_0()
                     .gap_3()
-                    .child(panel("rooms", None, rooms, Some(px(240.0)), p))
+                    .child(panel(
+                        "rooms",
+                        None,
+                        if room_count == 0 {
+                            // Empty state (m9, m5 finding 21).
+                            div()
+                                .flex_1()
+                                .items_center()
+                                .justify_center()
+                                .child(div().text_sm().text_color(rgb(p.muted)).child(
+                                    if self.state.rooms.is_empty() {
+                                        "no rooms yet"
+                                    } else {
+                                        "no matches"
+                                    },
+                                ))
+                                .into_any_element()
+                        } else {
+                            rooms.into_any_element()
+                        },
+                        Some(px(240.0)),
+                        p,
+                    ))
                     .child(panel(
                         &pane_title,
                         self.state
@@ -2282,7 +2456,16 @@ impl gpui::Render for ChatRoot {
                                 Some(room.id.as_str()) == self.state.active_room.as_deref()
                             })
                             .and_then(|room| room.topic.as_deref()),
-                        div().flex().flex_1().min_h_0().child(toasts).child(pane),
+                        // flex_col: the toasts dock ABOVE the pane; the default
+                        // flex-row placed them beside it (agy design
+                        // review P1-9, a live layout bug).
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .child(toasts)
+                            .child(pane),
                         None,
                         p,
                     )),

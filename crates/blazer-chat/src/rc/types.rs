@@ -126,6 +126,10 @@ pub struct Msg {
     /// Whether the logged-in user starred this message (wire `starred`).
     #[serde(default)]
     pub starred_by_me: bool,
+    /// The message was edited on the server (wire `ued` present);
+    /// renders the "(edited)" marker (m9).
+    #[serde(default)]
+    pub edited: bool,
     /// Service notice (wire `t` in `uj`/`ul`/`ru`/`au`): rendered
     /// compact and never grouped into a sender run (m12 F2).
     #[serde(default)]
@@ -168,6 +172,9 @@ impl Reaction {
     reason = "wire-complete decode; the popup UI consumes the rest next slice"
 )]
 pub struct Notification {
+    /// Stable identity assigned by ChatState at push time (m9
+    /// finding 20): element ids and removal never address by index.
+    pub id: u64,
     pub title: String,
     /// Envelope fallback text (present when `payload.message` is not).
     pub text: String,

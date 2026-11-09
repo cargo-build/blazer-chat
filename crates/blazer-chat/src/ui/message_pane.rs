@@ -36,6 +36,8 @@ pub(crate) struct MessageView {
     pub(crate) thread: Option<(u32, String)>,
     /// Starred by the logged-in user (menu shows "Remove Star").
     pub(crate) starred: bool,
+    /// The server-side edit flag: renders the "(edited)" marker.
+    pub(crate) edited: bool,
     /// UTC date (YYYY-MM-DD); the pane inserts day separators between
     /// different dates.
     pub(crate) day: String,
@@ -1021,6 +1023,7 @@ impl MessagePane {
             system: message.system,
             room_id: message.room_id.clone(),
             starred: message.starred_by_me,
+            edited: message.edited,
             ts: pretty_time(&message.ts),
             sender: message.sender.clone(),
             text: message.text.clone(),
@@ -1330,7 +1333,12 @@ impl MessagePane {
                                         .text_xs()
                                         .text_color(rgb(p.muted))
                                         .child(SharedString::from(view.ts.clone())),
-                                ),
+                                )
+                                .when(view.edited, |header| {
+                                    header.child(
+                                        div().text_xs().text_color(rgb(p.muted)).child("(edited)"),
+                                    )
+                                }),
                         )
                     })
                     .child(message_element(view, inputs.me.as_deref(), &self.entity, p))
@@ -1456,24 +1464,72 @@ impl MessagePane {
     /// The virtualized list element; the closure reads only this
     /// entity, never the root (m13 S2a).
     pub(crate) fn element(&self, inputs: &PaneInputs) -> AnyElement {
+        let p = inputs.palette;
+        // Empty states (m9, m5 finding 21): a closed pane and an
+        // open-but-empty room are different states, not blank space.
+        if self.rows.is_empty() {
+            let text = if self.views_room.is_none() {
+                "open a room to see its messages"
+            } else {
+                "no messages yet"
+            };
+            return div()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .child(div().text_sm().text_color(rgb(p.muted)).child(text))
+                .into_any_element();
+        }
         let entity = self.entity.clone();
         let inputs = std::rc::Rc::new(inputs.clone());
-        list(self.messages_list.clone(), move |ix, _window, cx| {
-            let pane = entity.read(cx);
-            let p = inputs.palette;
-            match pane.rows.get(ix) {
-                Some(PaneRow::Separator { day_ts }) => pane.day_separator(day_ts, p),
-                Some(PaneRow::UnreadMarker { view_index }) => pane.unread_marker(*view_index, p),
-                Some(PaneRow::Message {
-                    view_index,
-                    grouped,
-                }) => pane.message_row(*view_index, *grouped, &inputs),
-                None => div().into_any_element(),
-            }
-        })
-        .flex_1()
-        .min_h_0()
-        .into_any_element()
+        // Loading pill (m9, m5 finding 21): fetch-older has a visual.
+        let loading_pill = self.loading_older.then(|| {
+            div()
+                .flex()
+                .w_full()
+                .items_center()
+                .justify_center()
+                .py_1()
+                .child(
+                    div()
+                        .px_2()
+                        .py_0p5()
+                        .rounded_full()
+                        .bg(rgb(p.panel))
+                        .border_1()
+                        .border_color(rgb(p.border))
+                        .text_xs()
+                        .text_color(rgb(p.muted))
+                        .child("loading older…"),
+                )
+        });
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .children(loading_pill)
+            .child(
+                list(self.messages_list.clone(), move |ix, _window, cx| {
+                    let pane = entity.read(cx);
+                    let p = inputs.palette;
+                    match pane.rows.get(ix) {
+                        Some(PaneRow::Separator { day_ts }) => pane.day_separator(day_ts, p),
+                        Some(PaneRow::UnreadMarker { view_index }) => {
+                            pane.unread_marker(*view_index, p)
+                        }
+                        Some(PaneRow::Message {
+                            view_index,
+                            grouped,
+                        }) => pane.message_row(*view_index, *grouped, &inputs),
+                        None => div().into_any_element(),
+                    }
+                })
+                .flex_1()
+                .min_h_0(),
+            )
+            .into_any_element()
     }
 
     /// The paging trigger as a pure query: flips the edge flags and
@@ -1553,6 +1609,7 @@ mod tests {
             system: false,
             room_id: "r".to_owned(),
             ts: ts.to_owned(),
+            edited: false,
             sender: sender.to_owned(),
             text: String::new(),
             lines: Default::default(),
@@ -1633,6 +1690,7 @@ mod tests {
             room_id: ROOM.to_owned(),
             sender: format!("user{}", index % 2),
             text: format!("message {index}"),
+            edited: false,
             ts: format!(
                 "2026-11-09T10:{:02}:{:02}.000Z",
                 (index / 60) % 60,

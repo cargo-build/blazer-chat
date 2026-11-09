@@ -166,6 +166,22 @@ const THREAD_MESSAGES_FIXTURE: &str = include_str!("fixtures/thread-messages.jso
 const ROOMS_GET_FIXTURE: &str = include_str!("fixtures/rooms-get.json");
 
 #[test]
+fn wire_ued_marks_the_message_edited() {
+    // The (edited) marker (m9): wire `ued` presence maps to Msg.edited.
+    let rc = client(FakeTransport::answering(&[]));
+    let with_ued: crate::rc::wire::WireMessage = serde_json::from_str(
+        r#"{"_id":"m1","rid":"r1","msg":"hi","ts":"2026-11-09T10:00:00.000Z","u":{"username":"a"},"ued":1636000000000.0}"#,
+    )
+    .unwrap();
+    assert!(rc.message_into_msg(with_ued).edited);
+    let plain: crate::rc::wire::WireMessage = serde_json::from_str(
+        r#"{"_id":"m2","rid":"r1","msg":"yo","ts":"2026-11-09T10:01:00.000Z","u":{"username":"a"}}"#,
+    )
+    .unwrap();
+    assert!(!rc.message_into_msg(plain).edited);
+}
+
+#[test]
 fn emoji_image_path_percent_encodes_server_supplied_parts() {
     // state-audit A2 follow-up: name/extension are server-controlled —
     // a raw space or `?`/`#` would split or re-target the request line.

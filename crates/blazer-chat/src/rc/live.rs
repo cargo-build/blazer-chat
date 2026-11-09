@@ -406,6 +406,7 @@ fn notification_from_args(args: &Value) -> Option<Notification> {
     let arg = args.as_array()?.first()?;
     let payload = arg.get("payload")?;
     Some(Notification {
+        id: 0,
         title: arg
             .get("title")
             .and_then(Value::as_str)
@@ -523,6 +524,7 @@ fn message_from_event(event: &Value, origin: Option<&str>) -> Option<Msg> {
             .and_then(Value::as_u64)
             .map(|n| n as u32),
         tlm: ejson_date(message.get("tlm")),
+        edited: message.get("ued").is_some(),
         system: message
             .get("t")
             .and_then(Value::as_str)
