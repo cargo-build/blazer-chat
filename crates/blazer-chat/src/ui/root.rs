@@ -42,9 +42,6 @@ pub(crate) struct ChatRoot {
     search: Entity<TextInput>,
     /// `(room_id, msg_id)` while the composer edits an existing message.
     editing: Option<(String, String)>,
-    /// Per-room composer drafts: half-typed text belongs to the room it
-    /// was typed in, not to whichever room opens next.
-    drafts: std::collections::HashMap<String, String>,
     thread_scroll: ScrollHandle,
     results_scroll: ScrollHandle,
     /// The pane's rows: messages interleaved with day separators,
@@ -169,11 +166,16 @@ impl ChatRoot {
         let search_rooms = Vec::new();
         cx.subscribe(&composer, |chat, _, event, cx| match event {
             TextInputEvent::Submitted => chat.send_message(cx),
+            TextInputEvent::Cancelled => chat.cancel_editing(cx),
+            TextInputEvent::ImagePasted { bytes, ext } => {
+                chat.upload_clipboard_image(bytes, ext, cx);
+            }
         })
         .detach();
         let search = cx.new(|cx| TextInput::new("Search…", cx));
         cx.subscribe(&search, |chat, _, event, cx| match event {
             TextInputEvent::Submitted => chat.run_search(cx),
+            TextInputEvent::Cancelled | TextInputEvent::ImagePasted { .. } => {}
         })
         .detach();
         Self {
@@ -187,7 +189,6 @@ impl ChatRoot {
             views: Vec::new(),
             search,
             editing: None,
-            drafts: Default::default(),
             thread_scroll: ScrollHandle::new(),
             results_scroll: ScrollHandle::new(),
             rows: Vec::new(),
@@ -379,16 +380,86 @@ impl ChatRoot {
         // started in: save the text, drop the edit, restore the draft.
         if let Some(previous) = self.state.active_room.clone() {
             let draft = self.composer.read(cx).content().to_owned();
-            self.drafts.insert(previous, draft);
+            self.state.drafts.insert(previous.clone(), draft.clone());
+            let _ = self.commands.try_send(ChatCommand::SaveDraft {
+                room_id: previous,
+                text: draft,
+            });
         }
         self.editing = None;
         // Panels and cards belong to the room they opened in.
         self.show_info = false;
         self.user_card = None;
-        let restored = self.drafts.get(&room_id).cloned().unwrap_or_default();
+        let restored = self.state.drafts.get(&room_id).cloned().unwrap_or_default();
         self.composer
             .update(cx, |composer, cx| composer.set_content(&restored, cx));
-        let _ = self.commands.try_send(ChatCommand::OpenRoom { room_id });
+        // The placeholder names the room (m12 F12).
+        let name = self
+            .state
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+            .map(|room| room.name.clone());
+        let placeholder = match name {
+            Some(name) => format!("Message #{name}"),
+            None => "Message…".to_owned(),
+        };
+        self.composer.update(cx, |composer, cx| {
+            composer.set_placeholder(&placeholder, cx)
+        });
+        let _ = self.commands.try_send(ChatCommand::OpenRoom {
+            room_id: room_id.clone(),
+        });
+        cx.notify();
+    }
+
+    /// Escape: an edit backs out to the room's draft; with no edit an
+    /// active search clears (m12 F12).
+    fn cancel_editing(&mut self, cx: &mut Context<Self>) {
+        if let Some((edit_room, _)) = self.editing.take() {
+            let restored = self
+                .state
+                .drafts
+                .get(&edit_room)
+                .cloned()
+                .unwrap_or_default();
+            self.composer
+                .update(cx, |composer, cx| composer.set_content(&restored, cx));
+        } else if self
+            .state
+            .search_query
+            .as_deref()
+            .is_some_and(|query| !query.is_empty())
+        {
+            self.search.update(cx, |box_, cx| box_.set_content("", cx));
+            let _ = self.commands.try_send(ChatCommand::Search(String::new()));
+        }
+        cx.notify();
+    }
+
+    /// An image pasted into the composer rides the upload path (m12
+    /// F14): bytes land in a temp file, the attach flow uploads.
+    fn upload_clipboard_image(&mut self, bytes: &[u8], ext: &str, cx: &mut Context<Self>) {
+        let Some(room_id) = self.state.active_room.clone() else {
+            self.state.error = Some("open a room first".to_owned());
+            cx.notify();
+            return;
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis())
+            .unwrap_or_default();
+        let path = std::env::temp_dir().join(format!("blazer-chat-paste-{stamp}.{ext}"));
+        match std::fs::write(&path, bytes) {
+            Ok(()) => {
+                let _ = self.commands.try_send(ChatCommand::UploadFile {
+                    room_id,
+                    path: path.display().to_string(),
+                    msg: String::new(),
+                });
+            }
+            Err(error) => self.state.error = Some(format!("paste: {error}")),
+        }
         cx.notify();
     }
 
@@ -434,7 +505,11 @@ impl ChatRoot {
                 }
             },
         };
-        self.drafts.remove(&room_id);
+        self.state.drafts.remove(&room_id);
+        let _ = self.commands.try_send(ChatCommand::SaveDraft {
+            room_id: room_id.clone(),
+            text: String::new(),
+        });
         let _ = self.commands.try_send(command);
         cx.notify();
     }
@@ -2005,6 +2080,42 @@ impl gpui::Render for ChatRoot {
             )
             .children(user_menu);
 
+        // The formatting toolbar: wrap-on-type over the selection
+        // (m12 F11); Ctrl+B/I drive the same paths.
+        let fmt_button = |label: &'static str, id: &'static str, marker: &'static str| {
+            let composer = self.composer.clone();
+            div()
+                .id(SharedString::from(id))
+                .role(Role::Button)
+                .aria_label(label)
+                .px_1p5()
+                .rounded_xs()
+                .text_xs()
+                .font_weight(if marker == "**" {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .text_color(rgb(MUTED))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(BORDER)))
+                .child(label)
+                .on_click({
+                    let composer = composer.clone();
+                    move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+                        composer.update(cx, |composer, cx| composer.apply_wrap(marker, cx));
+                    }
+                })
+        };
+        let toolbar = div()
+            .flex()
+            .flex_none()
+            .gap_1()
+            .child(fmt_button("B", "fmt-bold", "**"))
+            .child(fmt_button("I", "fmt-italic", "_"))
+            .child(fmt_button("S", "fmt-strike", "~~"))
+            .child(fmt_button("</>", "fmt-code", "`"));
+
         // The pending quote card rides above the composer; a foreign
         // room's quote never shows (m12 F6).
         let quote_card = self
@@ -2130,6 +2241,7 @@ impl gpui::Render for ChatRoot {
                     .flex_none()
                     .gap_1()
                     .children(quote_card)
+                    .child(toolbar)
                     .child(
                         div()
                             .flex()

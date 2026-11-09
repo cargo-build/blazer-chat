@@ -22,6 +22,7 @@ const SESSION_KEY: &str = "session";
 const ROOMS_KEY: &str = "rooms";
 const MESSAGES_PREFIX: &str = "messages:";
 const EMOJI_KEY: &str = "emoji";
+const DRAFTS_KEY: &str = "drafts";
 
 pub struct Store {
     db: redb::Database,
@@ -198,6 +199,37 @@ impl Store {
         std::fs::write(&path, bytes)
             .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
         Ok(path)
+    }
+
+    /// Persists one room's draft; empty text removes the entry (m12
+    /// F13).
+    pub fn save_draft(&self, room_id: &str, text: &str) -> Result<(), String> {
+        let mut drafts = self.load_drafts()?;
+        if text.is_empty() {
+            drafts.remove(room_id);
+        } else {
+            drafts.insert(room_id.to_owned(), text.to_owned());
+        }
+        let bytes = serde_json::to_vec(&drafts).map_err(|error| error.to_string())?;
+        let write = self.db.begin_write().map_err(|error| error.to_string())?;
+        {
+            let mut table = write.open_table(TABLE).map_err(|error| error.to_string())?;
+            table
+                .insert(DRAFTS_KEY, bytes.as_slice())
+                .map_err(|error| error.to_string())?;
+        }
+        write.commit().map_err(|error| error.to_string())
+    }
+
+    /// All persisted drafts (room → text), loaded once at session
+    /// start (m12 F13).
+    pub fn load_drafts(&self) -> Result<std::collections::HashMap<String, String>, String> {
+        let read = self.db.begin_read().map_err(|error| error.to_string())?;
+        let table = read.open_table(TABLE).map_err(|error| error.to_string())?;
+        match table.get(DRAFTS_KEY).map_err(|error| error.to_string())? {
+            Some(value) => serde_json::from_slice(value.value()).map_err(|error| error.to_string()),
+            None => Ok(std::collections::HashMap::new()),
+        }
     }
 
     /// Persists an attachment's bytes under the cache; returns the path
@@ -382,5 +414,22 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(dir_mode & 0o777, 0o700, "the store directory is owner-only");
+    }
+
+    #[test]
+    fn drafts_roundtrip_and_delete() {
+        let store = temp_store();
+        assert!(store.load_drafts().unwrap().is_empty());
+        store.save_draft("GENERAL", "half-typed").unwrap();
+        store.save_draft("dm1", "other").unwrap();
+        let drafts = store.load_drafts().unwrap();
+        assert_eq!(
+            drafts.get("GENERAL").map(String::as_str),
+            Some("half-typed")
+        );
+        store.save_draft("GENERAL", "").unwrap();
+        let drafts = store.load_drafts().unwrap();
+        assert!(!drafts.contains_key("GENERAL"), "empty text deletes");
+        assert_eq!(drafts.get("dm1").map(String::as_str), Some("other"));
     }
 }

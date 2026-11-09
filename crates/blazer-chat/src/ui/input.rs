@@ -17,12 +17,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, AvailableSpace, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point, prelude::*, px,
-    relative, rgb, rgba, size,
+    App, AvailableSpace, Bounds, ClipboardEntry, ClipboardItem, ContentMask, Context, CursorStyle,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, ImageFormat, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style, TextAlign,
+    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
+    prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::*;
 
@@ -53,12 +53,25 @@ actions!(
         Copy,
         InsertNewline,
         Submit,
+        WrapBold,
+        WrapItalic,
+        WrapStrike,
+        WrapCode,
+        Cancel,
     ]
 );
 
 /// Emitted when the user presses Enter: the composer submits.
 pub(crate) enum TextInputEvent {
     Submitted,
+    /// Escape pressed: the host decides what backs out (m12 F12).
+    Cancelled,
+    /// An image rode the clipboard: bytes plus the file extension
+    /// (m12 F14).
+    ImagePasted {
+        bytes: Vec<u8>,
+        ext: String,
+    },
 }
 
 /// What a shaping result depends on; equality means the cached wrapped
@@ -128,6 +141,11 @@ impl TextInput {
         cx.bind_keys([
             KeyBinding::new("shift-enter", InsertNewline, Some("TextInput")),
             KeyBinding::new("enter", Submit, Some("TextInput")),
+            // Format on type over the selection (m12 F11); Escape
+            // backs out of an edit (m12 F12).
+            KeyBinding::new("ctrl-b", WrapBold, Some("TextInput")),
+            KeyBinding::new("ctrl-i", WrapItalic, Some("TextInput")),
+            KeyBinding::new("escape", Cancel, Some("TextInput")),
         ]);
         Self {
             focus_handle: cx.focus_handle(),
@@ -148,6 +166,16 @@ impl TextInput {
     /// The current text.
     pub(crate) fn content(&self) -> &str {
         &self.content
+    }
+
+    /// Sets the empty-composer hint (the per-room "Message #room",
+    /// m12 F12).
+    pub(crate) fn set_placeholder(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.placeholder.as_ref() != text {
+            self.placeholder = text.to_owned().into();
+            self.last_shape = None;
+            cx.notify();
+        }
     }
 
     /// Replaces the text, moving the caret to the end. Unlike
@@ -250,11 +278,62 @@ impl TextInput {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if let Some(text) = item.text() {
             // Line breaks survive pasting — multiline messages are the
             // point of a growing composer.
             self.replace_text_in_range(None, &text, window, cx);
+            return;
         }
+        // An image on the clipboard rides the upload path (m12 F14):
+        // the bytes go to the app, the attach flow does the upload.
+        let Some(image) = item.entries.iter().find_map(|entry| match entry {
+            ClipboardEntry::Image(image) => Some(image),
+            _ => None,
+        }) else {
+            return;
+        };
+        let ext = match image.format {
+            ImageFormat::Png => "png",
+            ImageFormat::Jpeg => "jpg",
+            ImageFormat::Webp => "webp",
+            ImageFormat::Gif => "gif",
+            _ => return,
+        };
+        cx.emit(TextInputEvent::ImagePasted {
+            bytes: image.bytes.clone(),
+            ext: ext.to_owned(),
+        });
+    }
+
+    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Cancelled);
+    }
+
+    fn wrap_bold(&mut self, _: &WrapBold, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_wrap("**", cx);
+    }
+
+    fn wrap_italic(&mut self, _: &WrapItalic, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_wrap("_", cx);
+    }
+
+    fn wrap_strike(&mut self, _: &WrapStrike, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_wrap("~~", cx);
+    }
+
+    fn wrap_code(&mut self, _: &WrapCode, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_wrap("`", cx);
+    }
+
+    /// Wraps the selection (or inserts the pair at the caret) in a
+    /// markdown marker (m12 F11).
+    pub(crate) fn apply_wrap(&mut self, marker: &str, cx: &mut Context<Self>) {
+        let (text, caret) = wrap_with_marker(&self.content, self.selected_range.clone(), marker);
+        self.set_content(&text, cx);
+        self.selected_range = caret..caret;
     }
 
     fn insert_newline(&mut self, _: &InsertNewline, window: &mut Window, cx: &mut Context<Self>) {
@@ -1047,6 +1126,11 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::insert_newline))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::wrap_bold))
+            .on_action(cx.listener(Self::wrap_italic))
+            .on_action(cx.listener(Self::wrap_strike))
+            .on_action(cx.listener(Self::wrap_code))
+            .on_action(cx.listener(Self::cancel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1071,6 +1155,34 @@ impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+/// Wraps `text[range]` in a marker pair; returns the new text and the
+/// caret past the wrapped span (m12 F11).
+fn wrap_with_marker(text: &str, range: std::ops::Range<usize>, marker: &str) -> (String, usize) {
+    let mut start = range.start.min(text.len());
+    let mut end = range.end.clamp(start, text.len());
+    // Mouse and keyboard offsets are char boundaries, but a clamped
+    // stale range may not be: snap before slicing.
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    while end > start && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(text.len() + marker.len() * 2);
+    out.push_str(&text[..start]);
+    out.push_str(marker);
+    out.push_str(&text[start..end]);
+    out.push_str(marker);
+    out.push_str(&text[end..]);
+    let caret = if end > start {
+        start + marker.len() + (end - start) + marker.len()
+    } else {
+        // An empty selection: the caret sits between the inserted pair.
+        start + marker.len()
+    };
+    (out, caret)
 }
 
 #[cfg(test)]
@@ -1158,5 +1270,19 @@ mod tests {
         // A reversed (malformed) range still degrades to a valid span.
         assert_eq!(safe_range(Range { start: 99, end: 4 }, 6), 4..6);
         assert_eq!(safe_range(99..99, 6), 6..6);
+    }
+
+    #[test]
+    fn wrap_over_selection_and_caret() {
+        let (text, caret) = wrap_with_marker("hello world", 6..11, "**");
+        assert_eq!(text, "hello **world**");
+        assert_eq!(caret, 15, "the caret lands past the closing marker");
+        let (text, caret) = wrap_with_marker("ab", 2..2, "_");
+        assert_eq!(text, "ab__", "an empty selection inserts the pair");
+        assert_eq!(caret, 3, "the caret sits between the markers");
+        let (text, _) = wrap_with_marker("кирлица", 0..14, "`");
+        assert_eq!(text, "`кирлица`", "byte offsets slice on boundaries");
+        let (text, _) = wrap_with_marker("abc", 1..12, "**");
+        assert_eq!(text, "a**bc**", "out-of-range ends clamp to the text");
     }
 }

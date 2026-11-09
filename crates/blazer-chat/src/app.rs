@@ -125,6 +125,11 @@ pub enum ChatCommand {
     UserInfo {
         username: String,
     },
+    /// Persists one room's draft; empty text removes it (m12 F13).
+    SaveDraft {
+        room_id: String,
+        text: String,
+    },
 }
 
 /// What the application reports back; the UI folds these into [`ChatState`].
@@ -218,6 +223,12 @@ pub enum ChatEvent {
     UserInfo {
         info: UserInfo,
     },
+    /// Persisted drafts at session start (m12 F13).
+    Drafts {
+        drafts: std::collections::HashMap<String, String>,
+    },
+    /// A draft write landed; the UI already holds the text.
+    DraftSaved,
     /// The user's `subscriptions-changed` stream reported a room's
     /// unread count (initial burst + every new message).
     UnreadCount {
@@ -296,6 +307,9 @@ pub struct ChatState {
     /// User-card data by username; missing entries fetch on demand
     /// (m12 F8).
     pub user_info: std::collections::HashMap<String, UserInfo>,
+    /// Per-room composer drafts (m12 F13): half-typed text belongs to
+    /// the room it was started in; persisted via `SaveDraft`.
+    pub drafts: std::collections::HashMap<String, String>,
 }
 
 /// One local-search hit.
@@ -580,6 +594,11 @@ impl ChatState {
                 self.user_info.insert(info.username.clone(), info);
                 None
             }
+            ChatEvent::Drafts { drafts } => {
+                self.drafts = drafts;
+                None
+            }
+            ChatEvent::DraftSaved => None,
             ChatEvent::SearchQuery(query) => {
                 self.search_query = (!query.is_empty()).then_some(query);
                 None
@@ -937,6 +956,12 @@ async fn drive(
             // The resume path sends its LoggedIn event directly, so the
             // loop's spawn arm never sees it: start the live layer here.
             live = ensure_live(&settings_for_live, Some(store), &events);
+            match store.load_drafts() {
+                Ok(drafts) => {
+                    let _ = events.send(ChatEvent::Drafts { drafts }).await;
+                }
+                Err(error) => eprintln!("blazer-chat: drafts: {error}"),
+            }
         }
         if let Some(rooms) = store.load_rooms() {
             // History routing needs the room kinds before the first
@@ -974,6 +999,14 @@ async fn drive(
                 match ensure_live(&settings_for_live, store.as_ref(), &events) {
                     Some(live_layer) => live = Some(live_layer),
                     None => eprintln!("blazer-chat: live layer disabled: no stored session"),
+                }
+                if let Some(store) = store.as_ref() {
+                    match store.load_drafts() {
+                        Ok(drafts) => {
+                            let _ = events.send(ChatEvent::Drafts { drafts }).await;
+                        }
+                        Err(error) => eprintln!("blazer-chat: drafts: {error}"),
+                    }
                 }
             }
             ChatEvent::SessionExpired { .. } => {
@@ -1346,6 +1379,16 @@ async fn execute<T: Transport>(
             Err(error) => session_expired(store, client, &error)
                 .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
+        ChatCommand::SaveDraft { room_id, text } => {
+            // Persistence is best-effort: the UI keeps the text either
+            // way (m12 F13).
+            if let Some(store) = store
+                && let Err(error) = store.save_draft(&room_id, &text)
+            {
+                eprintln!("blazer-chat: draft not saved: {error}");
+            }
+            ChatEvent::DraftSaved
+        }
     }
 }
 
