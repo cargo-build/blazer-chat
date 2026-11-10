@@ -740,6 +740,13 @@ impl ChatState {
                 None
             }
             ChatEvent::ServerSearch { query, messages } => {
+                // The control socket's /search bypasses run_search's
+                // local echo: adopt the query when no newer one exists,
+                // so the stale guard and the panel agree on what is
+                // being searched. A newer typed query still wins.
+                if self.search_query.is_none() {
+                    self.search_query = Some(query.clone());
+                }
                 // Stale-guard: a newer typed query owns the panel.
                 if self.search_query.as_deref() == Some(query.as_str()) {
                     let hits = messages
@@ -2152,6 +2159,22 @@ mod tests {
         );
         state.server_search = Some(("needle".to_owned(), Vec::new()));
         assert_eq!(state.search_hits().len(), 1, "empty server -> local scan");
+    }
+
+    #[test]
+    fn server_search_fold_adopts_the_query_when_none_is_set() {
+        // The control socket's /search skips run_search's echo: the
+        // fold adopts the arrival's query so the panel shows its hits.
+        let mut state = ChatState::default();
+        state.apply(ChatEvent::ServerSearch {
+            query: "adopt".to_owned(),
+            messages: vec![],
+        });
+        assert_eq!(
+            state.search_query.as_deref(),
+            Some("adopt"),
+            "the fold adopts the query when no newer one exists"
+        );
     }
 
     #[test]
