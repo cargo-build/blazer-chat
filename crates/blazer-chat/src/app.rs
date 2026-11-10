@@ -904,11 +904,20 @@ impl ChatState {
             return Vec::new();
         };
         match &self.server_search {
-            Some((server_query, server_hits)) if server_query == query => server_hits
-                .iter()
-                .filter(|hit| self.search_scope.admits(hit.kind))
-                .cloned()
-                .collect(),
+            // A fresh-but-EMPTY server result keeps the local scan
+            // visible: servers without a search backend answer Ok with
+            // zero messages for every query (the school server does
+            // exactly that) — hiding local evidence behind their empty
+            // answer would blind the panel.
+            Some((server_query, server_hits))
+                if server_query == query && !server_hits.is_empty() =>
+            {
+                server_hits
+                    .iter()
+                    .filter(|hit| self.search_scope.admits(hit.kind))
+                    .cloned()
+                    .collect()
+            }
             _ => self
                 .search(query)
                 .into_iter()
@@ -1363,12 +1372,28 @@ async fn execute<T: Transport>(
             }
         },
         ChatCommand::OpenRoom { room_id } => {
+            // Accept a room NAME as well as its id (the control
+            // socket's /open reads human strings): the saved room list
+            // resolves names to ids; unknown strings stay untouched so
+            // the server's error surfaces.
+            let resolved = store
+                .and_then(|store| store.load_rooms())
+                .and_then(|rooms| {
+                    rooms
+                        .iter()
+                        .find(|room| room.id == room_id || room.name == room_id)
+                        .map(|room| room.id.clone())
+                })
+                .unwrap_or_else(|| room_id.clone());
             // Instant open: the cached slice paints now; the network
             // refresh follows as its own command.
             let messages = store
-                .and_then(|store| store.load_messages(&room_id))
+                .and_then(|store| store.load_messages(&resolved))
                 .unwrap_or_default();
-            ChatEvent::CachedMessages { room_id, messages }
+            ChatEvent::CachedMessages {
+                room_id: resolved,
+                messages,
+            }
         }
         ChatCommand::RefreshRoom { room_id } => match client.history(&room_id).await {
             Ok(mut messages) => {
@@ -1533,7 +1558,14 @@ async fn execute<T: Transport>(
         ChatCommand::Search(query) => match client.spotlight(&query).await {
             // Hits carry raw messages; the fold resolves room
             // names/kinds against state (execute has no state).
-            Ok(messages) => ChatEvent::ServerSearch { query, messages },
+            Ok(messages) => {
+                eprintln!(
+                    "blazer-chat: spotlight {:?}: {} messages",
+                    query,
+                    messages.len()
+                );
+                ChatEvent::ServerSearch { query, messages }
+            }
             Err(error) => {
                 // Spotlight can be permission-gated on the server
                 // (m17): local cache hits keep the search functional.
@@ -2094,6 +2126,7 @@ mod tests {
             state.search_hits().is_empty(),
             "the direct scope filters the channel hit"
         );
+        state.search_scope = SearchScope::All;
 
         // A newer typed query owns the panel: the in-flight reply is
         // dropped instead of flashing stale results — the stored hits
@@ -2109,6 +2142,16 @@ mod tests {
             stored_hits[0].sender, "alice",
             "stale hit's message never lands"
         );
+
+        // A fresh-but-empty server answer must not hide local hits
+        // (servers without a search backend answer Ok-empty always).
+        state.search_query = Some("needle".to_owned());
+        state.messages.insert(
+            "GENERAL".to_owned(),
+            vec![message("m-local", "carol", "needle in cache")],
+        );
+        state.server_search = Some(("needle".to_owned(), Vec::new()));
+        assert_eq!(state.search_hits().len(), 1, "empty server -> local scan");
     }
 
     #[test]
