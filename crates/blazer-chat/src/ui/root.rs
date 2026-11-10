@@ -1117,7 +1117,6 @@ fn panel(
         .bg(rgb(surface))
         .border_1()
         .border_color(rgb(p.border))
-        .rounded_md()
         .child(
             div()
                 .flex()
@@ -2196,7 +2195,6 @@ impl gpui::Render for ChatRoot {
                     .bg(rgb(p.panel_alt))
                     .border_b_1()
                     .border_color(rgb(p.border))
-                    .rounded_md()
                     .child(
                         div()
                             .text_lg()
@@ -2659,8 +2657,10 @@ impl gpui::Render for ChatRoot {
             .flex_col()
             .on_action(cx.listener(Self::focus_room_jump))
             .size_full()
-            .p_4()
-            .gap_3()
+            // Full-bleed (m18 round 2, the operator's «отступы
+            // лишние»): panels meet the window edges like the RC
+            // reference — no floating-card gutters.
+            .gap_0()
             .bg(rgb(p.bg))
             .text_color(rgb(p.text))
             .track_focus(&self.focus)
