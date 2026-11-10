@@ -1085,12 +1085,12 @@ fn side_entries(rooms: &[Room]) -> Vec<SideEntry> {
 }
 
 /// One sidebar section header. uniform_list stretches every row to
-/// the tallest, so the header rides the same rems(3.25) row the rooms
-/// use — the label sits at its bottom edge like the original's sticky
-/// headers.
+/// the tallest, so the header rides the same rems(4.0) row the rooms
+/// use (m18 round 3 grew the rows for the two-line preview) — the
+/// label sits at its bottom edge like the original's sticky headers.
 fn section_row(label: &'static str, p: Palette) -> AnyElement {
     div()
-        .h(rems(3.25))
+        .h(rems(4.0))
         .flex()
         .flex_col()
         .justify_end()
@@ -1311,7 +1311,7 @@ impl gpui::Render for ChatRoot {
                             })
                             .px_2()
                             .py_0p5()
-                            .h(rems(3.25))
+                            .h(rems(4.0))
                             .rounded_sm()
                             .text_sm()
                             .overflow_hidden()
@@ -1414,25 +1414,65 @@ impl gpui::Render for ChatRoot {
                                         // Identity column (deepseek
                                         // D10): '#' for channels/groups,
                                         // a small per-user disc for DMs.
+                                        // m18 round 3 (the operator's
+                                        // ask): rooms carry their own
+                                        // square avatars — the fetched
+                                        // photo replaces both fallbacks
+                                        // when the server has one.
                                         'd' => div()
                                             .flex_none()
                                             .w(rems(1.25))
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .child(avatar(&room.name, p, rems(1.25)))
+                                            .child(
+                                                match root.state.avatars.get(room.name.as_str()) {
+                                                    Some(path) => {
+                                                        img(std::path::PathBuf::from(path))
+                                                            .size(rems(1.25))
+                                                            .rounded_sm()
+                                                            .into_any_element()
+                                                    }
+                                                    None => avatar(&room.name, p, rems(1.25))
+                                                        .into_any_element(),
+                                                },
+                                            )
                                             .into_any_element(),
-                                        _ => div()
-                                            .flex_none()
-                                            .w(rems(1.25))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(rgb(p.muted))
-                                            .child("#")
-                                            .into_any_element(),
+                                        _ => {
+                                            let room_avatar_key = format!("room-{}", room.id);
+                                            div()
+                                                .flex_none()
+                                                .w(rems(1.25))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(
+                                                    match root
+                                                        .state
+                                                        .avatars
+                                                        .get(room_avatar_key.as_str())
+                                                    {
+                                                        Some(path) => {
+                                                            img(std::path::PathBuf::from(path))
+                                                                .size(rems(1.25))
+                                                                .rounded_sm()
+                                                                .into_any_element()
+                                                        }
+                                                        None => div()
+                                                            .flex_none()
+                                                            .w(rems(1.25))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .text_sm()
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(rgb(p.muted))
+                                                            .child("#")
+                                                            .into_any_element(),
+                                                    },
+                                                )
+                                                .into_any_element()
+                                        }
                                     })
                                     .child(
                                         div()
@@ -1502,14 +1542,47 @@ impl gpui::Render for ChatRoot {
                                             )
                                             .children(room.preview.as_ref().map(
                                                 |(sender, text)| {
+                                                    // The operator,
+                                                    // on the
+                                                    // original's flat
+                                                    // preview:
+                                                    // «имена людей не
+                                                    // выделяются… имя
+                                                    // должно
+                                                    // располагаться
+                                                    // выше. А
+                                                    // сообщение ниже»
+                                                    // — the sender
+                                                    // gets its own
+                                                    // emphasized line
+                                                    // above the muted
+                                                    // message text.
                                                     div()
                                                         .min_w_0()
-                                                        .truncate()
-                                                        .text_xs()
-                                                        .text_color(rgb(p.muted))
-                                                        .child(SharedString::from(format!(
-                                                            "{sender}: {text}"
-                                                        )))
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_0p5()
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .text_xs()
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .text_color(rgb(p.text))
+                                                                .child(SharedString::from(
+                                                                    sender.clone(),
+                                                                )),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .text_xs()
+                                                                .text_color(rgb(p.muted))
+                                                                .child(SharedString::from(
+                                                                    text.clone(),
+                                                                )),
+                                                        )
                                                 },
                                             )),
                                     ),
@@ -1955,24 +2028,9 @@ impl gpui::Render for ChatRoot {
         let pane = if let Some(query) = self.state.search_query.as_deref()
             && !query.trim().is_empty()
         {
-            // Merge (m17): fresh server hits replace the local cache
-            // scan — the spotlight already covers every room the cache
-            // would reach; local stays the fallback while the request
-            // is in flight or when the server refused the search.
-            // The scope segment filters at render (UI-originated state).
-            let hits = match &self.state.server_search {
-                Some((server_query, server_hits)) if server_query == query => server_hits
-                    .iter()
-                    .filter(|hit| self.state.search_scope.admits(hit.kind))
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                _ => self
-                    .state
-                    .search(query)
-                    .into_iter()
-                    .filter(|hit| self.state.search_scope.admits(hit.kind))
-                    .collect(),
-            };
+            // The merge rule lives on ChatState (m17): fresh server
+            // hits replace the local scan; scope filters at render.
+            let hits = self.state.search_hits();
             let mut results: Vec<gpui::AnyElement> = self
                 .search_rooms
                 .iter()
@@ -2233,7 +2291,9 @@ impl gpui::Render for ChatRoot {
         {
             Some(path) => img(std::path::PathBuf::from(path))
                 .size(rems(2.0))
-                .rounded_full()
+                // m18: RC's default is square everywhere — the round
+                // disc read as a different product.
+                .rounded_sm()
                 .into_any_element(),
             None => avatar(&me, p, rems(2.0)).into_any_element(),
         };
@@ -2289,7 +2349,7 @@ impl gpui::Render for ChatRoot {
                                 .child(match self.state.avatars.get(me.as_str()) {
                                     Some(path) => img(std::path::PathBuf::from(path))
                                         .size(rems(2.5))
-                                        .rounded_full()
+                                        .rounded_sm()
                                         .into_any_element(),
                                     None => div()
                                         .size(rems(2.5))

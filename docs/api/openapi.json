@@ -1640,6 +1640,31 @@
           }
         }
       }
+    },
+    "/avatar/room/{roomId}": {
+      "get": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "Room avatar image",
+        "description": "The room's custom avatar (m18: square avatars in the sidebar). Rooms without a custom avatar answer 404 \u2014 the client records the miss and keeps the '#' fallback.",
+        "responses": {
+          "200": {
+            "description": "Image bytes.",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The room has no custom avatar."
+          }
+        }
+      }
     }
   }
 }

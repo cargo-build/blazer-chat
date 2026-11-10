@@ -81,6 +81,12 @@ pub enum ChatCommand {
     FetchAvatars {
         usernames: Vec<String>,
     },
+    /// Fetches room avatars (m18, the operator's ask): cache first,
+    /// `/avatar/room/{id}` on miss; rooms without a custom avatar land
+    /// in the misses set instead of retrying every rooms refresh.
+    FetchRoomAvatars {
+        room_ids: Vec<String>,
+    },
     /// Re-fetches the newest history slice for the room (the network
     /// half of an instant cache-first open).
     RefreshRoom {
@@ -192,6 +198,13 @@ pub enum ChatEvent {
     /// Cached avatar paths for message senders.
     Avatars {
         avatars: Vec<(String, String)>,
+    },
+    /// Room avatars settled (m18): `found` maps `room-{id}` cache keys
+    /// to file paths, `missing` lists keys the server refused (no
+    /// custom avatar) — recorded so the list stops re-asking.
+    RoomAvatars {
+        found: Vec<(String, String)>,
+        missing: Vec<String>,
     },
     /// The server accepted the reaction toggle; the fold applies it
     /// locally until the live stream redelivers the message.
@@ -314,6 +327,9 @@ pub struct ChatState {
     notification_seq: u64,
     /// Sender username → cached avatar path.
     pub avatars: std::collections::HashMap<String, String>,
+    /// Avatar cache keys the server refused (m18: rooms without a
+    /// custom avatar answer 404) — the list stops re-asking.
+    pub avatar_misses: std::collections::BTreeSet<String>,
     /// Rooms whose older history ran out (paging stops asking).
     pub older_exhausted: std::collections::HashSet<String>,
     /// Bumped whenever cached messages change; the UI skips rebuilds
@@ -439,9 +455,44 @@ impl ChatState {
                 }
                 // The own avatar used to wait for a room with own
                 // messages: fetch it right away so the top bar shows
-                // the photo from the first minute.
+                // the photo from the first minute. Room avatars (m18,
+                // the operator's ask) ride the same single-command
+                // slot first; the RoomAvatars fold chains the own
+                // fetch back when the batch spent it.
+                let missing_rooms: Vec<String> = self
+                    .rooms
+                    .iter()
+                    .map(|room| format!("room-{}", room.id))
+                    .filter(|key| {
+                        !self.avatars.contains_key(key.as_str())
+                            && !self.avatar_misses.contains(key.as_str())
+                    })
+                    .collect();
+                (!missing_rooms.is_empty())
+                    .then(|| ChatCommand::FetchRoomAvatars {
+                        room_ids: missing_rooms
+                            .iter()
+                            .map(|key| key["room-".len()..].to_owned())
+                            .collect(),
+                    })
+                    .or_else(|| {
+                        self.username
+                            .as_deref()
+                            .map(|me| ChatCommand::FetchAvatars {
+                                usernames: vec![me.to_owned()],
+                            })
+                    })
+            }
+            ChatEvent::RoomAvatars { found, missing } => {
+                self.avatars.extend(found.iter().cloned());
+                self.avatar_misses.extend(missing.iter().cloned());
+                self.avatars_version += 1;
+                // The Rooms fold spent its command slot on the room
+                // batch: chain the own-avatar fetch so the top bar
+                // still gets its photo from the first minute.
                 self.username
                     .as_deref()
+                    .filter(|me| !self.avatars.contains_key(*me))
                     .map(|me| ChatCommand::FetchAvatars {
                         usernames: vec![me.to_owned()],
                     })
@@ -836,6 +887,36 @@ impl ChatState {
         }
     }
 
+    /// The search panel's hits (m17) — one owner for the merge rule:
+    /// fresh server results replace the local cache scan (the
+    /// spotlight covers every room the cache would reach), the local
+    /// scan stays the fallback while the request is in flight or the
+    /// server refused. The scope segment filters at render
+    /// (UI-originated state). Both the pane and the /state snapshot
+    /// render through this, so the socket evidence shows what the UI
+    /// shows.
+    pub fn search_hits(&self) -> Vec<SearchHit> {
+        let Some(query) = self
+            .search_query
+            .as_deref()
+            .filter(|query| !query.trim().is_empty())
+        else {
+            return Vec::new();
+        };
+        match &self.server_search {
+            Some((server_query, server_hits)) if server_query == query => server_hits
+                .iter()
+                .filter(|hit| self.search_scope.admits(hit.kind))
+                .cloned()
+                .collect(),
+            _ => self
+                .search(query)
+                .into_iter()
+                .filter(|hit| self.search_scope.admits(hit.kind))
+                .collect(),
+        }
+    }
+
     /// Case-insensitive substring search over the cached messages (the
     /// original client's local search covers its cache too); results in
     /// room-list order, capped.
@@ -883,7 +964,8 @@ pub struct UiSnapshot {
     pub rooms: Vec<String>,
     /// Rooms with a nonzero unread count: `"name ×count"`.
     pub badges: Vec<String>,
-    /// Local-search hits while a query is active: `"room — sender: text"`.
+    /// Search hits while a query is active (m17: server-backed when
+    /// the spotlight is fresh, local cache otherwise): `"room — sender: text"`.
     pub search: Vec<String>,
     /// The open thread's messages: `"sender: text"`.
     pub thread: Vec<String>,
@@ -954,14 +1036,11 @@ impl UiSnapshot {
                 .filter(|room| room.unread > 0)
                 .map(|room| format!("{} ×{}", room.name, room.unread))
                 .collect(),
-            search: match &state.search_query {
-                Some(query) => state
-                    .search(query)
-                    .iter()
-                    .map(|hit| format!("{} — {}: {}", hit.room, hit.sender, hit.text))
-                    .collect(),
-                None => Vec::new(),
-            },
+            search: state
+                .search_hits()
+                .iter()
+                .map(|hit| format!("{} — {}: {}", hit.room, hit.sender, hit.text))
+                .collect(),
             thread: match &state.open_thread {
                 Some((_, tmid)) => state
                     .threads
@@ -1534,6 +1613,44 @@ async fn execute<T: Transport>(
             }
             ChatEvent::Avatars { avatars }
         }
+        ChatCommand::FetchRoomAvatars { room_ids } => {
+            // Cache keys are `room-{id}` in the same avatar store; a
+            // server refusal (no custom avatar → 404) records a miss
+            // so the list never re-asks.
+            let Some(store) = store else {
+                return ChatEvent::RoomAvatars {
+                    found: Vec::new(),
+                    missing: room_ids.iter().map(|id| format!("room-{id}")).collect(),
+                };
+            };
+            let mut found = Vec::new();
+            let mut missing = Vec::new();
+            for room_id in room_ids {
+                let key = format!("room-{room_id}");
+                if let Some(path) = store
+                    .avatar_path(&key)
+                    .map_err(|error| {
+                        eprintln!("blazer-chat: avatar cache: {error}");
+                    })
+                    .ok()
+                    .flatten()
+                {
+                    found.push((key, path.display().to_string()));
+                    continue;
+                }
+                match client.room_avatar_bytes(&room_id).await {
+                    Ok(bytes) => match store.save_avatar(&key, &bytes) {
+                        Ok(path) => found.push((key, path.display().to_string())),
+                        Err(error) => {
+                            eprintln!("blazer-chat: avatar cache: {error}");
+                            missing.push(key);
+                        }
+                    },
+                    Err(_) => missing.push(key),
+                }
+            }
+            ChatEvent::RoomAvatars { found, missing }
+        }
         ChatCommand::SendThread {
             room_id,
             tmid,
@@ -1967,6 +2084,16 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].room, "general", "the room name resolves");
         assert_eq!(hits[0].kind, 'c', "the room kind resolves");
+        // The /state snapshot renders through the same merge rule.
+        assert_eq!(state.search_hits().len(), 1);
+        // The channels scope admits 'c': the hit survives.
+        state.search_scope = SearchScope::Channels;
+        assert_eq!(state.search_hits().len(), 1);
+        state.search_scope = SearchScope::Direct;
+        assert!(
+            state.search_hits().is_empty(),
+            "the direct scope filters the channel hit"
+        );
 
         // A newer typed query owns the panel: the in-flight reply is
         // dropped instead of flashing stale results — the stored hits

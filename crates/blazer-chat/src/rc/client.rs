@@ -124,6 +124,20 @@ impl<T: Transport> RcClient<T> {
             .map_err(RcError::Io)
     }
 
+    /// Downloads a room's avatar (m18, the operator's ask: rooms carry
+    /// their own square avatars). Rooms without a custom one answer
+    /// 404 — the caller records the miss instead of retrying.
+    pub async fn room_avatar_bytes(&self, room_id: &str) -> Result<Vec<u8>, RcError> {
+        let headers = self.auth_headers()?;
+        self.transport
+            .get_bytes_with_headers(
+                &format!("/avatar/room/{}", encode_query_param(room_id)),
+                &headers,
+            )
+            .await
+            .map_err(RcError::Io)
+    }
+
     /// Downloads an attachment (authenticated GET) as raw bytes.
     pub async fn file_bytes(&self, path: &str) -> Result<Vec<u8>, RcError> {
         Self::validate_upload_path(path)?;
