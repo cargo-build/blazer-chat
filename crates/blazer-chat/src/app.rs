@@ -28,6 +28,11 @@ pub enum ChatCommand {
         password: String,
     },
     RefreshRooms,
+    /// Fetches a room's recent messages for the hover preview (m16):
+    /// a bounded read that must not touch unread state.
+    PreviewRoom {
+        room_id: String,
+    },
     OpenRoom {
         room_id: String,
     },
@@ -162,6 +167,12 @@ pub enum ChatEvent {
     },
     /// A popup-grade notification for the user (M4).
     Notification(crate::rc::Notification),
+    /// Recent messages for the room hover preview (m16): caches
+    /// without touching unread or the read boundary.
+    PreviewMessages {
+        room_id: String,
+        messages: Vec<Msg>,
+    },
     /// The cached slice painted instantly; the refresh follows.
     CachedMessages {
         room_id: String,
@@ -384,6 +395,21 @@ impl ChatState {
                     .map(|me| ChatCommand::FetchAvatars {
                         usernames: vec![me.to_owned()],
                     })
+            }
+            ChatEvent::PreviewMessages { room_id, messages } => {
+                // The hover preview's cache (m16): merge like Messages
+                // but WITHOUT the unread boundary or the read receipt —
+                // peeking at a room must not mark it read.
+                let entry = self.messages.entry(room_id.clone()).or_default();
+                let fresh: std::collections::BTreeSet<&str> =
+                    messages.iter().map(|m| m.id.as_str()).collect();
+                entry.retain(|known| !fresh.contains(known.id.as_str()));
+                entry.extend(messages.iter().cloned());
+                entry.sort_by(|a, b| a.ts.cmp(&b.ts));
+                let excess = entry.len().saturating_sub(ROOM_CACHE_CAP);
+                entry.drain(0..excess);
+                self.bump_room_version(&room_id);
+                None
             }
             ChatEvent::Messages { room_id, messages } => {
                 self.bump_room_version(&room_id);
@@ -1177,6 +1203,13 @@ async fn execute<T: Transport>(
             Err(error) => session_expired(store, client, &error)
                 .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
         },
+        ChatCommand::PreviewRoom { room_id } => match client.history(&room_id).await {
+            Ok(messages) => ChatEvent::PreviewMessages { room_id, messages },
+            Err(error) => {
+                eprintln!("blazer-chat: preview {room_id}: {error}");
+                ChatEvent::Failed(format!("preview: {error}"))
+            }
+        },
         ChatCommand::OpenRoom { room_id } => {
             // Instant open: the cached slice paints now; the network
             // refresh follows as its own command.
@@ -1771,6 +1804,44 @@ mod tests {
             messages: Vec::new(),
         });
         assert!(state.older_exhausted.contains("dm"));
+    }
+
+    #[test]
+    #[test]
+    fn preview_messages_cache_without_touching_unread() {
+        let mut state = ChatState {
+            active_room: Some("other".to_owned()),
+            ..ChatState::default()
+        };
+        state.rooms = vec![crate::rc::Room {
+            id: "general".to_owned(),
+            name: "general".to_owned(),
+            kind: 'c',
+            unread: 3,
+            lm: None,
+            preview: None,
+            topic: None,
+            mentions: 0,
+        }];
+        state.apply(ChatEvent::PreviewMessages {
+            room_id: "general".to_owned(),
+            messages: vec![message("m1", "a", "hello")],
+        });
+        assert_eq!(state.messages["general"].len(), 1, "the preview caches");
+        assert_eq!(
+            state.rooms[0].unread, 3,
+            "peeking must not mark the room read"
+        );
+        assert!(state.first_unread.get("general").is_none());
+        state.apply(ChatEvent::PreviewMessages {
+            room_id: "general".to_owned(),
+            messages: vec![message("m1", "a", "hello"), message("m2", "a", "again")],
+        });
+        assert_eq!(
+            state.messages["general"].len(),
+            2,
+            "re-previews merge, never duplicate"
+        );
     }
 
     #[test]

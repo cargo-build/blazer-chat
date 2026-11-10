@@ -83,6 +83,12 @@ pub(crate) struct ChatRoot {
     /// idea): false = partial (docked beside the live main pane),
     /// true = full (the thread takes the row).
     thread_panel_full: bool,
+    /// The room hover preview (m16): the settled room whose card is
+    /// open, the row+generation currently hovered, and the timer
+    /// generation (each hover re-arms; stale timers no-op).
+    preview_room: Option<String>,
+    preview_hover: Option<(String, u64)>,
+    preview_gen: u64,
     /// Per-message edit drafts keyed by `(room_id, msg_id)` (m14
     /// P2, RC CurrentEditingMessage): an in-progress edit keeps
     /// its own text across hops and re-entries; submission or
@@ -321,6 +327,9 @@ impl ChatRoot {
             theme_override: None,
             shortcuts_open: false,
             thread_panel_full: false,
+            preview_room: None,
+            preview_hover: None,
+            preview_gen: 0,
             edit_drafts: Default::default(),
             search_rooms,
             focus: cx.focus_handle(),
@@ -1174,6 +1183,30 @@ impl gpui::Render for ChatRoot {
         let active = self.state.active_room.clone();
         let entries = side_entries(&self.state.rooms);
         let room_count = entries.len();
+        // Pane render inputs, snapshot per frame (m13 S2a 2.4(7)) —
+        // hoisted above the rooms list so the hover preview's rows
+        // (m16) can share them.
+        let user_card_info = self.user_card.as_ref().and_then(|name| {
+            self.state
+                .user_info
+                .get(name)
+                .map(|info| (name.clone(), info.clone()))
+        });
+        let pane_inputs = PaneInputs {
+            editing: self.editing.clone(),
+            user_card: self.user_card.clone(),
+            open_menu: self.open_menu.clone(),
+            me: self.state.username.clone(),
+            emoji: self.state.emoji.clone(),
+            user_card_info,
+            link_ready: self
+                .state
+                .active_room
+                .as_deref()
+                .and_then(|room| self.permalink(room, ""))
+                .is_some(),
+            palette: p,
+        };
         let rooms = uniform_list("rooms", room_count, move |range, _window, cx| {
             let root = this.read(cx);
             let p = root.palette;
@@ -1297,6 +1330,59 @@ impl gpui::Render for ChatRoot {
                                     this.update(cx, |chat, cx| {
                                         chat.room_menu = None;
                                         chat.open_room(room_id.clone(), cx);
+                                    });
+                                }
+                            })
+                            .on_hover({
+                                let room_id = room_id.clone();
+                                let this = this.clone();
+                                move |hovered: &bool, _, cx| {
+                                    this.update(cx, |chat, cx| {
+                                        if *hovered {
+                                            chat.preview_gen += 1;
+                                            let generation = chat.preview_gen;
+                                            chat.preview_hover =
+                                                Some((room_id.clone(), generation));
+                                            let room_id = room_id.clone();
+                                            cx.spawn(async move |root, cx| {
+                                                cx.background_executor()
+                                                    .timer(std::time::Duration::from_millis(400))
+                                                    .await;
+                                                let _ = root.update(cx, |chat, cx| {
+                                                    let settled = chat.preview_hover.as_ref()
+                                                        == Some(&(room_id.clone(), generation));
+                                                    if !settled {
+                                                        return;
+                                                    }
+                                                    chat.preview_room = Some(room_id.clone());
+                                                    if chat
+                                                        .state
+                                                        .messages
+                                                        .get(room_id.as_str())
+                                                        .is_none()
+                                                    {
+                                                        chat.send_command(
+                                                            ChatCommand::PreviewRoom {
+                                                                room_id: room_id.clone(),
+                                                            },
+                                                        );
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .detach();
+                                        } else {
+                                            let leaving = chat
+                                                .preview_hover
+                                                .as_ref()
+                                                .map(|(id, _)| id.as_str())
+                                                == Some(room_id.as_str());
+                                            if leaving {
+                                                chat.preview_hover = None;
+                                                chat.preview_room = None;
+                                                cx.notify();
+                                            }
+                                        }
                                     });
                                 }
                             })
@@ -1435,29 +1521,99 @@ impl gpui::Render for ChatRoot {
         // every frame — the large-room lag. The 81ace8a3 probe's
         // "negative" was a misapplied height (post-mortem: deepseek
         // S4), not a gpui defect.
-        // Pane render inputs, snapshot per frame (m13 S2a 2.4(7)).
-        let user_card_info = self.user_card.as_ref().and_then(|name| {
-            self.state
-                .user_info
-                .get(name)
-                .map(|info| (name.clone(), info.clone()))
-        });
-        let pane_inputs = PaneInputs {
-            editing: self.editing.clone(),
-            user_card: self.user_card.clone(),
-            open_menu: self.open_menu.clone(),
-            me: self.state.username.clone(),
-            emoji: self.state.emoji.clone(),
-            user_card_info,
-            link_ready: self
-                .state
-                .active_room
-                .as_deref()
-                .and_then(|room| self.permalink(room, ""))
-                .is_some(),
-            palette: p,
-        };
         let messages = self.pane.read(cx).element(&pane_inputs);
+
+        // Room hover preview (m16, the operator's UX idea): hovering
+        // a room row settles (400 ms, generation-gated) into a
+        // scrollable card of the room's recent messages, docked
+        // beside the sidebar. Rows reuse the pane's rendering; the
+        // fetch-on-hover caches WITHOUT touching unread (the
+        // PreviewMessages fold's contract).
+        let preview_card = self.preview_room.as_ref().map(|preview_room_id| {
+            let preview_scroll = gpui::ScrollHandle::new();
+            let built = self.pane.update(cx, |pane, _| {
+                let name = self
+                    .state
+                    .rooms
+                    .iter()
+                    .find(|room| room.id == *preview_room_id)
+                    .map(|room| room.name.clone())
+                    .unwrap_or_else(|| preview_room_id.clone());
+                let rows = match self.state.messages.get(preview_room_id) {
+                    Some(messages) => {
+                        let recent: Vec<Msg> =
+                            messages.iter().rev().take(30).rev().cloned().collect();
+                        let views: Vec<MessageView> = recent
+                            .iter()
+                            .map(|message| pane.message_view(&self.state, message))
+                            .collect();
+                        views
+                            .iter()
+                            .enumerate()
+                            .map(|(index, view)| {
+                                let grouped =
+                                    index > 0 && adjacent_grouped(&views[index - 1], view);
+                                pane.message_row_view(view, grouped, &pane_inputs)
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                    None => Vec::new(),
+                };
+                (name, rows)
+            });
+            let (name, rows) = built;
+            deferred(
+                anchored().anchor(Anchor::TopLeft).child(
+                    div()
+                        .occlude()
+                        .flex()
+                        .flex_col()
+                        .ml(rems(15.4))
+                        .mt(rems(3.2))
+                        .w(rems(22.0))
+                        .rounded_md()
+                        .shadow_lg()
+                        .bg(rgb(p.panel))
+                        .border_1()
+                        .border_color(rgb(p.border))
+                        .child(
+                            div()
+                                .flex_none()
+                                .px_2()
+                                .py_1()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(p.text))
+                                .child(SharedString::from(format!("#{name} — recent"))),
+                        )
+                        .child(
+                            div()
+                                .id("preview-scroll")
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .p_2()
+                                .min_h(rems(5.0))
+                                .max_h(rems(17.0))
+                                .overflow_y_scroll()
+                                .track_scroll(&preview_scroll)
+                                .when(rows.is_empty(), |column| {
+                                    column.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .py_2()
+                                            .text_xs()
+                                            .text_color(rgb(p.muted))
+                                            .child("loading…"),
+                                    )
+                                })
+                                .children(rows),
+                        ),
+                ),
+            )
+        });
 
         // Popup toasts: the pending notification list, docked above the
         // pane (the original client's bottom-right toasts; in-window so
