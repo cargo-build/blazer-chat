@@ -755,12 +755,9 @@ impl gpui::Render for ReactionTooltip {
 #[derive(Clone)]
 pub(crate) struct PaneInputs {
     pub(crate) editing: Option<(String, String)>,
-    pub(crate) user_card: Option<String>,
     pub(crate) open_menu: Option<(String, String)>,
     pub(crate) me: Option<String>,
     pub(crate) emoji: std::collections::BTreeMap<String, String>,
-    /// `(sender, info)` of the open user card, when one is open.
-    pub(crate) user_card_info: Option<(String, crate::rc::UserInfo)>,
     /// The active room supports permalinks (channels/groups; not DMs).
     pub(crate) link_ready: bool,
     /// The window's palette for this frame (m9 appearance plumbing).
@@ -811,10 +808,6 @@ pub(crate) enum PaneEvent {
     },
     CloseMenu,
     OpenUserCard {
-        username: String,
-    },
-    CloseUserCard,
-    OpenDm {
         username: String,
     },
 }
@@ -1263,12 +1256,12 @@ impl MessagePane {
         // The user card opens from the avatar, the sender name or a
         // mention pill (m12 D3/F8); unknown users fetch their card
         // data on the first open.
-        let card_open = inputs.user_card.as_deref() == Some(view.sender.as_str());
         let lead = if grouped {
             div().flex_none().w(rems(2.0)).into_any_element()
         } else {
             div()
                 .id(SharedString::from(format!("card-{msg_id}")))
+                .debug_selector(|| format!("sender-profile-{msg_id}"))
                 .role(Role::Button)
                 .aria_label(format!("Open user card for {}", view.sender))
                 .flex_none()
@@ -1356,102 +1349,6 @@ impl MessagePane {
                     }))
                     .child(badges),
             )
-            .when(card_open, |row| {
-                let info = inputs
-                    .user_card_info
-                    .as_ref()
-                    .filter(|(name, _)| *name == view.sender)
-                    .map(|(_, info)| info);
-                let name = info
-                    .and_then(|info| info.name.clone())
-                    .unwrap_or_else(|| view.sender.clone());
-                let status = info
-                    .and_then(|info| info.status.clone())
-                    .unwrap_or_else(|| "…".to_owned());
-                let is_me = inputs.me.as_deref() == Some(view.sender.as_str());
-                let this = self.entity.clone();
-                let sender = view.sender.clone();
-                row.child(deferred(
-                    anchored().anchor(Anchor::TopLeft).child(
-                        div()
-                            .occlude()
-                            .flex()
-                            .flex_col()
-                            .min_w(px(170.0))
-                            .p_2()
-                            .gap_1()
-                            .bg(rgb(p.panel))
-                            .border_1()
-                            .border_color(rgb(p.border))
-                            .rounded_md()
-                            .shadow_lg()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(avatar(&view.sender, p, rems(2.0)))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .child(SharedString::from(name)),
-                                            )
-                                            .child(div().text_xs().text_color(rgb(p.muted)).child(
-                                                SharedString::from(format!(
-                                                    "@{} · {status}",
-                                                    view.sender
-                                                )),
-                                            )),
-                                    ),
-                            )
-                            .when(!is_me, |card| {
-                                card.child(
-                                    div()
-                                        .id("card-dm")
-                                        .role(Role::Button)
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_xs()
-                                        .text_xs()
-                                        .text_color(rgb(p.text))
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(p.row_hover)))
-                                        .child("✉ Send DM")
-                                        .on_click({
-                                            let this = this.clone();
-                                            let sender = sender.clone();
-                                            move |_, _, cx| {
-                                                this.update(cx, |_, cx| {
-                                                    cx.emit(PaneEvent::OpenDm {
-                                                        username: sender.clone(),
-                                                    });
-                                                });
-                                            }
-                                        }),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .id("card-close")
-                                    .text_xs()
-                                    .text_color(rgb(p.muted))
-                                    .cursor_pointer()
-                                    .hover(|style| style.text_color(rgb(p.text)))
-                                    .child("✕ close")
-                                    .on_click(move |_, _, cx| {
-                                        this.update(cx, |_, cx| {
-                                            cx.emit(PaneEvent::CloseUserCard);
-                                        });
-                                    }),
-                            ),
-                    ),
-                ))
-            })
             .child(action_strip(
                 ActionContext {
                     this: self.entity.clone(),

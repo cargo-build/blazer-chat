@@ -98,6 +98,14 @@ pub struct WireUserCard {
     pub name: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default, rename = "statusText")]
+    pub status_text: Option<String>,
+    #[serde(default)]
+    pub bio: Option<String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default, rename = "utcOffset")]
+    pub utc_offset: Option<f64>,
 }
 
 #[derive(Deserialize)]

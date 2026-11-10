@@ -5,6 +5,7 @@
 mod input;
 mod markdown;
 mod message_pane;
+mod profile;
 mod root;
 mod theme;
 

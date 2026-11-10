@@ -1,7 +1,7 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "blazer-chat \u2014 Rocket.Chat REST contract",
+    "title": "blazer-chat — Rocket.Chat REST contract",
     "version": "0.1.0",
     "description": "The exact REST subset blazer-chat consumes, documented from the wire code (src/rc/wire.rs, src/rc/client.rs). The server returns more fields than listed; unknown fields are ignored by the decoder.\n\nLive updates are NOT REST: a DDP session over wss://{host}/websocket authenticates with {msg: 'login', params: [{resume: authToken}]} and subscribes to streamer events; message bodies follow the Message schema with EJSON dates (ts may be a string or {$date: string}).\n\nGuard: `just api-check` fails the gate if client code calls an endpoint missing from this spec."
   },
@@ -660,6 +660,22 @@
                         "status": {
                           "type": "string",
                           "description": "online / away / busy / offline"
+                        },
+                        "statusText": {
+                          "type": "string"
+                        },
+                        "bio": {
+                          "type": "string"
+                        },
+                        "roles": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "utcOffset": {
+                          "type": "number",
+                          "description": "UTC offset in hours; fractional offsets are preserved."
                         }
                       },
                       "additionalProperties": true
@@ -1546,7 +1562,7 @@
           "rooms"
         ],
         "summary": "Mark room unread",
-        "description": "Flags the room as unread for the authenticated user (m12 F5 Mark-unread; state-audit A11 route fix). Body: {roomId} \u2014 the pinned server schema accepts roomId or firstUnreadMessage only.",
+        "description": "Flags the room as unread for the authenticated user (m12 F5 Mark-unread; state-audit A11 route fix). Body: {roomId} — the pinned server schema accepts roomId or firstUnreadMessage only.",
         "security": [
           {
             "authToken": [],
@@ -1599,7 +1615,7 @@
           "search"
         ],
         "summary": "Global search (spotlight)",
-        "description": "Cross-room message search behind the header search panel (m17). Read-only; the client reads messages.result and maps it like history. Requires the session token; the server may refuse by permission \u2014 the client degrades to local cache search.",
+        "description": "Cross-room message search behind the header search panel (m17). Read-only; the client reads messages.result and maps it like history. Requires the session token; the server may refuse by permission — the client degrades to local cache search.",
         "parameters": [
           {
             "name": "query",
@@ -1647,7 +1663,7 @@
           "assets"
         ],
         "summary": "Room avatar image",
-        "description": "The room's custom avatar (m18: square avatars in the sidebar). Rooms without a custom avatar answer 404 \u2014 the client records the miss and keeps the '#' fallback.",
+        "description": "The room's custom avatar (m18: square avatars in the sidebar). Rooms without a custom avatar answer 404 — the client records the miss and keeps the '#' fallback.",
         "responses": {
           "200": {
             "description": "Image bytes.",

@@ -253,6 +253,16 @@ pub enum ChatEvent {
     UserInfo {
         info: UserInfo,
     },
+    /// Profile failures retain their requested identity. @req M19_PROFILE_NAVIGATION
+    UserInfoFailed {
+        username: String,
+        reason: String,
+    },
+    /// The local control surface shares native profile navigation. @req M19_PROFILE_NAVIGATION
+    OpenProfile {
+        username: String,
+    },
+    CloseProfile,
     /// Persisted drafts at session start (m12 F13).
     Drafts {
         drafts: std::collections::HashMap<String, String>,
@@ -853,7 +863,10 @@ impl ChatState {
                 }
                 None
             }
-            ChatEvent::Quit => None,
+            ChatEvent::Quit
+            | ChatEvent::OpenProfile { .. }
+            | ChatEvent::CloseProfile
+            | ChatEvent::UserInfoFailed { .. } => None,
         }
     }
 
@@ -976,6 +989,9 @@ pub(crate) const ROOM_CACHE_CAP: usize = 400;
 pub struct UiSnapshot {
     pub status: String,
     pub username: Option<String>,
+    pub profile_username: Option<String>,
+    pub profile: Option<UserInfo>,
+    pub profile_error: Option<String>,
     /// Room display names in list order.
     pub rooms: Vec<String>,
     /// Rooms with a nonzero unread count: `"name ×count"`.
@@ -1018,6 +1034,9 @@ impl UiSnapshot {
                 (None, _) => "not logged in".to_owned(),
             },
             username: state.username.clone(),
+            profile_username: None,
+            profile: None,
+            profile_error: None,
             build_profile: if cfg!(debug_assertions) {
                 "debug"
             } else {
@@ -1721,8 +1740,9 @@ async fn execute<T: Transport>(
         },
         ChatCommand::UserInfo { username } => match client.user_info(&username).await {
             Ok(info) => ChatEvent::UserInfo { info },
-            Err(error) => session_expired(store, client, &error)
-                .unwrap_or_else(|| ChatEvent::Failed(error.to_string())),
+            Err(error) => session_expired(store, client, &error).unwrap_or_else(|| {
+                ChatEvent::UserInfoFailed { username, reason: error.to_string() }
+            }),
         },
         ChatCommand::SaveDraft { room_id, text } => {
             // Persistence is best-effort: the UI keeps the text either

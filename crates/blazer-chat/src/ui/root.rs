@@ -16,6 +16,7 @@ use super::message_pane::{
     MessagePane, MessageView, PaneEvent, PaneInputs, adjacent_grouped, avatar, pretty_time,
 };
 use super::theme::{DARK, LIGHT, Palette, palette};
+use super::profile::{self, ProfileAction, ProfileView};
 use super::{
     ZoomIn, ZoomOut, ZoomReset,
     input::{Suggest, TextInput, TextInputEvent},
@@ -52,6 +53,7 @@ pub(crate) struct ChatRoot {
     show_info: bool,
     /// The username whose user card is open (m12 F8).
     user_card: Option<String>,
+    profile_error: Option<String>,
     /// The emoji picker popover is open (m12 F9).
     emoji_picker_open: bool,
     /// The top-bar avatar menu is open.
@@ -347,6 +349,7 @@ impl ChatRoot {
             room_menu: None,
             show_info: false,
             user_card: None,
+            profile_error: None,
             emoji_picker_open: false,
             user_menu_open: false,
             palette: palette(window.appearance()),
@@ -354,6 +357,40 @@ impl ChatRoot {
     }
 
     fn apply_event(&mut self, event: ChatEvent, cx: &mut Context<Self>) {
+        match &event {
+            ChatEvent::DmOpened { room_id, .. } => {
+                let previous_room = self.state.active_room.clone();
+                let room_id = room_id.clone();
+                self.state.apply(event);
+                // Reuse room navigation before the new DM inherits the old composer's text.
+                self.state.active_room = previous_room;
+                self.open_room(room_id, cx);
+                self.mirror(cx);
+                return;
+            }
+            ChatEvent::OpenProfile { username } => {
+                self.open_user_profile(username.clone(), cx);
+                return;
+            }
+            ChatEvent::CloseProfile => {
+                self.profile_action(ProfileAction::Close, cx);
+                return;
+            }
+            ChatEvent::UserInfoFailed { username, reason }
+                if self.user_card.as_deref() == Some(username.as_str()) => {
+                self.profile_error = Some(reason.clone());
+            }
+            ChatEvent::UserInfo { info }
+                if self.user_card.as_deref() == Some(info.username.as_str()) => {
+                self.profile_error = None;
+            }
+            ChatEvent::LoggedOut | ChatEvent::SessionExpired { .. } => {
+                self.user_card = None;
+                self.profile_error = None;
+                self.user_menu_open = false;
+            }
+            _ => {}
+        }
         if matches!(event, ChatEvent::OlderMessages { .. }) {
             self.pane.update(cx, |pane, _| pane.clear_loading_older());
         }
@@ -428,24 +465,7 @@ impl ChatRoot {
                 cx.notify();
             }
             PaneEvent::OpenUserCard { username } => {
-                self.user_card = Some(username.clone());
-                if !self.state.user_info.contains_key(username) {
-                    self.send_command(ChatCommand::UserInfo {
-                        username: username.clone(),
-                    });
-                }
-                cx.notify();
-            }
-            PaneEvent::CloseUserCard => {
-                self.user_card = None;
-                cx.notify();
-            }
-            PaneEvent::OpenDm { username } => {
-                self.user_card = None;
-                self.send_command(ChatCommand::OpenDm {
-                    username: username.clone(),
-                });
-                cx.notify();
+                self.open_user_profile(username.clone(), cx);
             }
         }
     }
@@ -454,6 +474,9 @@ impl ChatRoot {
     /// holds the lock only for the store, never across a frame.
     fn mirror(&self, cx: &App) {
         let mut snapshot = UiSnapshot::from_state(&self.state);
+        snapshot.profile_username = self.user_card.clone();
+        snapshot.profile = self.user_card.as_ref().and_then(|username| self.state.user_info.get(username)).cloned();
+        snapshot.profile_error = self.profile_error.clone();
         snapshot.pane_rebuilds = self.pane.read(cx).rebuilds();
         if !self.frame_ms.is_empty() {
             let count = self.frame_ms.len() as f64;
@@ -469,6 +492,67 @@ impl ChatRoot {
             .snapshot
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(snapshot);
+    }
+
+    /// Every identity entry point shares one selection/fetch path. @req M19_PROFILE_NAVIGATION
+    fn open_user_profile(&mut self, username: String, cx: &mut Context<Self>) {
+        if username.trim().is_empty() {
+            self.state.error = Some("Profile username is empty".to_owned());
+            cx.notify();
+            return;
+        }
+        self.profile_error = None;
+        self.user_menu_open = false;
+        self.preview_room = None;
+        self.preview_hover = None;
+        self.preview_gen += 1;
+        self.user_card = Some(username.clone());
+        if !self.state.user_info.contains_key(&username) {
+            self.send_command(ChatCommand::UserInfo { username: username.clone() });
+        }
+        if !self.state.avatars.contains_key(&username) {
+            self.send_command(ChatCommand::FetchAvatars { usernames: vec![username] });
+        }
+        self.mirror(cx);
+        cx.notify();
+    }
+
+    /// Profile actions preserve the existing room/draft owner. @req M19_PROFILE_NAVIGATION
+    fn profile_action(&mut self, action: ProfileAction, cx: &mut Context<Self>) {
+        let Some(username) = self.user_card.clone() else { return };
+        match action {
+            ProfileAction::Close => {
+                self.user_card = None;
+                self.profile_error = None;
+            }
+            ProfileAction::Retry => {
+                self.profile_error = None;
+                self.send_command(ChatCommand::UserInfo { username });
+            }
+            ProfileAction::OpenConversation => {
+                match self.state.rooms.iter().find(|room| room.kind == 'd' && room.name == username).map(|room| room.id.clone()) {
+                    Some(room_id) => self.open_room(room_id, cx),
+                    None => {
+                        self.user_card = None;
+                        self.profile_error = None;
+                        self.send_command(ChatCommand::OpenDm { username });
+                    }
+                }
+            }
+            ProfileAction::OpenOnServer => {
+                let view = ProfileView {
+                    username: &username,
+                    info: None,
+                    avatar_path: None,
+                    server: self.state.origin.as_deref(),
+                    is_self: self.state.username.as_deref() == Some(username.as_str()),
+                    error: None,
+                };
+                if let Some(url) = view.server_url() { cx.open_url(&url); }
+            }
+        }
+        self.mirror(cx);
+        cx.notify();
     }
 
     fn open_room(&mut self, room_id: String, cx: &mut Context<Self>) {
@@ -491,6 +575,7 @@ impl ChatRoot {
         // Panels and cards belong to the room they opened in.
         self.show_info = false;
         self.user_card = None;
+        self.profile_error = None;
         self.emoji_picker_open = false;
         let restored = self.state.drafts.get(&room_id).cloned().unwrap_or_default();
         self.composer
@@ -523,6 +608,10 @@ impl ChatRoot {
     /// Escape: an edit backs out to the room's draft; with no edit an
     /// active search clears (m12 F12).
     fn cancel_editing(&mut self, cx: &mut Context<Self>) {
+        if self.user_card.is_some() {
+            self.profile_action(ProfileAction::Close, cx);
+            return;
+        }
         if self.shortcuts_open {
             self.shortcuts_open = false;
             cx.notify();
@@ -1195,19 +1284,11 @@ impl gpui::Render for ChatRoot {
         // Pane render inputs, snapshot per frame (m13 S2a 2.4(7)) —
         // hoisted above the rooms list so the hover preview's rows
         // (m16) can share them.
-        let user_card_info = self.user_card.as_ref().and_then(|name| {
-            self.state
-                .user_info
-                .get(name)
-                .map(|info| (name.clone(), info.clone()))
-        });
         let pane_inputs = PaneInputs {
             editing: self.editing.clone(),
-            user_card: self.user_card.clone(),
             open_menu: self.open_menu.clone(),
             me: self.state.username.clone(),
             emoji: self.state.emoji.clone(),
-            user_card_info,
             link_ready: self
                 .state
                 .active_room
@@ -1420,6 +1501,19 @@ impl gpui::Render for ChatRoot {
                                         // photo replaces both fallbacks
                                         // when the server has one.
                                         'd' => div()
+                                            .id(SharedString::from(format!("room-profile-{}", room.id)))
+                                            .debug_selector(|| format!("room-profile-{}", room.id))
+                                            .tab_stop(true)
+                                            .role(Role::Button)
+                                            .aria_label(format!("Open profile for {}", room.name))
+                                            .on_click({
+                                                let this = this.clone();
+                                                let username = room.name.clone();
+                                                move |_, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.update(cx, |chat, cx| chat.open_user_profile(username.clone(), cx));
+                                                }
+                                            })
                                             .flex_none()
                                             .w(rems(1.25))
                                             .flex()
@@ -1441,6 +1535,21 @@ impl gpui::Render for ChatRoot {
                                         _ => {
                                             let room_avatar_key = format!("room-{}", room.id);
                                             div()
+                                                .id(SharedString::from(format!("room-identity-{}", room.id)))
+                                                .role(Role::Button)
+                                                .aria_label(format!("Open room information for {}", room.name))
+                                                .on_click({
+                                                    let this = this.clone();
+                                                    let room_id = room_id.clone();
+                                                    move |_, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.update(cx, |chat, cx| {
+                                                            chat.open_room(room_id.clone(), cx);
+                                                            chat.show_info = true;
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                })
                                                 .flex_none()
                                                 .w(rems(1.25))
                                                 .flex()
@@ -2400,6 +2509,26 @@ impl gpui::Render for ChatRoot {
                         )
                         .child(
                             div()
+                                .id("menu-profile")
+                                .role(Role::Button)
+                                .aria_label("Your profile")
+                                .px_2()
+                                .py_1()
+                                .rounded_xs()
+                                .text_sm()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(p.row_hover)))
+                                .child("Your profile")
+                                .on_click({
+                                    let this = this_bar.clone();
+                                    let username = me.clone();
+                                    move |_, _, cx| {
+                                        this.update(cx, |chat, cx| chat.open_user_profile(username.clone(), cx));
+                                    }
+                                }),
+                        )
+                        .child(
+                            div()
                                 .id("menu-logout")
                                 .flex()
                                 .items_center()
@@ -2586,13 +2715,24 @@ impl gpui::Render for ChatRoot {
                                 }),
                         )
                     })
-                    .child(
+                    .when_some(self.state.username.clone(), |bar, username| bar.child(
                         div()
+                            .id("own-profile")
+                            .debug_selector(|| "own-profile".to_owned())
+                            .tab_stop(true)
+                            .role(Role::Button)
+                            .aria_label("Open your profile")
                             .text_xs()
                             .text_color(rgb(p.muted))
                             .pr_1()
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(rgb(p.accent)))
+                            .on_click({
+                                let this = this_bar.clone();
+                                move |_, _, cx| this.update(cx, |chat, cx| chat.open_user_profile(username.clone(), cx))
+                            })
                             .child(SharedString::from(me.clone())),
-                    )
+                    ))
                     .child(
                         div()
                             .id("user-avatar")
@@ -2896,6 +3036,20 @@ impl gpui::Render for ChatRoot {
                 })
             });
 
+        let profile_panel = self.user_card.as_deref().map(|username| {
+            let this = cx.entity();
+            profile::panel(ProfileView {
+                username,
+                info: self.state.user_info.get(username),
+                avatar_path: self.state.avatars.get(username).map(String::as_str),
+                server: self.state.origin.as_deref(),
+                is_self: self.state.username.as_deref() == Some(username),
+                error: self.profile_error.as_deref(),
+            }, p, move |action, cx| {
+                this.update(cx, |chat, cx| chat.profile_action(action, cx));
+            })
+        });
+
         div()
             .flex()
             .flex_col()
@@ -2912,6 +3066,11 @@ impl gpui::Render for ChatRoot {
             // printable keystroke while neither input holds focus
             // lands in the composer as if typed there.
             .on_key_down(cx.listener(|chat, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && chat.user_card.is_some() {
+                    chat.profile_action(ProfileAction::Close, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 let modifiers = event.keystroke.modifiers;
                 let shift_only = modifiers.shift
                     && !(modifiers.control
@@ -3191,7 +3350,8 @@ impl gpui::Render for ChatRoot {
                         None,
                         p.panel,
                         p,
-                    )),
+                    ))
+                    .children(profile_panel),
             )
             .child(
                 div()
@@ -3302,6 +3462,103 @@ fn completion_token(text: &str, caret: usize) -> Option<(usize, char, String)> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn profile_window(cx: &mut gpui::TestAppContext) -> (gpui::WindowHandle<ChatRoot>, async_channel::Sender<ChatEvent>, async_channel::Receiver<ChatCommand>) {
+        let (events, event_rx) = async_channel::bounded(32);
+        let (commands, command_rx) = async_channel::bounded(32);
+        let service = ChatService { events: event_rx, commands, snapshot: Arc::new(Mutex::new(None)) };
+        let window = cx.open_window(gpui::size(px(1280.0), px(900.0)), |window, cx| {
+            let mut chat = ChatRoot::new(service, crate::settings::SendOnEnter::Normal, window, cx);
+            chat.state.username = Some("tester".to_owned());
+            chat.state.origin = Some("https://chat.example".to_owned());
+            chat.state.active_room = Some("room-a".to_owned());
+            chat.state.rooms = vec![sroom("room-a", 'c', 0), Room { name: "bob".to_owned(), ..sroom("dm-bob", 'd', 0) }];
+            chat.composer.update(cx, |input, cx| input.set_content("unsubmitted draft", cx));
+            window.focus(&chat.focus, cx);
+            chat
+        });
+        (window, events, command_rx)
+    }
+
+    #[gpui::test]
+    fn sidebar_and_self_profiles_preserve_chat_and_isolate_late_failures(cx: &mut gpui::TestAppContext) {
+        let (window, _events, commands) = profile_window(cx);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        let bounds = visual.debug_bounds("room-profile-dm-bob").expect("the DM avatar is visible");
+        visual.simulate_click(bounds.center(), gpui::Modifiers::default());
+        window.update(cx, |chat, _, cx| {
+            assert_eq!(chat.user_card.as_deref(), Some("bob"));
+            assert_eq!(chat.state.active_room.as_deref(), Some("room-a"), "avatar clicks must not bubble into room navigation");
+            assert_eq!(chat.composer.read(cx).content(), "unsubmitted draft");
+        }).expect("the test window is alive");
+        assert!(visual.debug_bounds("profile-panel").is_some(), "profiles render without a matching message row");
+        let queued: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(queued.iter().any(|command| matches!(command, ChatCommand::UserInfo { username } if username=="bob")));
+        assert!(!queued.iter().any(|command| matches!(command, ChatCommand::OpenRoom { .. } | ChatCommand::OpenDm { .. })));
+
+        let close = visual.debug_bounds("profile-close").expect("profile close is visible");
+        visual.simulate_click(close.center(), gpui::Modifiers::default());
+        let own = visual.debug_bounds("own-profile").expect("the account name is visible");
+        visual.simulate_click(own.center(), gpui::Modifiers::default());
+        window.update(cx, |chat, _, cx| {
+            assert_eq!(chat.user_card.as_deref(), Some("tester"));
+            chat.apply_event(ChatEvent::UserInfoFailed { username: "bob".to_owned(), reason: "old failure".to_owned() }, cx);
+            assert!(chat.profile_error.is_none(), "a stale failure belongs to its original identity");
+            chat.apply_event(ChatEvent::UserInfoFailed { username: "tester".to_owned(), reason: "offline".to_owned() }, cx);
+            assert_eq!(chat.profile_error.as_deref(), Some("offline"));
+        }).expect("the test window is alive");
+        visual.run_until_parked();
+        let retry = visual.debug_bounds("profile-retry").expect("failed profiles offer retry");
+        visual.simulate_click(retry.center(), gpui::Modifiers::default());
+        window.update(cx, |chat, _, cx| {
+            assert!(chat.profile_error.is_none());
+            chat.apply_event(ChatEvent::UserInfo { info: crate::rc::UserInfo { username: "tester".to_owned(), name: Some("Tester".to_owned()), ..Default::default() } }, cx);
+            assert!(chat.state.user_info.contains_key("tester"));
+        }).expect("the test window is alive");
+        visual.simulate_keystrokes("escape");
+        window.update(cx, |chat, _, cx| {
+            assert!(chat.user_card.is_none());
+            assert_eq!(chat.composer.read(cx).content(), "unsubmitted draft");
+            chat.open_user_profile("tester".to_owned(), cx);
+            chat.apply_event(ChatEvent::LoggedOut, cx);
+            assert!(chat.user_card.is_none(), "logging out clears the selected profile");
+            assert!(chat.state.user_info.is_empty(), "logging out clears cached identities");
+        }).expect("the test window is alive");
+    }
+
+    #[gpui::test]
+    fn message_identity_opens_the_same_profile_destination(cx: &mut gpui::TestAppContext) {
+        let (window, _events, _commands) = profile_window(cx);
+        window.update(cx, |chat, _, cx| {
+            chat.apply_event(ChatEvent::Messages { room_id: "room-a".to_owned(), messages: vec![Msg {
+                id: "profile-msg".to_owned(), room_id: "room-a".to_owned(), sender: "bob".to_owned(),
+                text: "Hello".to_owned(), ts: "2026-11-10T10:00:00Z".to_owned(), tmid: None,
+                tcount: None, tlm: None, file: None, reactions: Default::default(),
+                starred_by_me: false, edited: false, system: false,
+            }] }, cx);
+        }).expect("the test window is alive");
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        let sender = visual.debug_bounds("sender-profile-profile-msg").expect("the message sender is visible");
+        visual.simulate_click(sender.center(), gpui::Modifiers::default());
+        assert!(visual.debug_bounds("profile-panel").is_some());
+        window.update(cx, |chat, _, _| {
+            assert_eq!(chat.user_card.as_deref(), Some("bob"));
+        }).expect("the test window is alive");
+    }
+
+    #[gpui::test]
+    fn created_dm_preserves_the_outgoing_draft(cx: &mut gpui::TestAppContext) {
+        let (window, _events, commands) = profile_window(cx);
+        window.update(cx, |chat, _, cx| {
+            chat.apply_event(ChatEvent::DmOpened { room_id: "dm-alice".to_owned(), username: "alice".to_owned() }, cx);
+            assert_eq!(chat.state.drafts.get("room-a").map(String::as_str), Some("unsubmitted draft"));
+            assert_eq!(chat.composer.read(cx).content(), "", "the previous room's text must not become the new DM's composer");
+        }).expect("the test window is alive");
+        let queued: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(queued.iter().any(|command| matches!(command, ChatCommand::OpenRoom { room_id } if room_id=="dm-alice")));
+    }
 
     #[test]
     fn edit_transition_routes_outgoing_and_loads_unsubmitted() {

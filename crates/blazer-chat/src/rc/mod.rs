@@ -7,6 +7,7 @@ mod types;
 mod wire;
 
 pub use client::RcClient;
+pub(crate) use client::encode_query_param;
 pub use live::{DdpLive, LiveCommand, LiveEvent, websocket_url};
 pub use types::{
     AttachedFile, CustomEmoji, Msg, Notification, RcError, RcSettings, Reaction, Room, Session,

@@ -84,7 +84,7 @@ impl RcClient<HttpTransport> {
 /// else goes byte-wise `%XX` — room ids are safe, but usernames on
 /// this deployment are email-like (`@`) and cursor timestamps carry
 /// punctuation (m10 wire hygiene).
-pub(super) fn encode_query_param(value: &str) -> String {
+pub(crate) fn encode_query_param(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
@@ -620,16 +620,29 @@ impl<T: Transport> RcClient<T> {
     /// One user's card data (`users.info`): name and presence
     /// status (m12 F8).
     pub async fn user_info(&mut self, username: &str) -> Result<UserInfo, RcError> {
+        if username.trim().is_empty() {
+            return Err(RcError::Config("profile username is empty".to_owned()));
+        }
         let path = format!(
             "/api/v1/users.info?username={}",
             encode_query_param(username)
         );
         let body = self.call("GET", &path, None, true).await?;
         let parsed: UserInfoResponse = Self::parse(&body, "users.info")?;
+        if parsed.user.username.trim().is_empty() {
+            return Err(RcError::Parse("users.info returned an empty username".to_owned()));
+        }
+        if parsed.user.username != username {
+            return Err(RcError::Parse("users.info returned a different username".to_owned()));
+        }
         Ok(UserInfo {
             username: parsed.user.username,
             name: parsed.user.name,
             status: parsed.user.status,
+            status_text: parsed.user.status_text,
+            bio: parsed.user.bio,
+            roles: parsed.user.roles,
+            utc_offset: parsed.user.utc_offset,
         })
     }
 

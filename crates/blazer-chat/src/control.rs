@@ -174,6 +174,33 @@ pub async fn serve(
             }
         }
     });
+    control.post("/profile", {
+        let events = events.clone();
+        move |JsonExtractor(body): JsonExtractor<ProfileBody>| {
+            let events = events.clone();
+            async move {
+                match body.username.trim().is_empty() {
+                    true => (StatusCode::BAD_REQUEST, JsonBody(r#"{"error":"username is required"}"#.to_owned())),
+                    false => match enqueue(&events, ChatEvent::OpenProfile { username: body.username }) {
+                        true => queued(),
+                        false => unavailable(r#"{"queued":false}"#),
+                    },
+                }
+            }
+        }
+    });
+    control.post("/profile-close", {
+        let events = events.clone();
+        move || {
+            let events = events.clone();
+            async move {
+                match enqueue(&events, ChatEvent::CloseProfile) {
+                    true => queued(),
+                    false => unavailable(r#"{"queued":false}"#),
+                }
+            }
+        }
+    });
 
     // The socket is an unauthenticated local RPC: without
     // XDG_RUNTIME_DIR there is no private directory to hold it, so the
@@ -286,6 +313,11 @@ struct SearchBody {
 #[derive(Deserialize)]
 struct ThreadBody {
     tmid: String,
+}
+
+#[derive(Deserialize)]
+struct ProfileBody {
+    username: String,
 }
 
 /// Visible to tests through the app boundary fold: the snapshot is the

@@ -771,7 +771,33 @@ fn user_info_decodes_name_and_status() {
     assert_eq!(info.username, "bob");
     assert_eq!(info.name.as_deref(), Some("Bob"));
     assert_eq!(info.status.as_deref(), Some("online"));
+    assert!(info.status_text.is_none());
+    assert!(info.bio.is_none());
+    assert!(info.roles.is_empty());
+    assert!(info.utc_offset.is_none());
     assert!(transport.last_request().contains("users.info?username=bob"));
+}
+
+#[test]
+fn user_info_keeps_optional_profile_fields_and_rejects_wrong_identity() {
+    let body = r#"{"user":{"username":"bob","name":"Bob","status":"away","statusText":"At lunch","bio":"Rust developer","roles":["user","moderator"],"utcOffset":5.5},"success":true}"#;
+    let transport = FakeTransport::answering(&[("login", 200, LOGIN_BODY), ("users.info", 200, body)]);
+    let mut rc = client(transport);
+    futures_lite::future::block_on(rc.login("tester", "secret")).unwrap();
+    let info = futures_lite::future::block_on(rc.user_info("bob")).unwrap();
+    assert_eq!(info.status_text.as_deref(), Some("At lunch"));
+    assert_eq!(info.bio.as_deref(), Some("Rust developer"));
+    assert_eq!(info.roles, ["user", "moderator"]);
+    assert_eq!(info.utc_offset, Some(5.5), "fractional time zones are preserved");
+    assert!(matches!(futures_lite::future::block_on(rc.user_info("alice")), Err(RcError::Parse(_))), "another user's response must not fill this profile");
+}
+
+#[test]
+fn user_info_rejects_an_empty_username_before_io() {
+    let transport = FakeTransport::answering(&[]);
+    let mut rc = client(transport.clone());
+    assert!(matches!(futures_lite::future::block_on(rc.user_info("  ")), Err(RcError::Config(_))));
+    assert!(!transport.made_request());
 }
 
 #[test]
