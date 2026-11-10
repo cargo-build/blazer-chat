@@ -180,8 +180,16 @@ pub async fn serve(
             let events = events.clone();
             async move {
                 match body.username.trim().is_empty() {
-                    true => (StatusCode::BAD_REQUEST, JsonBody(r#"{"error":"username is required"}"#.to_owned())),
-                    false => match enqueue(&events, ChatEvent::OpenProfile { username: body.username }) {
+                    true => (
+                        StatusCode::BAD_REQUEST,
+                        JsonBody(r#"{"error":"username is required"}"#.to_owned()),
+                    ),
+                    false => match enqueue(
+                        &events,
+                        ChatEvent::OpenProfile {
+                            username: body.username,
+                        },
+                    ) {
                         true => queued(),
                         false => unavailable(r#"{"queued":false}"#),
                     },

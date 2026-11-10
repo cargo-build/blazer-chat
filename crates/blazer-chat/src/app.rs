@@ -1741,7 +1741,10 @@ async fn execute<T: Transport>(
         ChatCommand::UserInfo { username } => match client.user_info(&username).await {
             Ok(info) => ChatEvent::UserInfo { info },
             Err(error) => session_expired(store, client, &error).unwrap_or_else(|| {
-                ChatEvent::UserInfoFailed { username, reason: error.to_string() }
+                ChatEvent::UserInfoFailed {
+                    username,
+                    reason: error.to_string(),
+                }
             }),
         },
         ChatCommand::SaveDraft { room_id, text } => {

@@ -630,10 +630,14 @@ impl<T: Transport> RcClient<T> {
         let body = self.call("GET", &path, None, true).await?;
         let parsed: UserInfoResponse = Self::parse(&body, "users.info")?;
         if parsed.user.username.trim().is_empty() {
-            return Err(RcError::Parse("users.info returned an empty username".to_owned()));
+            return Err(RcError::Parse(
+                "users.info returned an empty username".to_owned(),
+            ));
         }
         if parsed.user.username != username {
-            return Err(RcError::Parse("users.info returned a different username".to_owned()));
+            return Err(RcError::Parse(
+                "users.info returned a different username".to_owned(),
+            ));
         }
         Ok(UserInfo {
             username: parsed.user.username,
