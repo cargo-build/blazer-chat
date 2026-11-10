@@ -79,6 +79,10 @@ pub(crate) struct ChatRoot {
     /// The keyboard-shortcuts overlay (m14 P2, RC
     /// KeyboardShortcutsModal, opened by ? outside the inputs).
     shortcuts_open: bool,
+    /// The thread panel's layout (m15, the operator's reddit-style
+    /// idea): false = partial (docked beside the live main pane),
+    /// true = full (the thread takes the row).
+    thread_panel_full: bool,
     /// Per-message edit drafts keyed by `(room_id, msg_id)` (m14
     /// P2, RC CurrentEditingMessage): an in-progress edit keeps
     /// its own text across hops and re-entries; submission or
@@ -316,6 +320,7 @@ impl ChatRoot {
             hovered_toasts: Default::default(),
             theme_override: None,
             shortcuts_open: false,
+            thread_panel_full: false,
             edit_drafts: Default::default(),
             search_rooms,
             focus: cx.focus_handle(),
@@ -380,6 +385,9 @@ impl ChatRoot {
             }
             PaneEvent::OpenThread { tmid } => {
                 self.send_command(ChatCommand::OpenThread { tmid: tmid.clone() });
+                // A fresh open docks the panel beside the main pane
+                // (m15: partial by default).
+                self.thread_panel_full = false;
                 cx.notify();
             }
             PaneEvent::QuoteMessage { room_id, msg_id } => {
@@ -1648,10 +1656,12 @@ impl gpui::Render for ChatRoot {
             .find(|room| Some(room.id.as_str()) == self.state.active_room.as_deref())
             .map(|room| room.name.clone())
             .unwrap_or_else(|| "messages".to_owned());
-        let pane = if let Some((room_id, tmid)) = self.state.open_thread.clone() {
-            // Thread view: back button, then the thread's messages —
-            // the same full rows as the main pane (avatars, times,
-            // attachments with image previews, reaction pills).
+        let thread_panel = if let Some((_room_id, tmid)) = self.state.open_thread.clone() {
+            // Thread panel (m15, the operator's reddit-style idea):
+            // docks beside the LIVE main pane in partial, takes the
+            // row in full — the same full rows as the main pane
+            // (avatars, times, attachments with image previews,
+            // reaction pills).
             let this = search_this.clone();
             let thread_messages: Vec<Msg> = self.state.thread(&tmid).to_vec();
             let state = &self.state;
@@ -1669,46 +1679,99 @@ impl gpui::Render for ChatRoot {
                     })
                     .collect::<Vec<_>>()
             });
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .gap_1()
-                .child(
-                    div()
-                        .id("thread-back")
-                        .flex_none()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_xs()
-                        .bg(rgb(p.panel))
-                        .text_sm()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(p.row_hover)))
-                        .child("← thread")
-                        .on_click(move |_, _, cx| {
-                            this.update(cx, |chat, cx| {
-                                chat.send_command(ChatCommand::CloseThread);
-                                let _room_id = room_id.clone();
-                                cx.notify();
-                            });
-                        }),
-                )
-                .child(
-                    div()
-                        .id("thread-scroll")
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_h_0()
-                        .gap_1()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.thread_scroll)
-                        .children(rows),
-                )
-                .into_any_element()
-        } else if let Some(query) = self.state.search_query.as_deref()
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_xs()
+                            .bg(rgb(p.panel))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(p.text))
+                                    .child(SharedString::from(format!(
+                                        "thread · {}",
+                                        thread_messages.len()
+                                    ))),
+                            )
+                            .child(
+                                div()
+                                    .id("thread-size")
+                                    .px_1p5()
+                                    .rounded_xs()
+                                    .text_xs()
+                                    .text_color(rgb(p.muted))
+                                    .cursor_pointer()
+                                    .hover(|style| {
+                                        style.bg(rgb(p.row_hover)).text_color(rgb(p.text))
+                                    })
+                                    .child(if self.thread_panel_full {
+                                        "collapse"
+                                    } else {
+                                        "expand"
+                                    })
+                                    .on_click({
+                                        let this = this.clone();
+                                        move |_, _, cx| {
+                                            this.update(cx, |chat, cx| {
+                                                chat.thread_panel_full = !chat.thread_panel_full;
+                                                cx.notify();
+                                            });
+                                        }
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("thread-close")
+                                    .px_1p5()
+                                    .rounded_xs()
+                                    .text_xs()
+                                    .text_color(rgb(p.muted))
+                                    .cursor_pointer()
+                                    .hover(|style| {
+                                        style.bg(rgb(p.row_hover)).text_color(rgb(p.text))
+                                    })
+                                    .child("✖")
+                                    .on_click(move |_, _, cx| {
+                                        this.update(cx, |chat, cx| {
+                                            chat.send_command(ChatCommand::CloseThread);
+                                            chat.thread_panel_full = false;
+                                            cx.notify();
+                                        });
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("thread-scroll")
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .gap_1()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.thread_scroll)
+                            .children(rows),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        let pane = if let Some(query) = self.state.search_query.as_deref()
             && !query.trim().is_empty()
         {
             let hits = self.state.search(query);
@@ -2679,13 +2742,40 @@ impl gpui::Render for ChatRoot {
                         // flex_col: the toasts dock ABOVE the pane; the default
                         // flex-row placed them beside it (agy design
                         // review P1-9, a live layout bug).
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_h_0()
-                            .child(toasts)
-                            .child(pane),
+                        //
+                        // m15: the thread panel docks beside the live
+                        // main pane in partial, takes the row in full.
+                        match (thread_panel, self.thread_panel_full) {
+                            (Some(panel), false) => div()
+                                .flex()
+                                .flex_1()
+                                .min_h_0()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .child(toasts)
+                                        .child(pane),
+                                )
+                                .child(div().flex().flex_none().w(rems(26.0)).child(panel)),
+                            (Some(panel), true) => div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_h_0()
+                                .child(toasts)
+                                .child(panel),
+                            (None, _) => div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_h_0()
+                                .child(toasts)
+                                .child(pane),
+                        },
                         None,
                         p.panel,
                         p,
