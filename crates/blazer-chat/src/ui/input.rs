@@ -31,6 +31,10 @@ use super::theme::palette;
 /// The composer shows at most this many text rows; longer content stops
 /// growing and scrolls so the cursor stays visible.
 const COMPOSER_MAX_ROWS: usize = 8;
+/// Expanded-composer cap (m14 P2, RC MessageComposerInputExpandable:
+/// expanded = 500 px / 50vh; 16 rows x 28 px ≈ 448 px, close without
+/// a viewport query).
+const COMPOSER_EXPANDED_ROWS: usize = 16;
 
 actions!(
     text_input,
@@ -132,7 +136,7 @@ impl ShapeEntry {
             .iter()
             .map(line_rows)
             .sum::<usize>()
-            .clamp(1, COMPOSER_MAX_ROWS);
+            .clamp(1, COMPOSER_EXPANDED_ROWS);
         Self {
             line_offsets: line_starts(&key.text),
             key,
@@ -167,6 +171,9 @@ pub(crate) struct TextInput {
     last_line_height: Pixels,
     /// Vertical scroll applied when content exceeds `COMPOSER_MAX_ROWS`.
     last_scroll: Pixels,
+    /// The expand toggle (m14 P2, RC auto-grow's expand button):
+    /// raised cap while true; auto-collapses when the content empties.
+    expanded: bool,
     last_bounds: Option<gpui::Bounds<Pixels>>,
     is_selecting: bool,
 }
@@ -198,6 +205,7 @@ impl TextInput {
             shape_cache: Rc::new(RefCell::new(None)),
             last_shape: None,
             last_line_height: px(28.),
+            expanded: false,
             last_scroll: px(0.),
             last_bounds: None,
             is_selecting: false,
@@ -215,6 +223,26 @@ impl TextInput {
     /// the message composer at construction.
     pub(crate) fn set_send_on_enter(&mut self, mode: crate::settings::SendOnEnter) {
         self.send_on_enter = mode;
+    }
+
+    /// The expand toggle is offered once the content needs more than
+    /// two rows (RC: input taller than 100 px).
+    pub(crate) fn is_expandable(&self) -> bool {
+        self.expanded
+            || self
+                .shape_cache
+                .borrow()
+                .as_ref()
+                .is_some_and(|shape| shape.total_rows > 2)
+    }
+
+    pub(crate) fn is_expanded(&self) -> bool {
+        self.expanded
+    }
+
+    pub(crate) fn toggle_expanded(&mut self, cx: &mut Context<Self>) {
+        self.expanded = !self.expanded;
+        cx.notify();
     }
 
     pub(crate) fn set_placeholder(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -751,6 +779,8 @@ impl TextInput {
     pub(crate) fn reset(&mut self, cx: &mut Context<Self>) {
         self.suggest = None;
         self.content = "".into();
+        // RC auto-collapses the expanded composer when empty (m14 P2).
+        self.expanded = false;
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -952,8 +982,15 @@ fn locate_offset(line_starts: &[usize], line_lens: &[usize], offset: usize) -> (
 }
 
 /// Row count actually shown for `rows` of content.
-fn visible_rows(rows: usize) -> usize {
-    rows.clamp(1, COMPOSER_MAX_ROWS)
+fn visible_rows(rows: usize, expanded: bool) -> usize {
+    rows.clamp(
+        1,
+        if expanded {
+            COMPOSER_EXPANDED_ROWS
+        } else {
+            COMPOSER_MAX_ROWS
+        },
+    )
 }
 
 /// Rows scrolled past so the cursor row stays inside the visible window.
@@ -1181,7 +1218,7 @@ impl Element for TextElement {
         };
 
         let line_height = window.line_height();
-        let visible = visible_rows(shape.total_rows);
+        let visible = visible_rows(shape.total_rows, input.expanded);
 
         // Cursor position and the follow-cursor scroll.
         let mut scroll = px(0.);
@@ -1571,9 +1608,14 @@ mod tests {
 
     #[test]
     fn visible_rows_clamps_both_ways() {
-        assert_eq!(visible_rows(0), 1);
-        assert_eq!(visible_rows(3), 3);
-        assert_eq!(visible_rows(50), COMPOSER_MAX_ROWS);
+        assert_eq!(visible_rows(0, false), 1);
+        assert_eq!(visible_rows(3, false), 3);
+        assert_eq!(visible_rows(50, false), COMPOSER_MAX_ROWS);
+        assert_eq!(
+            visible_rows(50, true),
+            COMPOSER_EXPANDED_ROWS,
+            "the expanded cap replaces the default one"
+        );
     }
 
     #[test]
@@ -1595,7 +1637,7 @@ mod tests {
         let two_lines = line_starts("hello\nworld");
         assert_eq!(one_line.len(), 1);
         assert_eq!(two_lines.len(), 2);
-        assert_eq!(visible_rows(two_lines.len()), 2);
+        assert_eq!(visible_rows(two_lines.len(), false), 2);
     }
 
     #[test]

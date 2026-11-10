@@ -76,12 +76,32 @@ pub(crate) struct ChatRoot {
     /// Manual theme selection (operator request): None follows the
     /// system appearance; Dark/Light pin it.
     theme_override: Option<gpui::WindowAppearance>,
+    /// The keyboard-shortcuts overlay (m14 P2, RC
+    /// KeyboardShortcutsModal, opened by ? outside the inputs).
+    shortcuts_open: bool,
     /// Per-message edit drafts keyed by `(room_id, msg_id)` (m14
     /// P2, RC CurrentEditingMessage): an in-progress edit keeps
     /// its own text across hops and re-entries; submission or
     /// Escape discards it.
     edit_drafts: std::collections::HashMap<(String, String), String>,
 }
+
+/// The shortcuts overlay's rows (m14 P2): OUR actual bindings —
+/// the table follows the code, not the wish list.
+const SHORTCUT_TABLE: &[(&str, &str)] = &[
+    ("Enter", "send the message"),
+    ("Shift+Enter", "newline"),
+    ("Ctrl+B / Ctrl+I", "bold / italic"),
+    ("S button", "strikethrough"),
+    ("↑ / ↓", "edit previous / next own message"),
+    ("Ctrl+← / →", "move by word"),
+    ("Ctrl+Shift+← / →", "select by word"),
+    ("Tab", "accept suggestion"),
+    ("Escape", "cancel edit · clear search · close overlays"),
+    ("Ctrl+K", "jump to room search"),
+    ("Ctrl+= / Ctrl+− / Ctrl+0", "zoom in / out / reset"),
+    ("?", "this help (outside the inputs)"),
+];
 
 /// How long a toast lives before auto-dismiss (m9 finding 20).
 const TOAST_AUTO_DISMISS: std::time::Duration = std::time::Duration::from_secs(6);
@@ -295,6 +315,7 @@ impl ChatRoot {
             draft_save_gen: 0,
             hovered_toasts: Default::default(),
             theme_override: None,
+            shortcuts_open: false,
             edit_drafts: Default::default(),
             search_rooms,
             focus: cx.focus_handle(),
@@ -481,6 +502,11 @@ impl ChatRoot {
     /// Escape: an edit backs out to the room's draft; with no edit an
     /// active search clears (m12 F12).
     fn cancel_editing(&mut self, cx: &mut Context<Self>) {
+        if self.shortcuts_open {
+            self.shortcuts_open = false;
+            cx.notify();
+            return;
+        }
         if let Some((edit_room, msg_id)) = self.editing.take() {
             // Escape discards the per-message draft (RC cancel,
             // m14 P2); the room draft comes back.
@@ -1501,6 +1527,74 @@ impl gpui::Render for ChatRoot {
             }),
         );
 
+        // Keyboard-shortcuts overlay (m14 P2, RC
+        // KeyboardShortcutsModal): a centered modal over a dimmed
+        // backdrop; deferred so it paints above everything.
+        let shortcuts_overlay = self.shortcuts_open.then(|| {
+            let this = cx.entity();
+            deferred(
+                div()
+                    .id("shortcuts-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui::black().opacity(0.4))
+                    .occlude()
+                    .on_click({
+                        let this = this.clone();
+                        move |_: &gpui::ClickEvent, _: &mut gpui::Window, cx: &mut gpui::App| {
+                            this.update(cx, |chat, cx| {
+                                chat.shortcuts_open = false;
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child(
+                        div()
+                            .occlude()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .p_3()
+                            .min_w(rems(26.0))
+                            .rounded_md()
+                            .shadow_lg()
+                            .bg(rgb(p.panel))
+                            .border_1()
+                            .border_color(rgb(p.border))
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(p.text))
+                                    .child("Keyboard shortcuts"),
+                            )
+                            .children(SHORTCUT_TABLE.iter().map(|(keys, description)| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_4()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(p.text))
+                                            .child(SharedString::from(*keys)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(p.muted))
+                                            .child(SharedString::from(*description)),
+                                    )
+                            })),
+                    ),
+            )
+        });
+
         // Search strip: a query switches the pane to local results.
         let search_this = cx.entity();
         let search_strip = {
@@ -2364,7 +2458,40 @@ impl gpui::Render for ChatRoot {
             .child(fmt_button("S", "fmt-strike", "~"))
             .child(fmt_button("</>", "fmt-code", "`"))
             .child(emoji_button)
-            .children(emoji_picker);
+            .children(emoji_picker)
+            .children({
+                // Expand toggle (m14 P2, RC auto-grow's expand
+                // button): offered once the content needs more than
+                // two rows; raised cap while expanded.
+                let composer = self.composer.clone();
+                let expandable = self.composer.read(cx).is_expandable();
+                let expanded = self.composer.read(cx).is_expanded();
+                expandable.then(|| {
+                    div()
+                        .id("composer-expand")
+                        .role(Role::Button)
+                        .aria_label(if expanded {
+                            "Collapse composer"
+                        } else {
+                            "Expand composer"
+                        })
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_xs()
+                        .text_xs()
+                        .text_color(rgb(p.muted))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(p.row_hover)).text_color(rgb(p.text)))
+                        .child(if expanded { "collapse" } else { "expand" })
+                        .on_click(
+                            move |_: &gpui::ClickEvent,
+                                  _: &mut gpui::Window,
+                                  cx: &mut gpui::App| {
+                                composer.update(cx, |composer, cx| composer.toggle_expanded(cx));
+                            },
+                        )
+                })
+            });
 
         // The pending quote card rides above the composer; a foreign
         // room's quote never shows (m12 F6).
@@ -2484,6 +2611,14 @@ impl gpui::Render for ChatRoot {
                 let Some(ch) = key.chars().next() else {
                     return;
                 };
+                if ch == '?' {
+                    // Shortcuts overlay (m14 P2, RC Shift+?): typed
+                    // question marks inside an input never reach here.
+                    chat.shortcuts_open = !chat.shortcuts_open;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 let ch = if shift_only {
                     ch.to_ascii_uppercase()
                 } else {
@@ -2501,6 +2636,7 @@ impl gpui::Render for ChatRoot {
             .on_action(cx.listener(Self::zoom_reset))
             .child(top_bar)
             .child(error)
+            .children(shortcuts_overlay)
             .child(
                 div()
                     .flex()
