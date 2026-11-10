@@ -1807,7 +1807,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn preview_messages_cache_without_touching_unread() {
         let mut state = ChatState {
             active_room: Some("other".to_owned()),
@@ -1832,7 +1831,7 @@ mod tests {
             state.rooms[0].unread, 3,
             "peeking must not mark the room read"
         );
-        assert!(state.first_unread.get("general").is_none());
+        assert!(!state.first_unread.contains_key("general"));
         state.apply(ChatEvent::PreviewMessages {
             room_id: "general".to_owned(),
             messages: vec![message("m1", "a", "hello"), message("m2", "a", "again")],

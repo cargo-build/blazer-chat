@@ -1355,11 +1355,10 @@ impl gpui::Render for ChatRoot {
                                                         return;
                                                     }
                                                     chat.preview_room = Some(room_id.clone());
-                                                    if chat
+                                                    if !chat
                                                         .state
                                                         .messages
-                                                        .get(room_id.as_str())
-                                                        .is_none()
+                                                        .contains_key(room_id.as_str())
                                                     {
                                                         chat.send_command(
                                                             ChatCommand::PreviewRoom {
@@ -2871,6 +2870,7 @@ impl gpui::Render for ChatRoot {
             .child(top_bar)
             .child(error)
             .children(shortcuts_overlay)
+            .children(preview_card)
             .child(
                 div()
                     .flex()
