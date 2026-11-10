@@ -165,6 +165,20 @@ pub struct WireMessage {
     pub attachments: Option<Vec<WireImageAttachment>>,
 }
 
+/// `spotlight` (RC global search, m17): only the message section
+/// is consumed — the room-jump list stays local.
+#[derive(Deserialize)]
+pub struct SpotlightResponse {
+    #[serde(default)]
+    pub messages: Option<SpotlightMessageSection>,
+}
+
+#[derive(Deserialize)]
+pub struct SpotlightMessageSection {
+    #[serde(default)]
+    pub result: Option<Vec<WireMessage>>,
+}
+
 #[derive(Deserialize)]
 pub struct WireFile {
     #[serde(rename = "_id")]

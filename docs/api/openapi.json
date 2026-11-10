@@ -1592,6 +1592,54 @@
           }
         }
       }
+    },
+    "/api/v1/spotlight": {
+      "get": {
+        "tags": [
+          "search"
+        ],
+        "summary": "Global search (spotlight)",
+        "description": "Cross-room message search behind the header search panel (m17). Read-only; the client reads messages.result and maps it like history. Requires the session token; the server may refuse by permission \u2014 the client degrades to local cache search.",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The text needle."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message/user/room sections; only messages.result is consumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "messages": {
+                      "type": "object",
+                      "properties": {
+                        "total": {
+                          "type": "integer"
+                        },
+                        "result": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/WireMessage"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

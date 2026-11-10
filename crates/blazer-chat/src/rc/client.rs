@@ -352,6 +352,21 @@ impl<T: Transport> RcClient<T> {
 
     /// One history slice: up to 50 messages strictly before `cursor`
     /// (the oldest cached timestamp). `None` fetches the newest slice.
+    /// RC global search (`spotlight`, m17): cross-room message
+    /// hits, mapped through the same wire decoding as history.
+    pub async fn spotlight(&mut self, query: &str) -> Result<Vec<Msg>, RcError> {
+        let path = format!("/api/v1/spotlight?query={}", encode_query_param(query));
+        let body = self.call("GET", &path, None, true).await?;
+        let parsed: crate::rc::wire::SpotlightResponse = Self::parse(&body, "spotlight")?;
+        Ok(parsed
+            .messages
+            .map(|section| section.result.unwrap_or_default())
+            .into_iter()
+            .flatten()
+            .map(|message| self.message_into_msg(message))
+            .collect())
+    }
+
     pub async fn history_page(
         &mut self,
         room_id: &str,

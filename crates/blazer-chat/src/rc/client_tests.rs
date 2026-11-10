@@ -809,3 +809,39 @@ fn multipart_filename_cannot_inject() {
         "quotes flatten, the disposition stays one line"
     );
 }
+
+#[test]
+fn spotlight_fixture_maps_message_hits() {
+    // The m17 global search: the real RC shape keeps sections for
+    // messages/users/rooms; only messages.result is consumed and
+    // mapped through the same decoding as history.
+    const SPOTLIGHT_FIXTURE: &str = r#"{
+        "messages": {
+            "total": 1,
+            "result": [
+                {
+                    "_id": "m1",
+                    "rid": "general",
+                    "msg": "the needle",
+                    "ts": "2026-11-10T00:00:00.000Z",
+                    "u": { "_id": "u1", "username": "alice", "name": "Alice" }
+                }
+            ]
+        },
+        "users": { "total": 0, "result": [] },
+        "rooms": { "total": 0, "result": [] }
+    }"#;
+    let routes: Vec<(&'static str, u16, &'static str)> = vec![
+        ("login", 200, LOGIN_BODY),
+        ("spotlight", 200, SPOTLIGHT_FIXTURE),
+    ];
+    let transport = FakeTransport::answering(&routes);
+    let mut rc = client(transport);
+    futures_lite::future::block_on(rc.login("alice", "secret")).unwrap();
+    let hits = futures_lite::future::block_on(rc.spotlight("needle")).unwrap();
+    assert_eq!(hits.len(), 1, "the message section maps");
+    assert_eq!(hits[0].id, "m1");
+    assert_eq!(hits[0].room_id, "general");
+    assert_eq!(hits[0].text, "the needle");
+    assert_eq!(hits[0].sender, "alice");
+}

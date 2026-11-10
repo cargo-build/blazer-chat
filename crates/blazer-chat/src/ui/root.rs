@@ -20,7 +20,7 @@ use super::{
     ZoomIn, ZoomOut, ZoomReset,
     input::{Suggest, TextInput, TextInputEvent},
 };
-use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, UiSnapshot};
+use crate::app::{ChatCommand, ChatEvent, ChatService, ChatState, SearchScope, UiSnapshot};
 use crate::rc::{Msg, Room};
 use gpui::WindowAppearance;
 
@@ -89,6 +89,9 @@ pub(crate) struct ChatRoot {
     preview_room: Option<String>,
     preview_hover: Option<(String, u64)>,
     preview_gen: u64,
+    /// The expanded search panel (m17, the operator's лупа/plus
+    /// idea): scope segment + pinned chips under the header.
+    search_expanded: bool,
     /// Per-message edit drafts keyed by `(room_id, msg_id)` (m14
     /// P2, RC CurrentEditingMessage): an in-progress edit keeps
     /// its own text across hops and re-entries; submission or
@@ -330,6 +333,7 @@ impl ChatRoot {
             preview_room: None,
             preview_hover: None,
             preview_gen: 0,
+            search_expanded: false,
             edit_drafts: Default::default(),
             search_rooms,
             focus: cx.focus_handle(),
@@ -985,6 +989,11 @@ impl ChatRoot {
     fn run_search(&mut self, cx: &mut Context<Self>) {
         let query = self.search.read(cx).content().trim().to_owned();
         self.search_rooms = room_hits(&query, &self.state.rooms);
+        // The local echo used to ride the command's event; Search is
+        // a server call now (m17) — own the echo here so the stale
+        // guard in the ServerSearch fold compares correctly.
+        self.state.search_query = (!query.is_empty()).then(|| query.clone());
+        self.state.server_search = None;
         self.send_command(ChatCommand::Search(query.clone()));
         cx.notify();
     }
@@ -1804,7 +1813,10 @@ impl gpui::Render for ChatRoot {
                         .hover(|style| style.bg(rgb(p.row_hover)))
                         .child("🔍")
                         .on_click(move |_, _, cx| {
-                            search_this.update(cx, |chat, cx| chat.run_search(cx));
+                            search_this.update(cx, |chat, cx| {
+                                chat.search_expanded = true;
+                                chat.run_search(cx);
+                            });
                         }),
                 )
         };
@@ -1943,7 +1955,24 @@ impl gpui::Render for ChatRoot {
         let pane = if let Some(query) = self.state.search_query.as_deref()
             && !query.trim().is_empty()
         {
-            let hits = self.state.search(query);
+            // Merge (m17): fresh server hits replace the local cache
+            // scan — the spotlight already covers every room the cache
+            // would reach; local stays the fallback while the request
+            // is in flight or when the server refused the search.
+            // The scope segment filters at render (UI-originated state).
+            let hits = match &self.state.server_search {
+                Some((server_query, server_hits)) if server_query == query => server_hits
+                    .iter()
+                    .filter(|hit| self.state.search_scope.admits(hit.kind))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                _ => self
+                    .state
+                    .search(query)
+                    .into_iter()
+                    .filter(|hit| self.state.search_scope.admits(hit.kind))
+                    .collect(),
+            };
             let mut results: Vec<gpui::AnyElement> = self
                 .search_rooms
                 .iter()
@@ -2868,6 +2897,158 @@ impl gpui::Render for ChatRoot {
             .on_action(cx.listener(Self::zoom_out))
             .on_action(cx.listener(Self::zoom_reset))
             .child(top_bar)
+            .children(self.search_expanded.then(|| {
+                // The expanded search panel (m17, the operator's
+                // лупа/plus idea): scope segment + pinned queries.
+                let this = cx.entity();
+                let scope_buttons: Vec<gpui::AnyElement> = [
+                    (SearchScope::All, "all"),
+                    (SearchScope::Direct, "direct"),
+                    (SearchScope::Channels, "channels"),
+                ]
+                .iter()
+                .map(|(scope, label)| {
+                    let active = self.state.search_scope == *scope;
+                    div()
+                        .id(SharedString::from(format!("scope-{label}")))
+                        .role(Role::Button)
+                        .px_2()
+                        .py_0p5()
+                        .rounded_xs()
+                        .text_xs()
+                        .font_weight(if active {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
+                        .text_color(rgb(if active { p.text } else { p.muted }))
+                        .bg(rgb(if active { p.accent_fill } else { p.panel_alt }))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(p.row_hover)))
+                        .on_click({
+                            let this = this.clone();
+                            move |_, _, cx| {
+                                this.update(cx, |chat, cx| {
+                                    chat.state.search_scope = *scope;
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .child(*label)
+                })
+                .map(|element| element.into_any_element())
+                .collect();
+                let chips: Vec<gpui::AnyElement> = self
+                    .state
+                    .pinned_searches
+                    .iter()
+                    .map(|(query, scope)| {
+                        let this = this.clone();
+                        let pinned_query = query.clone();
+                        div()
+                            .id(SharedString::from(format!("pin-{query}")))
+                            .role(Role::Button)
+                            .flex_none()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded_xs()
+                            .bg(rgb(p.panel))
+                            .border_1()
+                            .border_color(rgb(p.border))
+                            .text_xs()
+                            .text_color(rgb(p.text))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(p.row_hover)))
+                            .on_click({
+                                let this = this.clone();
+                                let scope = *scope;
+                                move |_, _, cx| {
+                                    this.update(cx, |chat, cx| {
+                                        chat.state.search_scope = scope;
+                                        chat.search.update(cx, |box_, cx| {
+                                            box_.set_content(&pinned_query, cx)
+                                        });
+                                        chat.run_search(cx);
+                                    });
+                                }
+                            })
+                            .child(SharedString::from(format!("{query} · {}", scope.label())))
+                            .child({
+                                let this = this.clone();
+                                let pinned_query = query.clone();
+                                div()
+                                    .id(SharedString::from(format!("unpin-{query}")))
+                                    .px_1()
+                                    .text_xs()
+                                    .text_color(rgb(p.muted))
+                                    .cursor_pointer()
+                                    .hover(|style| style.text_color(rgb(p.danger_text)))
+                                    .child("✖")
+                                    .on_click(move |_, _, cx| {
+                                        this.update(cx, |chat, cx| {
+                                            chat.state
+                                                .pinned_searches
+                                                .retain(|(pinned, _)| pinned != &pinned_query);
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                    })
+                    .map(|element| element.into_any_element())
+                    .collect();
+                let plus = self
+                    .search
+                    .read(cx)
+                    .content()
+                    .trim()
+                    .is_empty()
+                    .then_some(())
+                    .map(|_| {
+                        let this = this.clone();
+                        div()
+                            .id("pin-current")
+                            .role(Role::Button)
+                            .px_1p5()
+                            .rounded_xs()
+                            .text_xs()
+                            .text_color(rgb(p.muted))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(p.row_hover)).text_color(rgb(p.text)))
+                            .child("+ pin")
+                            .on_click(move |_, _, cx| {
+                                this.update(cx, |chat, cx| {
+                                    let query = chat.search.read(cx).content().trim().to_owned();
+                                    if !query.is_empty() {
+                                        if !chat
+                                            .state
+                                            .pinned_searches
+                                            .iter()
+                                            .any(|(pinned, _)| pinned == &query)
+                                        {
+                                            chat.state
+                                                .pinned_searches
+                                                .push((query, chat.state.search_scope));
+                                        }
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                    });
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .bg(rgb(p.panel_alt))
+                    .border_b_1()
+                    .border_color(rgb(p.border))
+                    .children(scope_buttons)
+                    .child(div().flex_1())
+                    .children(chips)
+                    .children(plus)
+            }))
             .child(error)
             .children(shortcuts_overlay)
             .children(preview_card)

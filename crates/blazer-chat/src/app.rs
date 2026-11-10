@@ -173,6 +173,12 @@ pub enum ChatEvent {
         room_id: String,
         messages: Vec<Msg>,
     },
+    /// Server spotlight results for the query (m17); the fold
+    /// resolves names/kinds and drops stale arrivals.
+    ServerSearch {
+        query: String,
+        messages: Vec<Msg>,
+    },
     /// The cached slice painted instantly; the refresh follows.
     CachedMessages {
         room_id: String,
@@ -295,6 +301,14 @@ pub struct ChatState {
     /// Notifications for rooms other than the active one, pending
     /// display (newest last, bounded).
     pub notifications: Vec<crate::rc::Notification>,
+    /// The header search's scope segment (m17).
+    pub search_scope: SearchScope,
+    /// Server search results for the CURRENT query (m17): stale
+    /// once the query changes; local cache hits always render too.
+    pub server_search: Option<(String, Vec<SearchHit>)>,
+    /// Pinned searches (m17, the plus): independent query+scope
+    /// pairs, session-only, newest last.
+    pub pinned_searches: Vec<(String, SearchScope)>,
     /// The last toast id handed out (m9 finding 20): stable ids
     /// keep element identity and removal honest.
     notification_seq: u64,
@@ -337,6 +351,42 @@ pub struct SearchHit {
     pub room: String,
     pub sender: String,
     pub text: String,
+    /// The room's kind, carried for the scope filter (m17): the
+    /// render-time segment (all/direct/channels) filters on it.
+    pub kind: char,
+}
+
+/// The header search's scope segment (m17): `all` is everything
+/// the search reaches; `direct` filters DMs, `channels` covers the
+/// channel-like rooms (public 'c' AND private groups 'p' — both are
+/// "channel" conversations to the operator). RC's `chosen` (a
+/// user-picked room set) is a later slice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchScope {
+    #[default]
+    All,
+    Direct,
+    Channels,
+}
+
+impl SearchScope {
+    /// Whether a hit with this room kind passes the scope.
+    pub fn admits(&self, kind: char) -> bool {
+        match self {
+            Self::All => true,
+            Self::Direct => kind == 'd',
+            Self::Channels => kind == 'c' || kind == 'p',
+        }
+    }
+
+    /// The pinned-chip label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Direct => "direct",
+            Self::Channels => "channels",
+        }
+    }
 }
 
 impl ChatState {
@@ -638,6 +688,28 @@ impl ChatState {
                 self.search_query = (!query.is_empty()).then_some(query);
                 None
             }
+            ChatEvent::ServerSearch { query, messages } => {
+                // Stale-guard: a newer typed query owns the panel.
+                if self.search_query.as_deref() == Some(query.as_str()) {
+                    let hits = messages
+                        .iter()
+                        .map(|message| {
+                            let room = self.rooms.iter().find(|room| room.id == message.room_id);
+                            SearchHit {
+                                kind: room.map(|room| room.kind).unwrap_or('c'),
+                                room: room
+                                    .map(|room| room.name.clone())
+                                    .unwrap_or_else(|| message.room_id.clone()),
+                                room_id: message.room_id.clone(),
+                                sender: message.sender.clone(),
+                                text: message.text.clone(),
+                            }
+                        })
+                        .collect();
+                    self.server_search = Some((query.clone(), hits));
+                }
+                None
+            }
             ChatEvent::ThreadMessages {
                 room_id,
                 tmid,
@@ -784,6 +856,7 @@ impl ChatState {
                         room: room.name.clone(),
                         sender: message.sender.clone(),
                         text: message.text.clone(),
+                        kind: room.kind,
                     });
                     if hits.len() >= 50 {
                         return hits;
@@ -1378,7 +1451,17 @@ async fn execute<T: Transport>(
             }
         }
         // Local search needs no I/O: the state owns the cache.
-        ChatCommand::Search(query) => ChatEvent::SearchQuery(query),
+        ChatCommand::Search(query) => match client.spotlight(&query).await {
+            // Hits carry raw messages; the fold resolves room
+            // names/kinds against state (execute has no state).
+            Ok(messages) => ChatEvent::ServerSearch { query, messages },
+            Err(error) => {
+                // Spotlight can be permission-gated on the server
+                // (m17): local cache hits keep the search functional.
+                eprintln!("blazer-chat: spotlight: {error}");
+                ChatEvent::SearchQuery(query)
+            }
+        },
         ChatCommand::OpenThread { tmid } => {
             let tmid_owned = tmid.clone();
             match client.thread_messages(&tmid).await {
@@ -1840,6 +1923,64 @@ mod tests {
             state.messages["general"].len(),
             2,
             "re-previews merge, never duplicate"
+        );
+    }
+
+    #[test]
+    fn search_scope_admits_by_room_kind() {
+        use SearchScope::{All, Channels, Direct};
+        for kind in ['c', 'p', 'd'] {
+            assert!(All.admits(kind), "all admits every kind");
+        }
+        assert!((Direct.admits('d')));
+        assert!(!Direct.admits('c'));
+        assert!(!Direct.admits('p'));
+        assert!((Channels.admits('c')));
+        assert!((Channels.admits('p')), "private groups are channels");
+        assert!(!Channels.admits('d'));
+    }
+
+    #[test]
+    fn server_search_fold_resolves_names_and_drops_stale() {
+        // The message() helper pins room_id "GENERAL"; the room
+        // resolves by id and the fold carries its real name/kind.
+        let mut state = ChatState {
+            rooms: vec![crate::rc::Room {
+                id: "GENERAL".to_owned(),
+                name: "general".to_owned(),
+                kind: 'c',
+                unread: 0,
+                lm: None,
+                preview: None,
+                topic: None,
+                mentions: 0,
+            }],
+            search_query: Some("needle".to_owned()),
+            ..ChatState::default()
+        };
+        state.apply(ChatEvent::ServerSearch {
+            query: "needle".to_owned(),
+            messages: vec![message("m1", "alice", "found the needle")],
+        });
+        let (query, hits) = state.server_search.as_ref().expect("fresh query folds");
+        assert_eq!(query, "needle");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].room, "general", "the room name resolves");
+        assert_eq!(hits[0].kind, 'c', "the room kind resolves");
+
+        // A newer typed query owns the panel: the in-flight reply is
+        // dropped instead of flashing stale results — the stored hits
+        // stay the previous fresh ones.
+        state.search_query = Some("newer".to_owned());
+        state.apply(ChatEvent::ServerSearch {
+            query: "needle".to_owned(),
+            messages: vec![message("m2", "bob", "stale")],
+        });
+        let (stored_query, stored_hits) = state.server_search.as_ref().unwrap();
+        assert_eq!(stored_query, "needle", "stale arrival did not overwrite");
+        assert_eq!(
+            stored_hits[0].sender, "alice",
+            "stale hit's message never lands"
         );
     }
 
