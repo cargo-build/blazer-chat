@@ -1187,6 +1187,20 @@ impl gpui::Render for ChatRoot {
                         let room_id = room.id.clone();
                         let selected = active.as_deref() == Some(room.id.as_str());
                         let unread = room.unread;
+                        // A selected row repaints all of its text in
+                        // accent_fg over the accent fill (m18: the
+                        // operator's «закрашивать активным цветом») —
+                        // one derived palette instead of conditionals
+                        // at every child.
+                        let p = if selected {
+                            Palette {
+                                text: p.accent_fg,
+                                muted: p.accent_fg,
+                                ..p
+                            }
+                        } else {
+                            p
+                        };
                         let this = this.clone();
                         let menu_open = root.room_menu.as_deref() == Some(room.id.as_str());
                         let room_menu = menu_open.then(|| {
@@ -1261,15 +1275,16 @@ impl gpui::Render for ChatRoot {
                             .text_sm()
                             .overflow_hidden()
                             .cursor_pointer()
-                            // Selection = accent rail + row_hover (two
-                            // cues, WCAG 1.4.1); the rail keeps its slot
-                            // transparent when unselected so the row
-                            // never shifts, and hover stays gated off
+                            // Selection = the accent fill with all
+                            // row text flipped to accent_fg (the
+                            // operator's «закрашивать активным
+                            // цветом» — the trio's subtle rail read
+                            // as too quiet). Hover stays gated off
                             // while selected (m5 finding 4).
                             .border_l_3()
                             .when(selected, |row| {
-                                row.bg(rgb(p.row_hover))
-                                    .border_color(rgb(p.accent))
+                                row.bg(rgb(p.accent_fill))
+                                    .border_color(rgb(p.accent_fill))
                                     .aria_selected(true)
                             })
                             .when(!selected, |row| {

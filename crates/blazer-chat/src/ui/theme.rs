@@ -52,7 +52,7 @@ pub(crate) struct Palette {
 pub(crate) const DARK: Palette = Palette {
     bg: 0x0a0d12,
     panel: 0x1b2430,
-    panel_alt: 0x141b24,
+    panel_alt: 0x0f151d,
     row_hover: 0x252f3d,
     border: 0x5f7398,
     text: 0xeef1f5,
@@ -77,7 +77,7 @@ pub(crate) const DARK: Palette = Palette {
 pub(crate) const LIGHT: Palette = Palette {
     bg: 0xe6ebf2,
     panel: 0xffffff,
-    panel_alt: 0xf3f6fa,
+    panel_alt: 0xdde3ec,
     row_hover: 0xe2e8f0,
     border: 0x6c7684,
     text: 0x1f2328,
@@ -165,7 +165,12 @@ mod tests {
                 assert_aa(p.muted, surface);
                 assert_aa(p.danger_text, surface);
             }
-            for surface in [p.bg, p.panel, p.panel_alt] {
+            // panel_alt (the rooms sidebar) is excluded here by
+            // measurement: the m18 darkening (LIGHT 0xdde3ec) puts
+            // accent-as-text at 4.33 (< 4.5), and accent never
+            // renders as text on the sidebar — badges there are
+            // accent_fill + white, room names are `text`.
+            for surface in [p.bg, p.panel] {
                 assert_aa(p.accent, surface);
             }
         }

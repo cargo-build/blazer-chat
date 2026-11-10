@@ -183,7 +183,9 @@ pub(crate) fn avatar(sender: &str, p: Palette, size: Rems) -> gpui::Div {
     div()
         .flex_none()
         .size(size)
-        .rounded_full()
+        // RC default: square avatars with a small radius (m18) —
+        // the round disc read as a different product.
+        .rounded_sm()
         .bg(user_color(sender))
         .flex()
         .items_center()
